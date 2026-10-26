@@ -56,8 +56,9 @@ that Go cannot be optimized or that Rust automatically improves memory or speed.
 
 Use dedicated disposable fixtures for writes and failure injection. Existing
 readers, mounts, data, writer schedules and credentials are not part of this
-development change. The new repository starts private; do not change visibility
-or publish private operational evidence without an explicit instruction.
+development change. The user changed the repository to public and confirmed
+that choice. Source, plans and reproducible test/benchmark artifacts are public;
+credentials and private operational evidence are not project artifacts.
 
 All implementation work is governed by the BMAD build loop and the repository's
 `AGENTS.md`, especially the performance gate and mandatory reuse-first rule.

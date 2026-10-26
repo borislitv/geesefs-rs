@@ -1,0 +1,1647 @@
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use crate::{
+    backend::{Store, s3::ObjectHead},
+    budget::{Block, Budget},
+    config::Config,
+    error::{Error, Result},
+    inode::{Inode, State, file_type},
+    namespace::{MoveLease, Namespace, child},
+    read,
+    write::{self, MAX_IO, PART_SIZE},
+};
+use fuser::{FileAttr, FileType};
+use futures_util::{StreamExt, stream::FuturesUnordered};
+use tokio::sync::Semaphore;
+
+pub struct Filesystem {
+    pub config: Arc<Config>,
+    pub store: Arc<dyn Store>,
+    pub namespace: Mutex<Namespace>,
+    pub ingress: Budget,
+    data: Budget,
+    cache: Mutex<crate::cache::ReadCache>,
+    flush_lane: Budget,
+    flushers: Arc<Semaphore>,
+    upload_admission: write::UploadAdmission,
+    metadata_slots: Arc<Semaphore>,
+    closing: AtomicBool,
+}
+
+#[derive(Clone, Debug)]
+pub struct DirEntry {
+    pub ino: u64,
+    pub name: String,
+    pub kind: FileType,
+}
+
+/// Effective owner budgets, not RSS or allocator measurements. The cache shares
+/// the full data lane with dirty/pinned/temporary bytes; no hidden half-cache cap.
+#[derive(Debug, serde::Serialize)]
+pub struct EffectiveBudgets {
+    pub payload_limit_bytes: usize,
+    pub data_shared_bytes: usize,
+    pub read_cache_policy_bytes: usize,
+    pub ingress_bytes: usize,
+    pub flush_bytes: usize,
+    pub data_used_bytes: usize,
+    pub ingress_used_bytes: usize,
+    pub flush_used_bytes: usize,
+    pub requested_read_ahead_bytes: usize,
+    pub requested_small_window_bytes: usize,
+    pub requested_large_window_bytes: usize,
+    pub max_effective_window_bytes: usize,
+    pub read_parallel_chunk_bytes: usize,
+    pub upload_chunk_bytes: usize,
+    pub max_read_tasks_per_window: usize,
+    pub max_request_tasks: usize,
+    pub max_flush_operations: usize,
+    pub cache_entry_limit: u64,
+    pub single_part_limit_bytes: u64,
+    pub max_object_bytes: u64,
+    pub negative_entries_per_directory: usize,
+    pub max_parallel_parts_per_file: usize,
+    pub max_upload_requests: usize,
+    pub max_copy_requests: usize,
+    pub max_queued_upload_jobs: usize,
+    pub max_metadata_resolution_jobs: usize,
+    pub metadata_resolution_jobs_in_use: usize,
+}
+
+pub fn not_found(error: &Error) -> bool {
+    matches!(error, Error::Fs(code) if *code == libc::ENOENT)
+        || matches!(error, Error::Backend { code,.. } if matches!(code.as_str(), "NotFound"|"NoSuchKey"|"404"))
+}
+
+impl Filesystem {
+    pub fn effective_budgets(&self) -> EffectiveBudgets {
+        let window = self
+            .data
+            .limit()
+            .saturating_sub(MAX_IO)
+            .min(u32::MAX as usize - MAX_IO)
+            / 2;
+        EffectiveBudgets {
+            payload_limit_bytes: self.ingress.limit() + self.data.limit() + self.flush_lane.limit(),
+            data_shared_bytes: self.data.limit(),
+            read_cache_policy_bytes: self.data.limit(),
+            ingress_bytes: self.ingress.limit(),
+            flush_bytes: self.flush_lane.limit(),
+            data_used_bytes: self.data.used(),
+            ingress_used_bytes: self.ingress.used(),
+            flush_used_bytes: self.flush_lane.used(),
+            requested_read_ahead_bytes: self.config.read_ahead * 1024,
+            requested_small_window_bytes: self.config.read_ahead_small * 1024,
+            requested_large_window_bytes: self.config.read_ahead_large * 1024,
+            max_effective_window_bytes: window,
+            read_parallel_chunk_bytes: (self.config.read_ahead_parallel * 1024).min(window),
+            upload_chunk_bytes: crate::upload_body::CHUNK_SIZE,
+            max_read_tasks_per_window: self.config.max_requests,
+            max_request_tasks: self.config.max_requests,
+            max_flush_operations: self.config.max_flushers,
+            cache_entry_limit: self.config.entry_limit,
+            single_part_limit_bytes: self.config.single_part.max(5) * 1024 * 1024,
+            max_object_bytes: self.config.part_sizes.max_size(),
+            negative_entries_per_directory: self.config.negative_lookup_cache_size,
+            max_parallel_parts_per_file: self.config.max_parallel_parts,
+            max_upload_requests: self.config.max_flushers,
+            max_copy_requests: self.config.max_parallel_copy,
+            max_queued_upload_jobs: self.config.max_requests,
+            max_metadata_resolution_jobs: self.config.max_requests,
+            metadata_resolution_jobs_in_use: self.config.max_requests
+                - self.metadata_slots.available_permits(),
+        }
+    }
+    // A failed/cancelled directory move may already have drained source keys.
+    // Keep mutators from resurrecting them until that bounded move is retried.
+    fn pending_rename(ns: &Namespace, key: &str, except: Option<u64>) -> bool {
+        key.match_indices('/')
+            .map(|(end, _)| end)
+            .chain(std::iter::once(key.len()))
+            .any(|end| {
+                ns.pending_moves
+                    .get(&key[..end])
+                    .is_some_and(|ino| Some(*ino) != except)
+            })
+    }
+    pub fn new(config: Config, store: Arc<dyn Store>) -> Result<Arc<Self>> {
+        config.validate()?;
+        let total = config
+            .memory_limit
+            .checked_mul(1024 * 1024)
+            .ok_or(Error::Fs(libc::EINVAL))?;
+        // All lanes are carved out of the requested total, not hidden additions.
+        let flush_bytes = 2 * PART_SIZE;
+        let ingress_bytes = (total / 16).max(MAX_IO);
+        let data_bytes = total
+            .checked_sub(flush_bytes + ingress_bytes)
+            .filter(|n| *n >= 4 * MAX_IO)
+            .ok_or_else(|| {
+                Error::Config(
+                    "memory-limit too small for bounded read/write/flush lanes (minimum 16 MiB)"
+                        .into(),
+                )
+            })?;
+        let config = Arc::new(config);
+        let root = Inode::new(1, "".into(), true, None, &config);
+        root.state.lock().unwrap().lookups = 1;
+        Ok(Arc::new(Self {
+            namespace: Mutex::new(Namespace::new(root, config.entry_limit as usize)),
+            ingress: Budget::new(ingress_bytes)?,
+            data: Budget::new(data_bytes)?,
+            cache: Mutex::new(crate::cache::ReadCache::with_entry_limit(
+                data_bytes as u64,
+                config.entry_limit as usize,
+            )),
+            flush_lane: Budget::new(flush_bytes)?,
+            flushers: Arc::new(Semaphore::new(config.max_flushers)),
+            upload_admission: write::UploadAdmission::new(&config),
+            metadata_slots: Arc::new(Semaphore::new(config.max_requests)),
+            closing: AtomicBool::new(false),
+            config,
+            store,
+        }))
+    }
+
+    pub fn node(&self, ino: u64) -> Result<Arc<Inode>> {
+        self.namespace.lock().unwrap().get(ino)
+    }
+
+    pub fn check_write(&self) -> Result<()> {
+        if self.config.mount_options.iter().any(|v| v == "ro") {
+            return Err(Error::Fs(libc::EROFS));
+        }
+        if self.closing.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
+        Ok(())
+    }
+
+    fn child_key(&self, parent: u64, name: &str) -> Result<String> {
+        let parent = self.node(parent)?;
+        let state = parent.state.lock().unwrap();
+        if state.deleted {
+            return Err(Error::Fs(libc::ENOENT));
+        }
+        if file_type(state.mode) != FileType::Directory {
+            return Err(Error::Fs(libc::ENOTDIR));
+        }
+        child(&state.key, name)
+    }
+
+    pub async fn lookup(&self, parent: u64, name: &str) -> Result<Arc<Inode>> {
+        let started = std::time::Instant::now();
+        let key = self.child_key(parent, name)?;
+        let (epoch, observed) = {
+            let mut ns = self.namespace.lock().unwrap();
+            if ns.is_moving(&key) {
+                return Err(Error::Fs(libc::EAGAIN));
+            }
+            if ns.is_deleting(&key) {
+                return Err(Error::Fs(libc::EAGAIN));
+            }
+            if ns.hidden(&key) {
+                return Err(Error::Fs(libc::ENOENT));
+            }
+            if let Some(node) = ns.named(&key) {
+                let state = node.state.lock().unwrap();
+                if state.rename_target.is_some()
+                    || state.data_key.is_some()
+                    || state.version > state.durable
+                    || state.metadata_known && state.fetched.elapsed() < self.config.stat_cache_ttl
+                    || file_type(state.mode) == FileType::Directory && {
+                        let prefix = format!("{key}/");
+                        ns.names
+                            .range(prefix.clone()..)
+                            .take_while(|(name, _)| name.starts_with(&prefix))
+                            .any(|(_, ino)| {
+                                ns.nodes.get(ino).is_some_and(|child| {
+                                    let state = child.state.lock().unwrap();
+                                    !state.deleted && state.version > state.durable
+                                })
+                            })
+                    }
+                {
+                    drop(state);
+                    return Ok(node);
+                }
+            }
+            if self.config.negative_lookup_cache_size > 0 {
+                let parent = ns.get(parent)?;
+                let mut state = parent.state.lock().unwrap();
+                if state
+                    .negative_lookups
+                    .get(name)
+                    .is_some_and(|when| when.elapsed() < self.config.stat_cache_ttl)
+                {
+                    return Err(Error::Fs(libc::ENOENT));
+                }
+                state.negative_lookups.remove(name);
+            }
+            (
+                ns.epoch,
+                ns.named(&key).map(|node| {
+                    let s = node.state.lock().unwrap();
+                    (
+                        node.ino,
+                        s.version,
+                        s.remote.as_ref().map(|h| h.etag.clone()),
+                    )
+                }),
+            )
+        };
+        let (directory, head) = match self.store.head(&key).await {
+            Ok(head) => (false, Some(head)),
+            Err(error) if not_found(&error) => {
+                let marker = if self.config.no_dir_object {
+                    None
+                } else {
+                    match self.store.head(&format!("{key}/")).await {
+                        Ok(head) => Some(head),
+                        Err(error) if not_found(&error) => None,
+                        Err(error) => return Err(error),
+                    }
+                };
+                if let Some(head) = marker {
+                    (true, Some(head))
+                } else {
+                    if self.config.no_implicit_dir {
+                        return Err(self.missing(parent, name, &key, epoch, started, &observed)?);
+                    }
+                    let page = self.store.list(&format!("{key}/"), Some("/"), None).await?;
+                    if page.objects.is_empty() && page.common_prefixes.is_empty() {
+                        return Err(self.missing(parent, name, &key, epoch, started, &observed)?);
+                    }
+                    (true, None)
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        let mut ns = self.namespace.lock().unwrap();
+        if ns.epoch != epoch || ns.hidden(&key) {
+            return Err(Error::Fs(libc::EAGAIN));
+        }
+        if let Some(node) = ns.named(&key) {
+            let fresh = Inode::new(node.ino, key.clone(), directory, head, &self.config);
+            let mut state = node.state.lock().unwrap();
+            if observed.as_ref()
+                != Some(&(
+                    node.ino,
+                    state.version,
+                    state.remote.as_ref().map(|h| h.etag.clone()),
+                ))
+            {
+                return Err(Error::Fs(libc::EAGAIN));
+            }
+            if state.version == state.durable {
+                let mut replacement = fresh.state.into_inner().unwrap();
+                replacement.lookups = state.lookups;
+                replacement.opens = state.opens;
+                replacement.version = state.version;
+                replacement.durable = state.durable;
+                replacement.negative_lookups = std::mem::take(&mut state.negative_lookups);
+                *state = replacement;
+            }
+            drop(state);
+            return Ok(node);
+        }
+        ns.install(&key, |ino| {
+            Inode::new(ino, key.clone(), directory, head, &self.config)
+        })
+    }
+
+    pub fn forget(&self, ino: u64, count: u64) {
+        if let Ok(node) = self.node(ino) {
+            let mut s = node.state.lock().unwrap();
+            s.lookups = s.lookups.saturating_sub(count);
+        }
+    }
+
+    /// Refresh getattr/fstat by stable inode identity, never by a possibly
+    /// replaced name. Root is synthetic; implicit directories are checked by
+    /// LIST, not by assuming a marker exists. Dirty attributes remain local.
+    pub async fn refresh_inode_if_expired(&self, ino: u64) -> Result<Arc<Inode>> {
+        let node = self.node(ino)?;
+        let (key, directory, remote, version, epoch) = {
+            let ns = self.namespace.lock().unwrap();
+            let s = node.state.lock().unwrap();
+            if s.deleted {
+                return Err(Error::Fs(libc::ENOENT));
+            }
+            if ino == 1 {
+                return Ok(node.clone());
+            }
+            if ns.is_moving(&s.key) || ns.is_deleting(&s.key) {
+                return Err(Error::Fs(libc::EAGAIN));
+            }
+            if s.version > s.durable
+                || s.rename_target.is_some()
+                || s.data_key.is_some()
+                || s.metadata_known && s.fetched.elapsed() < self.config.stat_cache_ttl
+            {
+                return Ok(node.clone());
+            }
+            let directory = file_type(s.mode) == FileType::Directory;
+            if directory {
+                let prefix = format!("{}/", s.key);
+                if ns
+                    .names
+                    .range(prefix.clone()..)
+                    .take_while(|(name, _)| name.starts_with(&prefix))
+                    .any(|(_, ino)| {
+                        ns.nodes.get(ino).is_some_and(|node| {
+                            let s = node.state.lock().unwrap();
+                            !s.deleted && s.version > s.durable
+                        })
+                    })
+                {
+                    return Ok(node.clone());
+                }
+            }
+            (
+                s.key.clone(),
+                directory,
+                s.remote.clone(),
+                s.version,
+                ns.epoch,
+            )
+        };
+        let fetched = if directory && remote.is_none() {
+            let page = self.store.list(&format!("{key}/"), Some("/"), None).await;
+            match page {
+                Ok(page) if !page.objects.is_empty() || !page.common_prefixes.is_empty() => {
+                    Ok(None)
+                }
+                Ok(_) => Err(Error::Fs(libc::ENOENT)),
+                Err(e) => Err(e),
+            }
+        } else {
+            match self
+                .store
+                .head(&if directory {
+                    format!("{key}/")
+                } else {
+                    key.clone()
+                })
+                .await
+            {
+                Ok(head) => Ok(Some(head)),
+                Err(error) if directory && not_found(&error) && !self.config.no_implicit_dir => {
+                    match self.store.list(&format!("{key}/"), Some("/"), None).await {
+                        Ok(page)
+                            if !page.objects.is_empty() || !page.common_prefixes.is_empty() =>
+                        {
+                            Ok(None)
+                        }
+                        Ok(_) => Err(Error::Fs(libc::ENOENT)),
+                        Err(e) => Err(e),
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        };
+        let mut ns = self.namespace.lock().unwrap();
+        let mut s = node.state.lock().unwrap();
+        if ns.epoch != epoch || s.deleted || s.key != key || ns.names.get(&key) != Some(&ino) {
+            return Err(Error::Fs(libc::EAGAIN));
+        }
+        if s.version != version
+            || s.remote.as_ref().map(|h| &h.etag) != remote.as_ref().map(|h| &h.etag)
+            || s.version > s.durable
+        {
+            return Ok(node.clone());
+        }
+        match fetched {
+            Ok(head) => {
+                let mut fresh = Inode::new(ino, key, directory, head, &self.config)
+                    .state
+                    .into_inner()
+                    .unwrap();
+                fresh.lookups = s.lookups;
+                fresh.opens = s.opens;
+                fresh.version = s.version;
+                fresh.durable = s.durable;
+                fresh.negative_lookups = std::mem::take(&mut s.negative_lookups);
+                *s = fresh;
+            }
+            Err(error) if not_found(&error) => {
+                s.deleted = true;
+                ns.names.remove(&key);
+                ns.epoch += 1;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        }
+        drop(s);
+        Ok(node)
+    }
+    fn missing(
+        &self,
+        parent: u64,
+        name: &str,
+        key: &str,
+        epoch: u64,
+        started: std::time::Instant,
+        observed: &Option<(u64, u64, Option<String>)>,
+    ) -> Result<Error> {
+        let mut ns = self.namespace.lock().unwrap();
+        if ns.epoch != epoch {
+            return Ok(Error::Fs(libc::EAGAIN));
+        }
+        if let Some(node) = ns.named(key) {
+            let mut state = node.state.lock().unwrap();
+            if state.version > state.durable
+                || observed.as_ref()
+                    != Some(&(
+                        node.ino,
+                        state.version,
+                        state.remote.as_ref().map(|h| h.etag.clone()),
+                    ))
+            {
+                return Ok(Error::Fs(libc::EAGAIN));
+            }
+            state.deleted = true;
+            drop(state);
+            ns.names.remove(key);
+            ns.epoch += 1;
+        }
+        if self.config.negative_lookup_cache_size > 0
+            && started.elapsed() < self.config.stat_cache_ttl
+        {
+            let node = ns.get(parent)?;
+            let mut state = node.state.lock().unwrap();
+            state
+                .negative_lookups
+                .retain(|_, when| when.elapsed() < self.config.stat_cache_ttl);
+            if state.negative_lookups.len() >= self.config.negative_lookup_cache_size
+                && !state.negative_lookups.contains_key(name)
+                && let Some(oldest) = state
+                    .negative_lookups
+                    .iter()
+                    .min_by_key(|(_, when)| *when)
+                    .map(|(name, _)| name.clone())
+            {
+                state.negative_lookups.remove(&oldest);
+            }
+            state.negative_lookups.insert(name.into(), started);
+        }
+        Ok(Error::Fs(libc::ENOENT))
+    }
+
+    pub fn reference(&self, node: &Inode) {
+        node.state.lock().unwrap().lookups += 1;
+    }
+
+    pub async fn link(&self, ino: u64, parent: u64, name: &str) -> Result<Arc<Inode>> {
+        if !self.config.emulate_hardlinks_as_symlinks {
+            return Err(Error::Fs(libc::EOPNOTSUPP));
+        }
+        let source = self.node(ino)?;
+        if source.attr().kind == FileType::Directory {
+            return Err(Error::Fs(libc::EPERM));
+        }
+        let target = source.state.lock().unwrap().key.clone();
+        let parent = self.node(parent)?;
+        let base = parent.state.lock().unwrap().key.clone();
+        let from: Vec<_> = base.split('/').filter(|s| !s.is_empty()).collect();
+        let to: Vec<_> = target.split('/').filter(|s| !s.is_empty()).collect();
+        let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+        let relative = format!(
+            "{}{}",
+            "../".repeat(from.len() - common),
+            to[common..].join("/")
+        );
+        self.create(
+            parent.ino,
+            name,
+            libc::S_IFLNK | 0o777,
+            Some(relative.as_bytes()),
+            0,
+        )
+        .await
+    }
+
+    pub fn parent_ino(&self, ino: u64) -> u64 {
+        let Ok(node) = self.node(ino) else {
+            return 1;
+        };
+        let key = node.state.lock().unwrap().key.clone();
+        let parent = key.rsplit_once('/').map_or("", |(parent, _)| parent);
+        self.namespace
+            .lock()
+            .unwrap()
+            .named(parent)
+            .map_or(1, |node| node.ino)
+    }
+
+    pub fn open(&self, ino: u64, writable: bool) -> Result<()> {
+        if writable {
+            self.check_write()?;
+        }
+        let node = self.node(ino)?;
+        let mut state = node.state.lock().unwrap();
+        if state.deleted {
+            return Err(Error::Fs(libc::ENOENT));
+        }
+        state.opens += 1;
+        Ok(())
+    }
+
+    pub fn release(&self, ino: u64) {
+        if let Ok(node) = self.node(ino) {
+            let mut state = node.state.lock().unwrap();
+            state.opens = state.opens.saturating_sub(1);
+        }
+    }
+
+    pub async fn create(
+        &self,
+        parent: u64,
+        name: &str,
+        mode: u32,
+        target: Option<&[u8]>,
+        rdev: u32,
+    ) -> Result<Arc<Inode>> {
+        self.check_write()?;
+        let key = self.child_key(parent, name)?;
+        match self.lookup(parent, name).await {
+            Ok(_) => return Err(Error::Fs(libc::EEXIST)),
+            Err(error) if not_found(&error) => {}
+            Err(error) => return Err(error),
+        }
+        let directory = mode & libc::S_IFMT == libc::S_IFDIR;
+        let mut ns = self.namespace.lock().unwrap();
+        {
+            let p = ns.get(parent)?;
+            let s = p.state.lock().unwrap();
+            if s.deleted
+                || ns.names.get(&s.key) != Some(&parent)
+                || s.rename_target.is_some()
+                || child(&s.key, name)? != key
+            {
+                return Err(Error::Fs(libc::ENOENT));
+            }
+        }
+        if ns.is_moving(&key) || ns.is_deleting(&key) || Self::pending_rename(&ns, &key, None) {
+            return Err(Error::Fs(libc::EAGAIN));
+        }
+        if ns.named(&key).is_some() {
+            return Err(Error::Fs(libc::EEXIST));
+        }
+        ns.tombstones.remove(&key);
+        ns.epoch += 1;
+        let node = ns.install(&key, |ino| {
+            Inode::new(ino, key.clone(), directory, None, &self.config)
+        })?;
+        ns.get(parent)?
+            .state
+            .lock()
+            .unwrap()
+            .negative_lookups
+            .remove(name);
+        {
+            let mut state = node.state.lock().unwrap();
+            state.mode = mode;
+            state.rdev = rdev;
+            state.version = 1;
+            if let Some(target) = target {
+                state
+                    .metadata
+                    .insert(self.config.symlink_attr.clone(), target.to_vec());
+                state.size = target.len() as u64;
+            }
+            self.prepare_metadata(&mut state);
+        }
+        Ok(node)
+    }
+
+    /// FUSE creation passes the request identity only with enable-perms, as the
+    /// reference's CreateFile/MkDir/CreateSymlink SetAttributes calls do. There is
+    /// no userspace setgid-parent inheritance in that contract.
+    pub async fn create_with_identity(
+        &self,
+        parent: u64,
+        name: &str,
+        mode: u32,
+        target: Option<&[u8]>,
+        rdev: u32,
+        identity: (u32, u32),
+    ) -> Result<Arc<Inode>> {
+        let node = self.create(parent, name, mode, target, rdev).await?;
+        if self.config.enable_perms {
+            self.setattr(node.ino, None, Some(identity.0), Some(identity.1), None)?;
+        }
+        Ok(node)
+    }
+
+    pub async fn read(&self, ino: u64, offset: u64, length: usize) -> Result<Block> {
+        if length > MAX_IO {
+            return Err(Error::Fs(libc::EINVAL));
+        }
+        let node = self.node(ino)?;
+        let (size, clean, generation, version, etag) = {
+            let state = node.state.lock().unwrap();
+            use std::hash::{Hash, Hasher};
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            state.remote.as_ref().map(|r| &r.etag).hash(&mut hash);
+            state.version.hash(&mut hash);
+            (
+                state.size,
+                state.version == state.durable,
+                hash.finish(),
+                state.version,
+                state.remote.as_ref().map(|remote| remote.etag.clone()),
+            )
+        };
+        let length = length.min(size.saturating_sub(offset) as usize);
+        // Never pin a cache allocation across output admission. An older large
+        // FIFO waiter may need those exact permits before this small reply can
+        // be admitted. Reclaim policy entries before borrowing a cache block.
+        let reply = self.admit(length).await?;
+        if length == 0 {
+            return reply.copy(&[]);
+        }
+        let cached = {
+            self.cache
+                .lock()
+                .unwrap()
+                .covering(ino, generation, offset, length)
+        };
+        if let Some((block, relative)) = cached {
+            return reply.copy(&block.as_slice()[relative..relative + length]);
+        }
+        // Miss admission reserves output and scratch atomically below.
+        drop(reply);
+        let budgets = self.effective_budgets();
+        let mut start = if clean {
+            offset / (128 * 1024) * (128 * 1024)
+        } else {
+            offset
+        };
+        if offset - start + length as u64 > budgets.max_effective_window_bytes as u64 {
+            start = offset;
+        }
+        let relative = (offset - start) as usize;
+        let prefetch = if clean {
+            node.pattern
+                .lock()
+                .unwrap()
+                .prefetch(offset, length, &self.config)
+                .max(relative + length)
+                .min(budgets.max_effective_window_bytes)
+                .min(size.saturating_sub(start) as usize)
+        } else {
+            length
+        };
+        // Atomically admit all payload/GET/output buffers before the first
+        // allocation; otherwise competing readers could each pin half a lane.
+        let mut charge = self.admit(2 * prefetch + length).await?;
+        let mut result = charge.split(length).zeroed();
+        let snapshot = Arc::new(read::snapshot(&node)?);
+        let cacheable = clean
+            && snapshot.version == version
+            && snapshot.remote.as_ref().map(|head| head.etag.clone()) == etag;
+        // The snapshot may have shrunk while admission flushed another generation.
+        let available = length.min(snapshot.size.saturating_sub(offset) as usize);
+        let end = (start + prefetch as u64).min(snapshot.size);
+        let chunk = budgets.read_parallel_chunk_bytes.max(1);
+        let cache = self.cache.lock().unwrap().clone();
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut next = start;
+        while next < end || !tasks.is_empty() {
+            while next < end && tasks.len() < self.config.max_requests {
+                let at = next;
+                let amount = (end - next).min(chunk as u64) as usize;
+                next += amount as u64;
+                let mut owner = charge.split(2 * amount);
+                let (store, snapshot) = (self.store.clone(), snapshot.clone());
+                tasks.spawn(async move {
+                    let local = Budget::new(2 * amount)?;
+                    let block = write::materialize(&store, &snapshot, at, amount, &local)
+                        .await?
+                        .with_owner(owner.split(amount));
+                    Ok::<_, Error>((at, block))
+                });
+            }
+            let completed = tasks.join_next().await.expect("nonempty read task set");
+            let (at, block) = match completed {
+                Ok(Ok(value)) => value,
+                other => {
+                    tasks.abort_all();
+                    while tasks.join_next().await.is_some() {}
+                    return Err(match other {
+                        Ok(Err(error)) => error,
+                        _ => Error::Cancelled,
+                    });
+                }
+            };
+            let left = at.max(offset);
+            let right = (at + block.as_slice().len() as u64).min(offset + available as u64);
+            if right > left {
+                result.as_mut_slice()[(left - offset) as usize..(right - offset) as usize]
+                    .copy_from_slice(
+                        &block.as_slice()[(left - at) as usize..(right - at) as usize],
+                    );
+            }
+            if cacheable {
+                cache.insert(ino, generation, at, block);
+            }
+        }
+        result.shrink(available);
+        Ok(result)
+    }
+
+    async fn admit(&self, size: usize) -> Result<crate::budget::Reservation> {
+        match self.data.try_reserve(size) {
+            Ok(reservation) => Ok(reservation),
+            Err(Error::Fs(code)) if code == libc::ENOMEM => {
+                // Replacing the policy also releases deferred Moka entries. Pinned
+                // borrowers keep their allocation permits until their own completion.
+                {
+                    let mut cache = self.cache.lock().unwrap();
+                    *cache = crate::cache::ReadCache::with_entry_limit(
+                        self.data.limit() as u64,
+                        self.config.entry_limit as usize,
+                    );
+                }
+                if let Ok(reservation) = self.data.try_reserve(size) {
+                    return Ok(reservation);
+                }
+                if self.config.use_enomem {
+                    return self.data.try_reserve(size);
+                }
+                self.flush_all().await?;
+                tokio::time::timeout(Duration::from_secs(30), self.data.reserve(size))
+                    .await
+                    .map_err(|_| Error::Timeout("payload admission"))?
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub async fn write(&self, ino: u64, offset: u64, bytes: &[u8]) -> Result<usize> {
+        self.check_write()?;
+        if bytes.len() > MAX_IO {
+            return Err(Error::Fs(libc::EINVAL));
+        }
+        if offset
+            .checked_add(bytes.len() as u64)
+            .is_none_or(|end| end > self.config.part_sizes.max_size())
+        {
+            return Err(Error::Fs(libc::EFBIG));
+        }
+        let node = self.node(ino)?;
+        if file_type(node.state.lock().unwrap().mode) != FileType::RegularFile {
+            return Err(Error::Fs(libc::EINVAL));
+        }
+        let reservation = self.admit(bytes.len()).await?;
+        let ns = self.namespace.lock().unwrap();
+        let mut state = node.state.lock().unwrap();
+        if ns.is_moving(&state.key) || ns.is_deleting(&state.key) {
+            return Err(Error::Fs(libc::EAGAIN));
+        }
+        write::insert_extent(&mut state, offset, reservation.copy(bytes)?)?;
+        Ok(bytes.len())
+    }
+
+    pub fn truncate(&self, ino: u64, size: u64) -> Result<()> {
+        self.check_write()?;
+        if size > self.config.part_sizes.max_size() {
+            return Err(Error::Fs(libc::EFBIG));
+        }
+        let node = self.node(ino)?;
+        let ns = self.namespace.lock().unwrap();
+        let mut state = node.state.lock().unwrap();
+        if ns.is_moving(&state.key) || ns.is_deleting(&state.key) {
+            return Err(Error::Fs(libc::EAGAIN));
+        }
+        if file_type(state.mode) != FileType::RegularFile {
+            return Err(Error::Fs(libc::EINVAL));
+        }
+        write::truncate(&mut state, size)
+    }
+
+    fn prepare_metadata(&self, state: &mut State) {
+        if self.config.enable_perms {
+            state.metadata.insert(
+                self.config.uid_attr.clone(),
+                state.uid.to_string().into_bytes(),
+            );
+            state.metadata.insert(
+                self.config.gid_attr.clone(),
+                state.gid.to_string().into_bytes(),
+            );
+            state.metadata.insert(
+                self.config.mode_attr.clone(),
+                state.mode.to_string().into_bytes(),
+            );
+        }
+        if self.config.specials_enabled() || state.mode & libc::S_IFMT != libc::S_IFREG {
+            state.metadata.insert(
+                self.config.mode_attr.clone(),
+                state.mode.to_string().into_bytes(),
+            );
+            if state.rdev != 0 {
+                state.metadata.insert(
+                    self.config.rdev_attr.clone(),
+                    state.rdev.to_string().into_bytes(),
+                );
+            }
+        }
+        if self.config.enable_mtime {
+            state.metadata.insert(
+                self.config.mtime_attr.clone(),
+                state
+                    .mtime
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .to_string()
+                    .into_bytes(),
+            );
+        }
+    }
+
+    pub async fn fsync(&self, ino: u64) -> Result<()> {
+        let node = self.node(ino)?;
+        let _gate = node.flush.lock().await;
+        let key = node.state.lock().unwrap().key.clone();
+        let busy = {
+            let ns = self.namespace.lock().unwrap();
+            ns.is_moving(&key) || ns.is_deleting(&key) || Self::pending_rename(&ns, &key, None)
+        };
+        if busy {
+            return Err(Error::Fs(libc::EAGAIN));
+        }
+        self.flush_node_locked(&node).await
+    }
+
+    async fn flush_node_locked(&self, node: &Inode) -> Result<()> {
+        {
+            let mut state = node.state.lock().unwrap();
+            self.prepare_metadata(&mut state);
+            if self.config.no_dir_object && file_type(state.mode) == FileType::Directory {
+                state.durable = state.version;
+                return Ok(());
+            }
+        }
+        let flusher = self
+            .flushers
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::Cancelled)?;
+        write::flush_locked(
+            &self.store,
+            node,
+            &self.flush_lane,
+            flusher,
+            &self.config,
+            &self.upload_admission,
+        )
+        .await
+    }
+
+    pub async fn flush_all(&self) -> Result<()> {
+        self.reconcile_pending_deletes().await?;
+        // Snapshot only bounded live inode IDs, not a backend directory tree.
+        let nodes: Vec<_> = self
+            .namespace
+            .lock()
+            .unwrap()
+            .nodes
+            .values()
+            .filter(|n| {
+                let s = n.state.lock().unwrap();
+                !s.deleted && s.version > s.durable
+            })
+            .cloned()
+            .collect();
+        for node in nodes {
+            self.fsync(node.ino).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn directory_chunk(
+        &self,
+        ino: u64,
+        after: &str,
+        limit: usize,
+    ) -> Result<Vec<DirEntry>> {
+        self.directory_chunk_inner(ino, after, limit, true).await
+    }
+
+    async fn directory_chunk_inner(
+        &self,
+        ino: u64,
+        after: &str,
+        limit: usize,
+        resolve_types: bool,
+    ) -> Result<Vec<DirEntry>> {
+        let node = self.node(ino)?;
+        let key = {
+            let state = node.state.lock().unwrap();
+            if file_type(state.mode) != FileType::Directory {
+                return Err(Error::Fs(libc::ENOTDIR));
+            }
+            state.key.clone()
+        };
+        let prefix = if key.is_empty() {
+            key
+        } else {
+            format!("{key}/")
+        };
+        let epoch = self.namespace.lock().unwrap().epoch;
+        let mut selected: BTreeMap<String, (bool, Option<ObjectHead>, bool)> = BTreeMap::new();
+        {
+            let mut ns = self.namespace.lock().unwrap();
+            let hidden: Vec<_> = ns.tombstones.keys().cloned().collect();
+            for (name, _) in ns.names.range(prefix.clone()..) {
+                if !name.starts_with(&prefix) {
+                    break;
+                }
+                let relative = &name[prefix.len()..];
+                if relative.is_empty()
+                    || relative.contains('/')
+                    || relative <= after
+                    || hidden.contains(name)
+                {
+                    continue;
+                }
+                let child = ns.named(name).unwrap();
+                let state = child.state.lock().unwrap();
+                if !state.deleted
+                    && (state.version > state.durable
+                        || state.fetched.elapsed() < self.config.stat_cache_ttl
+                        || file_type(state.mode) == FileType::Directory && {
+                            let prefix = format!("{name}/");
+                            ns.names
+                                .range(prefix.clone()..)
+                                .take_while(|(name, _)| name.starts_with(&prefix))
+                                .any(|(_, ino)| {
+                                    ns.nodes.get(ino).is_some_and(|child| {
+                                        let state = child.state.lock().unwrap();
+                                        !state.deleted && state.version > state.durable
+                                    })
+                                })
+                        })
+                {
+                    selected.insert(
+                        relative.into(),
+                        (
+                            file_type(state.mode) == FileType::Directory,
+                            state.remote.clone(),
+                            state.metadata_known,
+                        ),
+                    );
+                }
+                if selected.len() > limit {
+                    selected.pop_last();
+                }
+            }
+            ns.hidden("");
+        }
+        let mut token = None;
+        loop {
+            let page = self
+                .store
+                .list(&prefix, Some("/"), token.as_deref())
+                .await?;
+            let mut page_last = String::new();
+            for (name, directory, head, known) in page
+                .objects
+                .into_iter()
+                .filter(|o| o.key != prefix)
+                .map(|o| {
+                    let known = o.metadata.is_some();
+                    let metadata = o
+                        .metadata
+                        .and_then(|metadata| {
+                            crate::backend::metadata::encode_metadata(&metadata).ok()
+                        })
+                        .unwrap_or_default()
+                        .into_iter()
+                        .collect();
+                    let head = ObjectHead {
+                        size: o.size,
+                        etag: o.etag.unwrap_or_default(),
+                        metadata,
+                        last_modified: o.last_modified.and_then(|d| SystemTime::try_from(d).ok()),
+                        ..Default::default()
+                    };
+                    let directory = o.key.ends_with('/');
+                    (o.key, directory, Some(head), known)
+                })
+                .chain(
+                    page.common_prefixes
+                        .into_iter()
+                        .map(|p| (p, true, None, false)),
+                )
+            {
+                let Some(name) = name.strip_prefix(&prefix) else {
+                    return Err(Error::InvalidResponse("directory prefix escape".into()));
+                };
+                let name = name.trim_end_matches('/');
+                if name.is_empty() || name.contains('/') {
+                    continue;
+                }
+                page_last = page_last.max(name.into());
+                if name <= after {
+                    continue;
+                }
+                let full = child(prefix.trim_end_matches('/'), name)?;
+                if self.namespace.lock().unwrap().hidden(&full) {
+                    continue;
+                }
+                selected
+                    .entry(name.into())
+                    .or_insert((directory, head, known));
+                if selected.len() > limit {
+                    selected.pop_last();
+                }
+            }
+            if page.next_token.is_none()
+                || selected.len() == limit
+                    && selected
+                        .last_key_value()
+                        .is_some_and(|(name, _)| *name <= page_last)
+            {
+                break;
+            }
+            token = page.next_token;
+        }
+        // Safe fuser exposes no DT_UNKNOWN variant. Standard LIST has no user
+        // metadata, so resolve only this bounded selected page before claiming a
+        // concrete file type. Extended authoritative metadata avoids these HEADs.
+        if resolve_types {
+            let mut jobs = FuturesUnordered::new();
+            let mut pending = selected
+                .iter_mut()
+                .filter(|(_, entry)| !entry.0 && !entry.2);
+            let mut next = pending.next();
+            while next.is_some() || !jobs.is_empty() {
+                tokio::select! {
+                    completed = jobs.next(), if !jobs.is_empty() => {
+                        completed.expect("admitted metadata job")?;
+                    }
+                    admitted = tokio::time::timeout(
+                        self.config.http_timeout,
+                        self.metadata_slots.clone().acquire_owned(),
+                    ), if next.is_some() => {
+                        let permit = admitted
+                            .map_err(|_| Error::Timeout("directory metadata admission"))?
+                            .map_err(|_| Error::Cancelled)?;
+                        let (name, (directory, head, known)) = next.take().expect("selected unknown type");
+                        // Admission precedes creation of each future: concurrent
+                        // pages cannot accumulate per-entry semaphore waiters.
+                        // Borrowed futures drop synchronously on error/cancel.
+                        jobs.push(async move {
+                            let _permit = permit;
+                            let resolved = tokio::time::timeout(
+                                self.config.http_timeout,
+                                self.lookup(ino, name),
+                            ).await.map_err(|_| Error::Timeout("directory metadata lookup"))??;
+                            let state = resolved.state.lock().unwrap();
+                            *directory = file_type(state.mode) == FileType::Directory;
+                            *head = state.remote.clone();
+                            *known = state.metadata_known;
+                            Ok::<(), Error>(())
+                        });
+                        next = pending.next();
+                    }
+                }
+            }
+        }
+        let mut ns = self.namespace.lock().unwrap();
+        if ns.epoch != epoch {
+            return Err(Error::Fs(libc::EAGAIN));
+        }
+        let mut entries = Vec::with_capacity(selected.len());
+        for (name, (directory, head, known)) in selected {
+            let full = child(prefix.trim_end_matches('/'), &name)?;
+            let node = ns.install(&full, |ino| {
+                let node = Inode::new(ino, full.clone(), directory, head, &self.config);
+                node.state.lock().unwrap().metadata_known = known;
+                node
+            })?;
+            entries.push(DirEntry {
+                ino: node.ino,
+                name,
+                kind: node.attr().kind,
+            });
+        }
+        Ok(entries)
+    }
+
+    pub async fn unlink(&self, parent: u64, name: &str, directory: bool) -> Result<()> {
+        self.check_write()?;
+        let key = self.child_key(parent, name)?;
+        let pending = {
+            let ns = self.namespace.lock().unwrap();
+            ns.pending_deletes
+                .get(&key)
+                .and_then(|ino| ns.nodes.get(ino))
+                .cloned()
+        };
+        let node = match pending {
+            Some(node) => node,
+            None => self.lookup(parent, name).await?,
+        };
+        if (node.attr().kind == FileType::Directory) != directory {
+            return Err(Error::Fs(if directory {
+                libc::ENOTDIR
+            } else {
+                libc::EISDIR
+            }));
+        }
+        self.unlink_node(node, key, directory, Some((parent, name)))
+            .await
+    }
+
+    /// Resolve owned ambiguous DELETEs before shutdown/retry. The retained name
+    /// binding excludes recreation; only the original inode can complete it.
+    pub async fn reconcile_pending_deletes(&self) -> Result<()> {
+        let pending: Vec<_> = {
+            let ns = self.namespace.lock().unwrap();
+            ns.pending_deletes
+                .iter()
+                .map(|(key, ino)| Ok((key.clone(), ns.get(*ino)?)))
+                .collect::<Result<_>>()?
+        };
+        for (key, node) in pending {
+            let directory = node.attr().kind == FileType::Directory;
+            self.unlink_node(node, key, directory, None).await?;
+        }
+        Ok(())
+    }
+
+    async fn unlink_node(
+        &self,
+        node: Arc<Inode>,
+        key: String,
+        directory: bool,
+        parent: Option<(u64, &str)>,
+    ) -> Result<()> {
+        let _gate = node.flush.lock().await;
+        {
+            let ns = self.namespace.lock().unwrap();
+            let state = node.state.lock().unwrap();
+            if state.deleted
+                || state.key != key
+                || ns.names.get(&key) != Some(&node.ino)
+                || Self::pending_rename(&ns, &key, None)
+            {
+                return Err(Error::Fs(libc::ENOENT));
+            }
+        }
+        let _reservation = MoveLease::begin_delete(&self.namespace, key.clone(), node.ino)?;
+        {
+            let ns = self.namespace.lock().unwrap();
+            let state = node.state.lock().unwrap();
+            if state.deleted || state.key != key || ns.names.get(&key) != Some(&node.ino) {
+                return Err(Error::Fs(libc::ENOENT));
+            }
+            if let Some((parent, name)) = parent {
+                let parent = ns.get(parent)?;
+                let parent = parent.state.lock().unwrap();
+                if parent.deleted || child(&parent.key, name)? != key {
+                    return Err(Error::Fs(libc::ENOENT));
+                }
+            }
+        }
+        // An emptiness probe publishes no dirent types and holds this prefix's
+        // reservation; it must not recursively look up children through that lease.
+        if directory
+            && !self
+                .directory_chunk_inner(node.ino, "", 1, false)
+                .await?
+                .is_empty()
+        {
+            return Err(Error::Fs(libc::ENOTEMPTY));
+        }
+        {
+            let mut ns = self.namespace.lock().unwrap();
+            ns.tombstone(&key)?;
+            ns.pending_deletes.insert(key.clone(), node.ino);
+        }
+        let remote_key = if directory {
+            format!("{key}/")
+        } else {
+            key.clone()
+        };
+        // Cancellation and ambiguous errors leave a bounded pending record, not
+        // an irreversibly hidden/deleted dirty inode. Retrying unlink reconciles
+        // the idempotent DELETE while recreation and conflicting moves stay out.
+        if let Err(error) = self.store.delete(&remote_key).await {
+            // A modeled rejection is not an ambiguous applied DELETE. Restore
+            // ordinary lookup on authorization/validation failures only.
+            if matches!(&error,Error::Backend{code,..} if matches!(code.as_str(),"AccessDenied"|"InvalidAccessKeyId"|"SignatureDoesNotMatch"|"InvalidArgument"|"InvalidRequest"))
+            {
+                let mut ns = self.namespace.lock().unwrap();
+                ns.pending_deletes.remove(&key);
+                ns.tombstones.remove(&key);
+                ns.epoch += 1;
+            }
+            return Err(error);
+        }
+        let mut ns = self.namespace.lock().unwrap();
+        ns.pending_deletes.remove(&key);
+        ns.names.remove(&key);
+        ns.epoch += 1;
+        let mut state = node.state.lock().unwrap();
+        state.deleted = true;
+        state.extents.clear();
+        state.durable = state.version;
+        Ok(())
+    }
+
+    pub async fn rename(
+        &self,
+        parent: u64,
+        name: &str,
+        newparent: u64,
+        newname: &str,
+    ) -> Result<()> {
+        self.check_write()?;
+        let source = self.lookup(parent, name).await?;
+        let destination = self.child_key(newparent, newname)?;
+        let old = source.state.lock().unwrap().key.clone();
+        {
+            let ns = self.namespace.lock().unwrap();
+            if Self::pending_rename(&ns, &old, Some(source.ino))
+                || Self::pending_rename(&ns, &destination, Some(source.ino))
+                || [&old, &destination].into_iter().any(|key| {
+                    let prefix = format!("{key}/");
+                    ns.pending_moves
+                        .range(prefix.clone()..)
+                        .take_while(|(key, _)| key.starts_with(&prefix))
+                        .any(|(_, ino)| *ino != source.ino)
+                })
+            {
+                return Err(Error::Fs(libc::EBUSY));
+            }
+        }
+        if destination == old {
+            return Ok(());
+        }
+        if destination.starts_with(&format!("{old}/")) {
+            return Err(Error::Fs(libc::EINVAL));
+        }
+        let directory = source.attr().kind == FileType::Directory;
+        let retry =
+            source.state.lock().unwrap().rename_target.as_deref() == Some(destination.as_str());
+        let target = match self.lookup(newparent, newname).await {
+            Ok(target) => {
+                if (target.attr().kind == FileType::Directory) != directory {
+                    return Err(Error::Fs(if directory {
+                        libc::ENOTDIR
+                    } else {
+                        libc::EISDIR
+                    }));
+                }
+                if directory && !retry && !self.directory_chunk(target.ino, "", 1).await?.is_empty()
+                {
+                    return Err(Error::Fs(libc::ENOTEMPTY));
+                }
+                Some(target)
+            }
+            Err(error) if not_found(&error) => None,
+            Err(error) => return Err(error),
+        };
+        let _moving = MoveLease::begin(&self.namespace, vec![old.clone(), destination.clone()])?;
+        let mut pinned: Vec<_> = {
+            let ns = self.namespace.lock().unwrap();
+            ns.nodes
+                .values()
+                .filter(|node| {
+                    let state = node.state.lock().unwrap();
+                    state.key == old || directory && state.key.starts_with(&format!("{old}/"))
+                })
+                .cloned()
+                .collect()
+        };
+        if let Some(target) = &target {
+            pinned.push(target.clone());
+        }
+        pinned.sort_by_key(|node| node.ino);
+        pinned.dedup_by_key(|node| node.ino);
+        let mut gates = Vec::with_capacity(pinned.len());
+        for node in &pinned {
+            gates.push(node.flush.clone().lock_owned().await);
+        }
+        {
+            let mut state = source.state.lock().unwrap();
+            if state.deleted || state.key != old {
+                return Err(Error::Fs(libc::ENOENT));
+            }
+            if state
+                .rename_target
+                .as_ref()
+                .is_some_and(|key| *key != destination)
+            {
+                return Err(Error::Fs(libc::EBUSY));
+            }
+            state.rename_target = Some(destination.clone());
+        }
+        {
+            let mut ns = self.namespace.lock().unwrap();
+            ns.pending_moves.insert(old.clone(), source.ino);
+            ns.pending_moves.insert(destination.clone(), source.ino);
+        }
+        self.flush_node_locked(&source).await?;
+        let mut renamed_head = None;
+        if directory {
+            // Drain paged source objects incrementally; never materialize a subtree.
+            let prefix = format!("{old}/");
+            let cached: BTreeMap<_, _> = pinned
+                .iter()
+                .map(|node| (node.state.lock().unwrap().key.clone(), node.clone()))
+                .collect();
+            let mut last_drained = None;
+            loop {
+                let page = self.store.list(&prefix, None, None).await?;
+                if page.objects.is_empty() {
+                    break;
+                }
+                for object in page.objects {
+                    if last_drained
+                        .as_ref()
+                        .is_some_and(|key: &String| object.key <= *key)
+                    {
+                        return Err(Error::Fs(libc::EAGAIN));
+                    }
+                    let suffix = object
+                        .key
+                        .strip_prefix(&prefix)
+                        .ok_or_else(|| Error::InvalidResponse("rename prefix escape".into()))?;
+                    let target = format!("{destination}/{suffix}");
+                    let etag = match object.etag {
+                        Some(etag) => etag,
+                        None => self.store.head(&object.key).await?.etag,
+                    };
+                    let copied = self.store.copy(&object.key, &target, &etag).await?;
+                    if let Some(node) = cached.get(object.key.trim_end_matches('/')) {
+                        let head = self.store.head(&target).await?;
+                        if head.etag != copied {
+                            return Err(Error::Fs(libc::ESTALE));
+                        }
+                        let mut state = node.state.lock().unwrap();
+                        state.remote = Some(head);
+                        state.data_key = Some(target.trim_end_matches('/').into());
+                    }
+                    self.store.delete(&object.key).await?;
+                    last_drained = Some(object.key);
+                }
+            }
+        } else {
+            let needs_copy =
+                source.state.lock().unwrap().data_key.as_deref() != Some(destination.as_str());
+            if needs_copy {
+                let mut head = source
+                    .state
+                    .lock()
+                    .unwrap()
+                    .remote
+                    .clone()
+                    .ok_or(Error::Fs(libc::EIO))?;
+                head.etag = self.store.copy(&old, &destination, &head.etag).await?;
+                // Publish the backing key before DELETE can remove the old
+                // source, including cancellation or a lost DELETE response.
+                let mut state = source.state.lock().unwrap();
+                state.remote = Some(head);
+                state.data_key = Some(destination.clone());
+            }
+            let head = self.store.head(&destination).await?;
+            if source
+                .state
+                .lock()
+                .unwrap()
+                .remote
+                .as_ref()
+                .is_none_or(|remote| remote.etag != head.etag)
+            {
+                return Err(Error::Fs(libc::ESTALE));
+            }
+            renamed_head = Some(head);
+            self.store.delete(&old).await?;
+        }
+        // Copy can change ETags, including for cached descendants. Refresh those
+        // generations while their per-inode commit gates remain held.
+        let mut refreshed = BTreeMap::new();
+        if directory {
+            for node in &pinned {
+                let info = {
+                    let state = node.state.lock().unwrap();
+                    (
+                        state.key.clone(),
+                        state.remote.is_some(),
+                        file_type(state.mode) == FileType::Directory,
+                    )
+                };
+                if info.0.starts_with(&format!("{old}/")) && info.1 {
+                    let new = format!(
+                        "{destination}{}{}",
+                        &info.0[old.len()..],
+                        if info.2 { "/" } else { "" }
+                    );
+                    refreshed.insert(node.ino, self.store.head(&new).await?);
+                }
+            }
+        }
+        let mut ns = self.namespace.lock().unwrap();
+        ns.tombstone(&old)?;
+        ns.tombstones.remove(&destination);
+        if let Some(ino) = ns.names.remove(&destination)
+            && let Some(target) = ns.nodes.get(&ino)
+        {
+            let mut state = target.state.lock().unwrap();
+            state.deleted = true;
+            state.extents.clear();
+            state.durable = state.version;
+        }
+        let changed: Vec<_> = ns
+            .names
+            .iter()
+            .filter(|(key, _)| **key == old || key.starts_with(&format!("{old}/")))
+            .map(|(key, &ino)| (key.clone(), ino))
+            .collect();
+        for (key, ino) in changed {
+            let new = format!("{destination}{}", &key[old.len()..]);
+            ns.names.remove(&key);
+            ns.names.insert(new.clone(), ino);
+            if let Some(node) = ns.nodes.get(&ino) {
+                let mut state = node.state.lock().unwrap();
+                state.key = new;
+                state.data_key = None;
+                state.negative_lookups.clear();
+                if let Some(head) = refreshed.remove(&ino) {
+                    state.remote = Some(head);
+                }
+                if ino == source.ino {
+                    state.rename_target = None;
+                }
+                if ino == source.ino
+                    && let Some(head) = renamed_head.take()
+                {
+                    state.remote = Some(head);
+                }
+            }
+        }
+        ns.epoch += 1;
+        ns.pending_moves.remove(&old);
+        ns.pending_moves.remove(&destination);
+        ns.get(newparent)?
+            .state
+            .lock()
+            .unwrap()
+            .negative_lookups
+            .remove(newname);
+        Ok(())
+    }
+
+    pub fn setattr(
+        &self,
+        ino: u64,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        mtime: Option<SystemTime>,
+    ) -> Result<FileAttr> {
+        self.check_write()?;
+        if ino == 1 {
+            return Err(Error::Fs(libc::EOPNOTSUPP));
+        }
+        let node = self.node(ino)?;
+        {
+            let ns = self.namespace.lock().unwrap();
+            let mut state = node.state.lock().unwrap();
+            if ns.is_moving(&state.key) || ns.is_deleting(&state.key) {
+                return Err(Error::Fs(libc::EAGAIN));
+            }
+            if state.deleted {
+                return Err(Error::Fs(libc::ENOENT));
+            }
+            if self.config.enable_perms {
+                if let Some(mode) = mode {
+                    state.mode = (state.mode & libc::S_IFMT) | (mode & 0o7777);
+                }
+                if let Some(uid) = uid {
+                    state.uid = uid;
+                }
+                if let Some(gid) = gid {
+                    state.gid = gid;
+                }
+            }
+            if let Some(mtime) = mtime {
+                state.mtime = mtime;
+            }
+            state.version += 1;
+            self.prepare_metadata(&mut state);
+        }
+        Ok(node.attr())
+    }
+
+    pub fn xattrs(&self, ino: u64) -> Result<BTreeMap<String, Vec<u8>>> {
+        if self.config.disable_xattr {
+            return Err(Error::Fs(libc::ENOSYS));
+        }
+        let node = self.node(ino)?;
+        let state = node.state.lock().unwrap();
+        let mut attrs: BTreeMap<_, _> = state
+            .metadata
+            .iter()
+            .map(|(k, v)| (format!("user.{k}"), v.clone()))
+            .collect();
+        if let Some(remote) = &state.remote {
+            attrs.insert("s3.etag".into(), remote.etag.as_bytes().to_vec());
+        }
+        Ok(attrs)
+    }
+
+    pub fn setxattr(&self, ino: u64, name: &str, value: Option<&[u8]>, flags: i32) -> Result<()> {
+        self.check_write()?;
+        if self.config.disable_xattr {
+            return Err(Error::Fs(libc::ENOSYS));
+        }
+        let node = self.node(ino)?;
+        if ino == 1 {
+            return Err(Error::Fs(libc::EOPNOTSUPP));
+        }
+        let ns = self.namespace.lock().unwrap();
+        let mut state = node.state.lock().unwrap();
+        if ns.is_moving(&state.key) || ns.is_deleting(&state.key) {
+            return Err(Error::Fs(libc::EAGAIN));
+        }
+        if state.deleted {
+            return Err(Error::Fs(libc::ENOENT));
+        }
+        let Some(name) = name.strip_prefix("user.") else {
+            return Ok(());
+        };
+        if name == self.config.symlink_attr {
+            return Ok(());
+        }
+        let exists = state.metadata.contains_key(name);
+        if flags & libc::XATTR_CREATE != 0 && exists {
+            return Err(Error::Fs(libc::EEXIST));
+        }
+        if flags & libc::XATTR_REPLACE != 0 && !exists || value.is_none() && !exists {
+            return Err(Error::Fs(libc::ENODATA));
+        }
+        let size: usize = state
+            .metadata
+            .iter()
+            .filter(|(k, _)| k.as_str() != name)
+            .map(|(k, v)| k.len() + v.len())
+            .sum();
+        if size + name.len() + value.map_or(0, <[u8]>::len) > 65536 {
+            return Err(Error::Fs(libc::E2BIG));
+        }
+        if let Some(value) = value {
+            state.metadata.insert(name.into(), value.to_vec());
+        } else {
+            state.metadata.remove(name);
+        }
+        state.version += 1;
+        Ok(())
+    }
+
+    pub async fn shutdown(&self) -> Result<()> {
+        self.closing.store(true, Ordering::Release);
+        let result = self.flush_all().await;
+        // Cancelled multipart tasks retain their admission token through abort.
+        // Do not tear down the runtime while that bounded cleanup is in flight.
+        let _idle = self
+            .flushers
+            .acquire_many(self.config.max_flushers as u32)
+            .await
+            .map_err(|_| Error::Cancelled)?;
+        result?;
+        if self
+            .namespace
+            .lock()
+            .unwrap()
+            .nodes
+            .values()
+            .any(|node| node.state.lock().unwrap().rename_target.is_some())
+        {
+            return Err(Error::Backend {
+                operation: "shutdown",
+                code: "PendingRename".into(),
+                message: "a failed rename must be retried before successful shutdown".into(),
+            });
+        }
+        Ok(())
+    }
+    pub fn is_closing(&self) -> bool {
+        self.closing.load(Ordering::Acquire)
+    }
+}

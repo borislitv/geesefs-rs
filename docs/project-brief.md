@@ -3,7 +3,8 @@
 ## User request
 
 Implement a Rust replacement for GeeseFS in the separate repository
-`borislitv/geesefs-rs`. Run development through `bmad-build-auto`. The primary
+`borislitv/geesefs-rs`. BMAD was initially required; the user subsequently made
+its use optional. Preserve the plan and verification evidence. The primary
 constraint is better memory behavior and faster operation than the Go reference,
 with preserved required behavior. Always look for suitable ready-made Rust
 crates before implementing a component; in particular, reuse an existing FUSE
@@ -60,5 +61,15 @@ development change. The user changed the repository to public and confirmed
 that choice. Source, plans and reproducible test/benchmark artifacts are public;
 credentials and private operational evidence are not project artifacts.
 
-All implementation work is governed by the BMAD build loop and the repository's
-`AGENTS.md`, especially the performance gate and mandatory reuse-first rule.
+Use public upstream code and public crates only. Do not export internal Arcadia
+libraries, translated internal code or internal-only dependencies without
+explicit authorization. Preserve public source/license provenance. Keep the
+implementation in the GeeseFS style: direct filesystem/S3 operations, explicit
+buffer ownership and minimal abstraction, expressed idiomatically in Rust.
+The user additionally requires no unsafe code in this package. Enforce the
+restriction at compilation for every target and use safe dependency APIs.
+
+All implementation work follows the repository's `AGENTS.md`, especially the
+performance gate, public-source boundary and mandatory reuse-first rule. Use
+finite command/external-operation timeouts and noninteractive SSH without
+questions or authentication prompts.

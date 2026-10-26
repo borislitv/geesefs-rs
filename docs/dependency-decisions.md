@@ -1,0 +1,168 @@
+# Dependency decisions
+
+## Public provenance and selection
+
+The reference checkout was verified clean at
+`5c0884c9e8799bbab93e2d4102fdc15e9c079e0d`, public upstream
+<https://github.com/yandex-cloud/geesefs> (Apache-2.0). Its contracts inform
+independent Rust implementation; no Go SDK implementation is vendored.
+The packaged `80c214ef14f620d93407454fc76ca01dd71fa25f` baseline has not yet been built or verified.
+
+Before implementation, `cargo info` verified these releases and licenses from
+the public crates.io registry (2026-10-26). APIs are linked below. All Cargo
+dependencies must resolve from crates.io; no internal source, registry, generated
+SDK, Arcadia code, or private dependency is permitted.
+
+| Component | Selected version / license | API and decision |
+| --- | --- | --- |
+| FUSE | fuser 0.18.0 / MIT | <https://docs.rs/fuser/0.18.0/fuser/>; owns protocol, callbacks, owned replies; integrated for actual foreground read/write mounts. Mountpoint's namespace/write limitations and oxfs's whole-file buffering/object layout do not meet this plan. |
+| S3 | aws-sdk-s3 1.155.0 / Apache-2.0 | <https://docs.rs/aws-sdk-s3/1.155.0/aws_sdk_s3/>; one client, conditional Range, streaming body, multipart upload/copy/completion/abort. Disable unneeded sigv4a; retain SDK TLS/signing/retry. |
+| Credentials | aws-config 1.13.0 / Apache-2.0 | <https://docs.rs/aws-config/1.13.0/aws_config/>; supported provider chain/profile, not custom credential parsing. Metadata-token IAM uses the separate public-trait adapter described below, not AWS IMDS equivalence. |
+| Runtime / admission | Tokio 1.54.1 / MIT | <https://docs.rs/tokio/1.54.1/tokio/sync/struct.Semaphore.html>; runtime, owned permits, async synchronization. No custom executor. |
+| XML | quick-xml 0.42.0 / MIT | <https://docs.rs/quick-xml/0.42.0/quick_xml/>; bounded ext-v1 schema adapter. Standard SDK object-list models drop per-object Metadata. XML syntax belongs to this parser. |
+| Retained cache | Moka 0.12.16 / MIT OR Apache-2.0, plus Apache-2.0 | <https://docs.rs/moka/0.12.16/moka/sync/struct.Cache.html>; weighted eviction, not hard admission. Allocation permits must survive eviction while pinned. |
+| CLI | clap 4 / MIT OR Apache-2.0 | <https://docs.rs/clap/4/clap/>; typed parsing and errors, unknown flags rejected. Small fstab argument normalization follows reference. |
+| Metadata escaping | percent-encoding 2 / MIT OR Apache-2.0 | <https://docs.rs/percent-encoding/2/percent_encoding/>; decode bytes; malformed escapes need explicit validation because the crate deliberately tolerates them. |
+| Errors | thiserror 2 / MIT OR Apache-2.0 | <https://docs.rs/thiserror/2/thiserror/>; typed actionable failures. |
+| Fixtures | tiny_http 0.12.0 / MIT OR Apache-2.0 | <https://docs.rs/tiny_http/0.12.0/tiny_http/>; cargo info verified public origin. Reuse HTTP server at SDK transport boundary; no live credentials or uncontrolled network. |
+| Timestamps | aws-smithy-types 1.9.0 / Apache-2.0 | <https://docs.rs/aws-smithy-types/1.9.0/aws_smithy_types/date_time/>; reuse SDK timestamp parser for ext-v1 LastModified; already an SDK dependency. |
+
+## Narrow custom state
+
+The package forbids unsafe code for every target. rustix 1.1.5 (Apache-2.0 WITH
+LLVM-exception OR Apache-2.0 OR MIT,
+<https://docs.rs/rustix/1.1.5/rustix/process/>) provides safe uid/gid operations;
+it replaces direct libc calls. Public `cargo info` verified origin/license before
+integration. tikv-jemallocator 0.7.0 and tikv-jemalloc-ctl 0.7.0 (MIT OR
+Apache-2.0, <https://github.com/tikv/jemallocator>) provide the allocator and safe
+statistics APIs; these replace direct unsafe mallinfo2 inspection. Use this same
+allocator in ordinary and benchmark Rust builds, report its identity, and measure
+RSS separately: jemalloc allocated bytes do not include allocations made by other
+native libraries or kernel/transport buffers. No custom allocator/FFI is written.
+
+Continuation implementation uses fuser 0.18.0 directly (default pure-Rust mount
+support), bytes 1.12.1 (MIT, `Bytes::from_owner` retains byte permits without a
+copy), libc (MIT/Apache-2.0, Linux errno/mode constants), and reqwest 0.12
+(MIT/Apache-2.0, rustls/gzip) for the extension alone. The extension URL is
+presigned by the *same AWS SDK client* after supported request customization;
+no signing implementation or second credential chain is introduced. Standard
+object requests remain SDK-owned. Tokio owns scheduling. Short per-inode locks
+protect application generations; per-inode flush gates serialize remote commits.
+async-trait 0.1 (MIT/Apache-2.0, <https://docs.rs/async-trait/>) provides the
+object-store async testing boundary; it does not replace runtime or SDK behavior.
+unicode-general-category 1.1.0 (Apache-2.0, public cargo info verified,
+<https://docs.rs/unicode-general-category/1.1.0/>) supplies Unicode character
+categories for the reference's IsPrint metadata escaping rather than a new table.
+
+No existing crate establishes GeeseFS's inode lifetime, dirty generation and fsync
+contract. Those are application state, not replacement infrastructure. Charge
+allocation owners rather than slices; never use an Arc/Bytes subslice to conceal
+the retained parent allocation. Reserve flush capacity independently from dirty
+admission. Remote completion, not individual part acknowledgments, establishes
+durability. Standard S3 operations remain SDK-owned. An ext-v1 network adapter
+must preserve the same credential source, endpoint, retry and cancellation
+policy; parser-only support is not backend compatibility.
+
+## Audit status
+
+Cargo.lock is reviewed for public registry origins and CI for public actions.
+`cargo metadata --locked --format-version 1` reported 290 packages (including
+this root package), with no non-public source: every dependency resolves from
+the public crates.io index. All packages declare a license; the declarations
+include permissive alternatives and Unicode data licenses. This is a source/
+declaration audit, not a completed binary-distribution notice bundle.
+There is no vendored/generated/internal code. License for this repository remains
+in LICENSE. Each dependency's license is retained in its public crate package;
+redistribution of binary distributions must include the corresponding notices.
+The complete transitive license/binary distribution audit remains outstanding.
+
+## Backend continuation: public adapters (2026-10-26)
+
+The public Go contracts in `core/backend_s3.go`, `core/cfg/conf_s3.go` and
+`core/ycs3ext` require metadata-service IAM tokens, SSE request headers and the
+PATCH operation absent from the standard S3 model. AWS SDK 1.155.0 exposes
+`push_auth_scheme`/`auth_scheme_resolver`, asynchronous identity resolution and
+header-only token authentication: use that supported boundary, not a second S3
+client or handwritten cryptographic signing. `aws-smithy-runtime-api` 1.19.1
+(Apache-2.0) supplies those public traits. Reqwest 0.12 owns metadata HTTP/TLS,
+bounded timeouts and redirect policy; serde_json 1 (MIT/Apache-2.0) owns JSON.
+The narrow token schema/cache is application state; there is no AWS credential
+provider for the reference's GCP/custom IAM-header protocol.
+
+Existing public SDK dependencies base64 0.22 (MIT/Apache-2.0) and md-5 0.10
+(MIT/Apache-2.0, RustCrypto) supply SSE-C encoding and its protocol-mandated MD5
+digest; do not implement either primitive. Humantime 2 (MIT/Apache-2.0) supplies
+duration parsing; mime_guess 2 (MIT) was initially selected for filename guesses,
+then rejected for the specific policy mismatch recorded below. Primary APIs: <https://docs.rs/aws-sdk-s3/1.155.0/aws_sdk_s3/config/struct.Builder.html>,
+<https://docs.rs/aws-smithy-runtime-api/1.19.1/>, <https://docs.rs/base64/0.22/>,
+<https://docs.rs/md-5/0.10/>, <https://docs.rs/humantime/2/>,
+<https://docs.rs/mime_guess/2/>. AWS runtime's public payload override preserves
+SDK-owned SigV4 when optional payload checksums are disabled.
+
+Registry research found maintained `s3s-sigv2` 0.17.0 (Apache-2.0,
+<https://docs.rs/s3s-sigv2/0.17.0/>, <https://github.com/Nugine/s3s>). Reuse its
+canonicalization and HMAC signing through the SDK auth-scheme override; do not
+translate Go's cryptographic signer. Both available 0.16/0.17 releases require
+Rust 1.96, so this continuation raises the declared MSRV to 1.96 rather than
+vendoring or reimplementing signing. SDK no-auth support supplies anonymous
+requests. The compatibility adapter preserves the public Go subresource set and
+encoded query values while SDK endpoint resolution owns path/virtual-host style.
+`tempfile` 3.27.0 (MIT/Apache-2.0, <https://docs.rs/tempfile/3.27.0/>) owns isolated
+profile fixtures; Tokio's process support provides finite, kill-on-drop test
+children. AWS `credentials-process` is deliberately disabled: its current SDK
+implementation spawns a shell without a process deadline or kill-on-drop, which
+cannot meet the updated noninteractive/finite-subprocess requirement.
+
+For `--no-verify-ssl`, the stable Smithy HTTP TLS builder exposes trust stores,
+not a verification-disable switch. Evaluated public adapters:
+`aws-smithy-http-client-reqwest` 0.1.0 (Apache-2.0) collects every response with
+`resp.bytes()` and violates streaming ownership; `smithy-transport-reqwest` 0.1.0
+(MIT/Apache-2.0) streams correctly but has no supported custom-client/TLS builder.
+Use a narrow public-trait adapter around the already selected reqwest 0.12 only
+for this explicit option: HTTP/TLS, bodies and verification policy remain crate
+owned; no HTTP or TLS protocol is implemented. Preserve streaming response bodies,
+disable redirects/decompression and retain finite request/body deadlines.
+`http` 1 (MIT/Apache-2.0) supplies typed DTO conversions. TLS tests reuse tiny_http's
+existing rustls feature and public `rcgen` 0.14 (MIT/Apache-2.0,
+<https://docs.rs/rcgen/0.14.8/>) for disposable localhost certificates. Default
+verification remains enabled; IAM metadata TLS is not weakened by the S3 option.
+
+MIME policy correction: `mime_guess` was evaluated but its larger built-in table
+and lack of Unix database precedence do not implement public Go's
+`mime.TypeByExtension` contract (notably JavaScript/XML and local overrides).
+Use `mime` 0.3.17's maintained syntax parser (MIT/Apache-2.0,
+<https://docs.rs/mime/0.3.17/>, <https://github.com/hyperium/mime>) with a narrow Go compatibility/defaults
+and Unix database adapter instead. The 16 default MIME associations derive from
+the public Go standard library, copyright The Go Authors, BSD-3-Clause:
+<https://go.dev/src/mime/type.go>, <https://go.dev/src/mime/type_unix.go>.
+No Go parser implementation is copied; Rust adapters ingest bounded metadata
+using standard readers and the MIME parser. Binary notice aggregation remains
+the parent's final-distribution responsibility.
+
+## Streaming configured upload parts (2026-10-26)
+
+Re-evaluated public Smithy `SdkBody::retryable`/`from_body_1_x` and
+`http-body` 1 (MIT, <https://docs.rs/http-body/1/>) before lifting the fixed
+allocation-sized part limit. Reuse these APIs for retries and HTTP body framing.
+`http-body-util::Full` buffers the whole part; `StreamBody` lacks an exact byte
+hint and its async materialization future need not be Sync. Use a narrow safe
+Body adapter with an exact remaining length and a mutex-protected pending future;
+it materializes charged chunks, not whole configured parts. This does not
+implement HTTP, checksums, transport or retry machinery. The SDK owns those.
+Public Go part-size configuration is application scheduling data, not a protocol
+implementation; its bounded parser and range arithmetic are independently written.
+
+Streaming wire fixtures independently check SDK CRC32 trailers with maintained
+`crc32fast` 1 (MIT/Apache-2.0, <https://docs.rs/crc32fast/1/>), already used by
+the public compression dependency, rather than implementing checksum arithmetic.
+
+## Concurrent directory metadata resolution
+
+Reuse public `futures-util` 0.3.34 (MIT/Apache-2.0,
+<https://docs.rs/futures-util/0.3.34/>, <https://github.com/rust-lang/futures-rs>),
+already transitive in Cargo.lock, for FuturesUnordered/StreamExt. Unlike spawning
+borrowed filesystem operations, these futures can borrow the existing lookup
+path and cancel synchronously on drop. Acquire an existing Tokio semaphore's
+global owned job permit before adding each future, not inside per-page spawned
+tasks. This bounds admitted work across readdir calls and preserves the existing
+lookup metadata/type/generation checks without custom scheduling infrastructure.

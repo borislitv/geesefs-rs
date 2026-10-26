@@ -2,8 +2,14 @@
 
 ## Required development workflow
 
-- Use the installed BMAD workflow, with `bmad-build-auto` owning the unattended
-  build loop. Follow its rendered instructions and record real task state.
+- BMAD is optional by the user's updated instruction. Use its installed workflow
+  where useful, retaining the existing plan, verification evidence and real task
+  state; do not let orchestration replace implementation or verification.
+- A delegated coding subagent executes its supplied plan and must not start a
+  recursive build-auto run. The parent owns final review and VCS delivery.
+- Use explicit finite timeouts for commands, subprocesses and external operations.
+  SSH must be noninteractive (BatchMode, connection/operation deadlines); do not
+  prompt the user about SSH or wait for interactive authentication.
 - Read `docs/project-brief.md` before planning, implementation or review.
 - The current scope is a Linux/S3 replacement for both GeeseFS readers and
   writers, not an unlabelled read-only prototype or a Go wrapper.
@@ -66,3 +72,19 @@ solutions; convenience or unfamiliarity is not sufficient justification.
   disposable test data only.
 - Keep credentials, private receipts and production identifiers out of source
   and shared artifacts. Preserve upstream licenses and attribution.
+
+## Public-source provenance and implementation style
+
+- Forbid unsafe code in this package, including binaries and tests, through
+  Cargo's `unsafe_code = "forbid"` lint. Use safe maintained crate APIs for OS
+  and allocator operations; do not introduce local unsafe blocks or FFI shims.
+- Only use independently public upstream sources and public Rust crates with
+  compatible licenses. Do not copy, translate, vendor or link internal Arcadia
+  libraries, generated code or internal-only dependencies into this repository.
+  Any proposed exception requires explicit authorization before inclusion.
+- Record the public origin and license for reused or translated source. Audit
+  Cargo manifests, lockfiles, vendored files, generated artifacts and CI for
+  internal registries, paths, hosts or unpublished source before pushing.
+- Follow the GeeseFS implementation style: direct filesystem/S3 operations,
+  explicit buffers and ownership, and small cohesive modules. Use idiomatic Rust;
+  avoid unnecessary frameworks, abstraction layers and speculative generality.

@@ -34,4 +34,6 @@ rustc-ice-*.txt
 /test-data/
 /benchmark-results/private/
 /.venv/
+/.venv-test/
+__pycache__/
 /.env

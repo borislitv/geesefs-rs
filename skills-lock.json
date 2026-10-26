@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "skills": {
+    "bmad": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmad/SKILL.md",
+      "computedHash": "3e511529d0241cf9c231d5a66c10950ddd280d64f46de3239de0e08e7cb7323f"
+    },
+    "bmad-agent-analyst": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmad-agent-analyst/SKILL.md",
+      "computedHash": "47a012c3f9947c4966efe339dc2f96607557ce12463aeff06fb86e656f144730"
+    },
+    "bmad-agent-architect": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmad-agent-architect/SKILL.md",
+      "computedHash": "1fb2a37de79a60d36a18e4023934ea7da5d8dc31de30d9ea14774434ffb5d27c"
+    },
+    "bmad-agent-dev": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmad-agent-dev/SKILL.md",
+      "computedHash": "fb3505e0837e2959db30b6c5aa2ca72f82ceda5255dad507c4ee37e1b7d05582"
+    },
+    "bmad-agent-pm": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmad-agent-pm/SKILL.md",
+      "computedHash": "8376bae0ad5887972a3a05ee11f10404a1734fba575a4a846443d8c07d3bb519"
+    },
+    "bmad-agent-po": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmad-agent-po/SKILL.md",
+      "computedHash": "1bd7c5781a69fac12481719733a9fc09ee7defdeb9b72a7652c4c2d3cbd65925"
+    },
+    "bmad-architecture": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmad-architecture/SKILL.md",
+      "computedHash": "2548da63a12fad56018044369d1e10b49659f558bf83c617a32b411ac2ff5211"
+    },
+    "bmad-build": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmad-build/SKILL.md",
+      "computedHash": "c0d3317fa5a098aa6935f4c06ca06ff83db5ba615761b02ba733c54dbc768a24"
+    },
+    "bmad-build-auto": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmad-build-auto/SKILL.md",
+      "computedHash": "c159817a870a8ba1bb8380b35ecb310d97baef0c027152b15e4904f37de05a1c"
+    },
+    "bmad-code-review": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmad-code-review/SKILL.md",
+      "computedHash": "c0083243f642c893eb2985b47cb4ae03398088db965b22853dedec169f6da8e9"
+    },
+    "bmad-deep-recon": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmad-deep-recon/SKILL.md",
+      "computedHash": "975006fc14c711926e378176444910d5e9324cc2c617f178707b44ab3b33964a"
+    },
+    "bmad-prd": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmad-prd/SKILL.md",
+      "computedHash": "0f4dd301570a625935938b2cc81542514fa1691b1eac6e165de7ba75e60ee00a"
+    },
+    "bmad-project-context": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmad-project-context/SKILL.md",
+      "computedHash": "0360f2c7803dedaad0f232c5abc66a4919909c82a9b41dc857f020c98293d289"
+    },
+    "bmad-review": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmad-review/SKILL.md",
+      "computedHash": "0aadea57f2951226f440a4f33eb13820c012d898c1201aacb0df3358f3c30769"
+    },
+    "bmod-core-tools": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmod-core-tools/SKILL.md",
+      "computedHash": "938c074c9e2773229bb3b9887aade585f3907717cbd232b8750c6f08203a04c7"
+    },
+    "bmod-method": {
+      "source": "bmad-code-org/BMAD-METHOD",
+      "sourceType": "github",
+      "skillPath": "skills/bmod-method/SKILL.md",
+      "computedHash": "aa98387c77b1ee44be576d7bfc1c57cb0b23702c549ad84b114b63ba9e73a8a7"
+    }
+  }
+}

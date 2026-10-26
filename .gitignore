@@ -22,3 +22,16 @@ rustc-ice-*.txt
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# Installed skills and generated BMAD runtime; keep lockfile, shared config and outputs.
+/.agents/
+/_bmad/scripts/
+/_bmad/core-tools/
+/_bmad/method/
+/_bmad/render/
+
+# Local benchmark data, credentials and build-tool environments.
+/test-data/
+/benchmark-results/private/
+/.venv/
+/.env

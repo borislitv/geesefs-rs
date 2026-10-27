@@ -363,3 +363,22 @@ Faster elapsed time does not excuse higher CPU cost. Unit regressions first
 rejected absent/greater CPU and missing summary fields on the old tooling;
 system-time, microsecond-unit and process-identity mutations also failed. These
 checks establish accounting behavior, not a measured CPU win.
+
+## Completed CPU-accounted diagnostic: changed source, invalid comparison
+
+The subsequent five-implementation, five-order fresh/warm matrix executed all
+50 phases in 2,113 seconds with daemon/client/cgroup CPU counters from the first
+phase. All 200 phase CPU windows were independently checked against retained raw
+boundaries. This completes CPU collection, not acceptance: the initial native
+inventory passed, but 214 original manifest objects returned native 404 after the
+matrix. Only 144,478 of 150,000 attempted full-file checks passed. All 5,522 file
+failures, including six separately unresolved EAGAIN failures, and 146 listing
+mismatches remain in the evidence. No failed member or phase was filtered out.
+
+Different phases consumed different bytes, so lower CPU totals cannot establish
+CPU-efficiency improvement. Post-run native listing also confirmed source
+mutation. The [CPU checkpoint](k8s-cpu-results-20261027.md) and
+[whitelisted receipt](k8s-cpu-results-20261027.json) publish all five-run groups,
+their error counts, CPU scopes, exact provenance and limitations. An immutable or
+version-pinned dataset is required before claiming a repeated equivalent-workload
+win. Earlier adverse results and the ten-phase CPU-less interruption remain intact.

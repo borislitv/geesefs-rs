@@ -18,8 +18,9 @@ subsequent actual-FUSE overlapping-fill ownership repair is measured at
 
 ## Verification and measured limits
 
-- Format check, warning-denying all-target/all-feature Clippy and all 130 Rust
-  tests passed, none ignored. The Rust evidence wrapper runs 12 Python benchmark
+- Format check, warning-denying all-target/all-feature Clippy and all 147 Rust
+  tests passed in isolated Kubernetes, none ignored. The Rust evidence wrapper
+  runs 23 Python benchmark
   cases; five additional Python provenance/oracle cases passed.
 - Public-origin audit: 336 Cargo packages, no private/path sources or missing
   license metadata/file. Full binary-distribution notice aggregation remains open.
@@ -43,6 +44,28 @@ subsequent actual-FUSE overlapping-fill ownership repair is measured at
   for Rust; all group mean throughput and RSS/cgroup memory favor Rust. P95
   remains worse and p99 is mixed, so this is not overall acceptance. See
   `docs/performance.md` and its complete reviewed metric summaries.
+
+## Later metadata, CPU and ub-mode checkpoints
+
+- `ba405d3` removes the redundant clean-read materialization buffer. The selected
+  eighty-result local matrix remains byte-correct but retains cold-tail failures.
+  The subsequent eighteen-phase real-object diagnostic passed all file hashes,
+  while Rust fresh throughput and p99 lost to Go. These failures remain visible.
+- `ba9ba7d` adds bounded directory reuse/metadata preload with fourteen new public
+  regressions and guard mutations. A whole-filesystem improvement is unproven.
+- `daa164a` adds independently scoped process/cgroup CPU accounting and correct
+  executable Go compiler provenance. CPU regressions are fail-closed; no missing
+  historic CPU counters are inferred from wall time.
+- `ea11229` applies the requested ub-mode checks and adds adjacent read-window
+  coverage. Two surviving strict-boundary mutants are now killed; direct fault
+  runs prove assertion-level failure sensitivity. Complexity/duplication findings
+  remain open and coverage/CRAP are not claimed. See the ub-mode execution log.
+- The full fifty-phase CPU diagnostic completed but lost source equivalence:
+  214 objects returned final native 404, 5,522 file checks failed, and 146 listing
+  mismatches were retained. All 200 CPU windows and 483 indexed evidence hashes
+  were verified. The failed comparison cannot establish CPU/performance wins.
+  Six EAGAIN failures remain distinct from remotely deleted data. See
+  docs/k8s-cpu-results-20261027.md and the whitelisted JSON.
 
 ## Remaining work and decision
 

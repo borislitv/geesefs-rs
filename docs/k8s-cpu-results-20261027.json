@@ -1,0 +1,98 @@
+{
+  "schema": 1,
+  "accepted": false,
+  "comparison_valid": false,
+  "reason": "The complete diagnostic executed, but production objects changed during the matrix. Different phases read different byte totals. CPU and throughput below are failed-workload observations, not an equivalent-workload win.",
+  "phases_executed": 50,
+  "elapsed_seconds": 2113.1422211611643,
+  "conditions": {
+    "platform": "linux/amd64",
+    "kernel": "6.8.0-142-generic",
+    "cpu_max": "200000 100000",
+    "cgroup_memory_max_bytes": 4294967296,
+    "user_cache_mib": 512,
+    "entry_limit": 100000,
+    "readers": 4,
+    "read_chunk_bytes": 131072,
+    "files_in_fixed_manifest": 3000,
+    "original_dataset_bytes": 8298727528,
+    "directory_oracles": 96,
+    "repetitions": 5,
+    "fresh": "new process/mount, not controlled cold host/remote caches",
+    "warm_revisit": "same full manifest revisited, larger than the user cache",
+    "s3_mutations_by_test": false,
+    "multipart_expiration": false,
+    "go_gc_interval": 0
+  },
+  "provenance": {
+    "manifest_sha256": "fbe40c762900d10b0307eff02ef2db3567df00ec3a3894fd6e580fbe23f7252d",
+    "accounting_helper_commit": "daa164a31651318afe48dbcf508378cd622d86d7",
+    "accounting_helper_sha256": "ae4cdfe26ac89e47bb6df81355e2070838e17e0b9a6902f2b6ad4858d9786f5d",
+    "private_experiment_runner_sha256": "33289c1b92d1d8c8b2b69bed0d11ed5d8643a220762dfdb0104f2585c86ab780",
+    "raw_report_sha256": "29aa36229498c543c69e7f28ba88370cfd3236874ff4fa2a6a95b68155cad823",
+    "private_evidence_archive_sha256": "f1a78643093a7e01542438ffbc0296ceb33fec84ca79932dfb005ba459c72bec",
+    "psutil": "7.2.2",
+    "boto3": "1.43.118",
+    "botocore": "1.43.119",
+    "go_embedded_toolchain": "go1.25.9",
+    "rust_toolchain": "1.99.1",
+    "matched_rust_native_compiler": "Ubuntu GCC 15.2.0-16ubuntu1",
+    "binaries": [
+      {"name": "go-experimental", "source": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d", "sha256": "7ad836e0bdd23ea279bb236627e9b130d11c174ae649c7582213a83e5d11a28b"},
+      {"name": "go-packaged", "source": "80c214ef14f620d93407454fc76ca01dd71fa25f", "sha256": "e04492363d29985ab1f74521482a01a3c6f7fdeeed35ad1ba0faa991370f4683"},
+      {"name": "rust-original", "source": "ba405d3485e66b00ad3bacc716177f0f9a145eb6", "sha256": "f9db60de2a7ce9134d12988c4c1751075bd6d609e8f87ae1d254e493cbc4a3ef", "role": "retained original native-build control"},
+      {"name": "rust-prior", "source": "ba405d3485e66b00ad3bacc716177f0f9a145eb6", "sha256": "0e98b0827e67a9bd2d40dd0831f3ea3d9dad6b3139057bd0c49418410e66aa11", "role": "matched native build"},
+      {"name": "rust", "source": "ba9ba7d612d7c455b4589aa229bf591e31e94539", "sha256": "5111eeedcde9259c1f60aaf75e085260e1689f57fcc98954dd6d267546be7ddc", "role": "matched native build with metadata reuse"}
+    ]
+  },
+  "correctness": {
+    "attempted_file_checks": 150000,
+    "full_hash_checks_passed": 144478,
+    "file_failures": 5522,
+    "enoent_failures_matching_post_native_404_paths": 5516,
+    "eagain_failures_not_matching_post_native_changed_paths": 6,
+    "unique_failed_files": 220,
+    "before_native_generation_errors": 0,
+    "after_native_404_objects": 214,
+    "listing_mismatches": 146,
+    "post_native_changed_directories": 4,
+    "post_native_added_names": 1,
+    "post_native_removed_names": 375,
+    "remaining_owned_mounts": 0,
+    "cpu_windows_independently_verified_against_raw_boundaries": 200,
+    "private_evidence_files_hash_verified": 483
+  },
+  "cpu_scope": {
+    "read": "daemon/client user and system counters around stat/open/full-read/hash workers; cgroup includes all owned processes and occasional monitoring",
+    "whole": "parent window includes client startup/exit and all owned cgroup work; client uses waited-child rusage",
+    "other_retained_windows": "listing, complete workload body and whole experiment, with raw boundaries and normalized CPU/GiB or operation",
+    "precision": "process counters are clock-tick quantized; cgroup counter deltas are in microseconds",
+    "aggregation": "arithmetic means of all five runs; no failed phase excluded; exported display values rounded",
+    "warning": "Different successful byte/file counts invalidate comparative efficiency acceptance. Throttling is not useful CPU work; process totals must not be added to cgroup totals."
+  },
+  "group_columns": ["implementation", "state", "verified_files_out_of_15000", "file_failures", "listing_mismatches", "observed_throughput_MBps_mean", "observed_read_p99_ms_mean", "daemon_rss_peak_MB_mean", "read_daemon_user_cpu_s_mean", "read_daemon_system_cpu_s_mean", "read_client_cpu_s_mean", "read_cgroup_cpu_s_mean", "read_cgroup_cpu_s_stdev", "read_cgroup_throttled_s_mean", "whole_cgroup_cpu_s_mean"],
+  "groups": [
+    ["go-experimental", "fresh", 14358, 642, 16, 219.215, 27.715, 1138.208, 24.978, 15.492, 14.346, 55.364, 4.820, 2.457, 62.618],
+    ["go-experimental", "warm-revisit", 14358, 642, 16, 268.281, 23.813, 1217.713, 17.824, 14.728, 14.980, 47.970, 3.471, 5.516, 48.161],
+    ["go-packaged", "fresh", 14358, 642, 17, 206.098, 25.030, 1241.598, 31.400, 14.770, 13.870, 60.555, 2.263, 3.236, 71.402],
+    ["go-packaged", "warm-revisit", 14358, 642, 17, 243.822, 24.123, 1331.284, 24.844, 14.352, 14.980, 54.622, 4.375, 5.799, 55.137],
+    ["rust-original", "fresh", 14400, 600, 13, 184.440, 40.645, 547.730, 11.218, 18.916, 13.706, 44.434, 3.053, 0.749, 45.755],
+    ["rust-original", "warm-revisit", 14358, 642, 13, 260.402, 33.785, 757.681, 8.592, 17.388, 14.048, 40.446, 3.726, 2.083, 41.425],
+    ["rust-prior", "fresh", 14572, 428, 14, 196.463, 36.821, 548.506, 10.890, 18.924, 13.222, 43.574, 2.137, 0.801, 44.940],
+    ["rust-prior", "warm-revisit", 14572, 428, 14, 275.760, 33.894, 689.815, 8.664, 18.004, 14.032, 41.071, 2.303, 2.159, 41.879],
+    ["rust", "fresh", 14572, 428, 13, 184.242, 37.757, 637.986, 11.854, 19.126, 13.546, 45.099, 1.673, 0.642, 46.669],
+    ["rust", "warm-revisit", 14572, 428, 13, 269.400, 33.715, 818.549, 8.920, 18.106, 14.810, 42.270, 1.937, 2.389, 42.474]
+  ],
+  "post_run_preload_inspection": {
+    "directories": 1261,
+    "selected_names_on_first_native_page": 2314,
+    "manifest_names": 3000,
+    "limitation": "Post-run standard LIST name coverage is an upper bound, not actual extended-metadata preload hits or an RPC trace. The 214 deleted objects remain in the denominator."
+  },
+  "open_items": [
+    "Equivalent-workload CPU and performance acceptance require an immutable or version-pinned data source.",
+    "The six EAGAIN errors on retained original Rust remain unresolved; they are not assigned to remote deletion.",
+    "Metadata preload throughput/RSS benefit remains unestablished; first-page speculation and implicit-directory probes need request-level evidence.",
+    "Go heap time series, full writer/compatibility matrix and controlled kernel-cache acceptance remain incomplete."
+  ]
+}

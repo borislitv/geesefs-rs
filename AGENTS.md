@@ -32,6 +32,8 @@ filesystem and S3 behavior. A language change alone does not satisfy this goal.
   cache budgets, working-set size and cold/warm state in paired comparisons.
 - Measure steady-state and peak RSS, allocator/heap use where available, total
   cgroup memory, kernel cache, throughput and p50/p95/p99 latency separately.
+  Include daemon/client user/system CPU, whole-cgroup CPU, normalized work cost
+  and throttling; elapsed wall time is not CPU consumed.
 - Include metadata-heavy traversal, sequential/random payload reads, concurrent
   readers, cache eviction and writer/fsync workloads, including dependency errors.
 - Require reproducible improvement rather than one favorable sample; retain raw

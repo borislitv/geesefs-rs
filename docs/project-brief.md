@@ -44,7 +44,10 @@ that Go cannot be optimized or that Rust automatically improves memory or speed.
 4. Paired Go/Rust workloads hold data, budgets, hardware, concurrency and cache
    state constant. Report peak/steady RSS and cgroup/heap/kernel cache separately,
    payload and metadata throughput, and p50/p95/p99 latencies with repetition
-   and variance. Preserve failures and original measurements.
+   and variance. Include daemon/client user/system CPU, total cgroup CPU,
+   normalized CPU cost and throttling independently of elapsed time. Preserve
+   failures and original measurements; changed object generations invalidate
+   equivalent-workload acceptance.
 5. The implementation demonstrates lower memory use and faster operation across
    the agreed representative workloads without hiding regressions or weakening
    correctness/durability. Do not invent acceptance percentages or mark the

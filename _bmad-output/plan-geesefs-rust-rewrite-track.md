@@ -444,3 +444,22 @@ Transitive binary notices, full review and parent commit/push/draft PR remain.
   inferred from partial measurements. Earlier completed/interrupted evidence
   and final build/check receipts were saved before deleting the three finished
   owned Pods.
+
+## 2026-10-27: full CPU matrix retained; source mutation blocks equivalence
+
+- All fifty phases executed in 2,113 seconds. Independently validated 200 CPU
+  counter windows and all 483 indexed evidence-file hashes after retrieval.
+- Initial native generation inventory passed. Final native inventory returned
+  404 for 214 original objects. The run retained 144,478 successful full hashes,
+  5,516 ENOENT failures matching those paths, six separately unresolved EAGAIN
+  failures on the retained original Rust, and 146 listing mismatches. Post-run
+  native listing found four changed directories. No failed phase/member was
+  removed to manufacture a result.
+- CPU collection is complete, but throughput/CPU efficiency acceptance is not:
+  phases read different byte totals. The raw evidence and sanitized failed-run
+  observations are linked from docs/k8s-cpu-results-20261027.md. An immutable or
+  version-pinned fixture is required before an equivalent-workload acceptance
+  claim. The six EAGAIN errors and metadata/read-tail root causes remain open.
+- Saved the fixed binary assets, counter traces, Pod receipts and post-run native
+  checks before removing the final owned diagnostic Pod. All four owned Pods are
+  removed; served mounts, writers, CSI and GitOps configuration were not changed.

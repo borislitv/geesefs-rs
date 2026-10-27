@@ -12,7 +12,11 @@
 - **Read window:** a half-open byte interval `[start, end)` fetched for a caller
   and possible subsequent reads. Adjacent windows do not overlap.
 - **Fill owner:** the generation-scoped owner of an in-flight read window. Its
-  guard wakes overlapping followers on completion, failure or cancellation.
+  guard notifies followers when chunks are published and wakes them on completion,
+  failure or cancellation.
+- **Requested-range reply:** the one-shot publication of complete caller bytes,
+  before unrelated read-ahead finishes. The original admitted request task still
+  owns the remaining work, byte reservations, deadline and tail errors.
 - **Payload budget:** the bounded ownership charge shared by cached, queued,
   in-flight and output payloads; retained cache alone is not total memory use.
 - **Charged view:** an immutable visible range retaining the complete backing

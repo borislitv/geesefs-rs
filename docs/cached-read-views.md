@@ -72,7 +72,44 @@ Crapper reports Block view helpers at CC 1 and the existing filesystem read
 function at CC 50. Coverage/CRAP remain unmeasured; the three earlier duplicate
 candidates remain. These are not completed broad quality gates.
 
-A repeated matched native comparison is required before claiming throughput,
-CPU, RSS or tail improvement. Keep the previous measured losses and the complete
-new results, including adverse repetitions. Overall compatibility/performance
-acceptance remains **false**.
+## Matched native comparison
+
+The forty-phase comparison at `df7e755` completed with 120,000 full file checks,
+unchanged native conditional hashes/listings before and after, and 280 independently
+recomputed CPU windows. All 460 indexed artifacts were checked again after
+collection. Both Rust compiled-input sets match their recorded Git commits.
+The [numeric summary](cached-read-views-results-20261027.json) includes source and
+executable hashes, all group means, primary dispersion, client/allocator/cgroup/
+backend memory and CPU. The original full numeric receipt and per-phase raw
+files remain retained separately; this does not overwrite the earlier comparison.
+
+The [sealed methodology](immutable-read-dataset.md) is unchanged: 3,000 files,
+8,298,727,528 bytes, 97 exact listings, 2 CPU/4 GiB filesystem cgroup, separate
+4 CPU/6 GiB backend cgroup, 512 MiB payload budget, 100,000 entries and four
+128 KiB readers. Five interleaved rotations/reversal cover both states for both
+Go references, the exact prior copy binary and charged views. The default allocator
+is unchanged. Explicit xattr/forced-stat work is included for every implementation;
+the earlier failing plain-list/stat Go workload remains separate.
+
+Five-phase means, decimal MB; RSS is sampled peak / mean final fifth, not a
+stationary plateau. CPU is whole filesystem-cgroup usage, not wall time.
+
+| Implementation/state | Read MB/s | Daemon RSS peak / steady MB | Cgroup CPU s | Read p99 ms | Listing s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Go experimental fresh | 605.337 | 1292.725 / 1206.547 | 29.723 | 9.858 | 0.453 |
+| Go experimental warm revisit | 595.021 | 1273.804 / 1213.711 | 29.215 | 9.986 | 0.032 |
+| Go packaged fresh | 601.326 | 1313.608 / 1222.234 | 29.911 | 9.976 | 0.471 |
+| Go packaged warm revisit | 573.798 | 1279.944 / 1215.664 | 30.278 | 10.509 | 0.025 |
+| Rust charged views fresh | 574.811 | 537.125 / 361.390 | 31.107 | 16.932 | 1.481 |
+| Rust charged views warm revisit | 535.804 | 641.930 / 359.425 | 31.998 | 17.315 | 0.020 |
+| Rust prior copy fresh | 562.545 | 538.467 / 354.158 | 31.783 | 17.647 | 1.418 |
+| Rust prior copy warm revisit | 524.622 | 659.778 / 356.828 | 32.652 | 18.165 | 0.020 |
+
+The modest mean improvement against the matched copy binary does not establish
+an overall win: Go remains faster with lower CPU and p99, Rust fresh listing is
+slower, and view steady RSS/allocator use and system CPU are not uniformly lower
+than the prior Rust binary. Dispersion overlaps; no significance claim is made.
+All filesystem cgroups remain near their memory cap under file-cache pressure,
+so lower daemon RSS is not a whole-memory acceptance result. Native backend
+request metrics and Go heap time series remain missing. Overall compatibility/
+performance acceptance remains **false**.

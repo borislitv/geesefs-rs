@@ -23,7 +23,8 @@ pub(crate) struct FillGuard {
 }
 
 /// Coalesce overlapping windows of one generation, without serializing disjoint
-/// readers. The owned interval closes its channel on success, error or cancellation.
+/// readers. Completed chunks notify followers; the owned interval closes its
+/// channel on success, error or cancellation.
 pub(crate) fn start_fill(
     node: &Arc<Inode>,
     generation: u64,
@@ -43,6 +44,14 @@ pub(crate) fn start_fill(
         node: node.clone(),
         key,
     })
+}
+
+impl FillGuard {
+    pub(crate) fn published(&self) {
+        if let Some(fill) = self.node.read_fills.lock().unwrap().get(&self.key) {
+            fill.done.send_replace(());
+        }
+    }
 }
 
 impl Drop for FillGuard {

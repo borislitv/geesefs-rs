@@ -16,6 +16,13 @@ daemon RSS. The original plain standard-listing Go metadata failures remain
 separate. Profiles, syscall counts and an unchanged-binary allocator A/B identify
 partial allocation cost without claiming that tuning alone fixes the regressions.
 
+The [matched charged-view comparison](cached-read-views.md#matched-native-comparison)
+also completes forty phases and 120,000 full file checks. Its exact-copy baseline
+is retained in the same run. Views modestly improve group mean throughput/p99
+against that copy binary, but still lose to Go on throughput, CPU and p99; steady
+RSS and system CPU are not uniformly improved. The numeric receipt retains both
+RSS and CPU with allocator, client, cgroup and separate native-backend scope.
+
 ## Runner and reproduction
 
 `bench/workloads.json`, `bench/compare.py` and `scripts/bench_worker.py` build the

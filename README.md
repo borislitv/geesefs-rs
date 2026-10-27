@@ -87,6 +87,13 @@ while retaining lower process RSS. Plain standard-listing Go metadata failures,
 owned profiles and an unchanged-binary allocator A/B are retained separately.
 This additional read workload does not complete the full acceptance matrix.
 
+The [matched charged-view comparison](docs/cached-read-views.md#matched-native-comparison)
+retains the prior copy executable and both Go references: another forty phases
+and 120,000 file checks pass, but overall performance remains unaccepted.
+The [requested-range reply follow-up](docs/requested-read-reply.md) gives ready
+bytes to FUSE before unrelated parallel read-ahead completes, while retaining the
+same bounded request owner, byte charges, deadline and observable tail errors.
+
 Backend IAM/profile authentication, signature discovery/SigV2, encryption and
 request options now have loopback HTTP/TLS coverage. See [backend options](docs/backend-options.md)
 for supported semantics and remaining limits; PATCH now has writer

@@ -759,7 +759,39 @@ impl Filesystem {
         Ok(node)
     }
 
+    /// Publish the requested result while retaining the caller-owned load future.
+    /// A returned error belongs to read-ahead after a successful publication.
+    pub async fn read_reply(
+        &self,
+        ino: u64,
+        offset: u64,
+        length: usize,
+        ready: impl FnOnce(Result<Block>) + Send,
+    ) -> Option<Error> {
+        let mut ready = Some(ready);
+        let result = self.read_inner(ino, offset, length, &mut ready).await;
+        if let Some(ready) = ready {
+            ready(result.map(|block| block.expect("unpublished read owns its result")));
+            None
+        } else {
+            result.err()
+        }
+    }
+
     pub async fn read(&self, ino: u64, offset: u64, length: usize) -> Result<Block> {
+        Ok(self
+            .read_inner(ino, offset, length, &mut None::<fn(Result<Block>)>)
+            .await?
+            .expect("a read without early publication retains its result"))
+    }
+
+    async fn read_inner(
+        &self,
+        ino: u64,
+        offset: u64,
+        length: usize,
+        ready: &mut Option<impl FnOnce(Result<Block>) + Send>,
+    ) -> Result<Option<Block>> {
         if length > MAX_IO {
             return Err(Error::Fs(libc::EINVAL));
         }
@@ -799,7 +831,7 @@ impl Filesystem {
         // A hit drops this unused reservation and shares the backing allocation.
         let reply = self.admit(length).await?;
         if length == 0 {
-            return reply.copy(&[]);
+            return reply.copy(&[]).map(Some);
         }
         let cached = {
             self.cache
@@ -810,7 +842,7 @@ impl Filesystem {
         if let Some((block, relative)) = cached {
             // The immutable view retains the entire backing charge through the
             // synchronous reply without another payload allocation or copy.
-            return Ok(block.slice(relative..relative + length));
+            return Ok(Some(block.slice(relative..relative + length)));
         }
         // Miss admission reserves output and scratch atomically below.
         drop(reply);
@@ -847,18 +879,8 @@ impl Filesystem {
         // FUSE may issue neighboring reads before the first window completes.
         // Waiting readers must not reserve another whole window and evict the
         // very fill they can reuse. Recheck after wakeup and after taking ownership.
-        let _fill = loop {
-            let owner = match read::start_fill(&node, generation, start, start + prefetch as u64) {
-                read::FillAdmission::Leader(owner) => Some(owner),
-                read::FillAdmission::Wait(mut done) => {
-                    // A closed channel means the owner exited, including errors
-                    // and cancellation. Retry the cache; do not cache its failure.
-                    let _ = tokio::time::timeout(self.config.request_timeout, done.changed())
-                        .await
-                        .map_err(|_| Error::Timeout("overlapping read fill"))?;
-                    None
-                }
-            };
+        let fill = loop {
+            let admission = read::start_fill(&node, generation, start, start + prefetch as u64);
             let reply = self.admit(length).await?;
             let cached = self
                 .cache
@@ -866,11 +888,19 @@ impl Filesystem {
                 .unwrap()
                 .covering(ino, generation, offset, length);
             if let Some((block, relative)) = cached {
-                return Ok(block.slice(relative..relative + length));
+                return Ok(Some(block.slice(relative..relative + length)));
             }
             drop(reply);
-            if let Some(owner) = owner {
-                break owner;
+            match admission {
+                read::FillAdmission::Leader(owner) => break owner,
+                read::FillAdmission::Wait(mut done) => {
+                    // Subscribe before the cache check so a completed chunk
+                    // cannot be missed between lookup and waiting. Closing also
+                    // wakes followers after error or cancellation; retry normally.
+                    let _ = tokio::time::timeout(self.config.request_timeout, done.changed())
+                        .await
+                        .map_err(|_| Error::Timeout("overlapping read fill"))?;
+                }
             }
         };
         // Atomically admit all payload/GET/output buffers before the first
@@ -901,9 +931,18 @@ impl Filesystem {
             && snapshot.remote.as_ref().map(|head| head.etag.clone()) == etag;
         // The snapshot may have shrunk while admission flushed another generation.
         let available = length.min(snapshot.size.saturating_sub(offset) as usize);
+        result.shrink(available);
+        let mut result = Some(result);
+        let mut remaining = available;
+        if remaining == 0
+            && let Some(ready) = ready.take()
+        {
+            ready(Ok(result.take().expect("empty requested result")));
+        }
         let end = (start + prefetch as u64).min(snapshot.size);
         let mut tasks = tokio::task::JoinSet::new();
         let mut next = start;
+        let mut prefetch_error = None;
         while next < end || !tasks.is_empty() {
             while next < end && tasks.len() < self.config.max_requests {
                 let at = next;
@@ -912,32 +951,57 @@ impl Filesystem {
                 let mut owner = charge.split((if single_buffer { 1 } else { 2 }) * amount);
                 let (store, snapshot) = (self.store.clone(), snapshot.clone());
                 tasks.spawn(async move {
-                    let local = Budget::new(2 * amount)?;
-                    let block = write::materialize(&store, &snapshot, at, amount, &local)
-                        .await?
-                        .with_owner(owner.split(amount));
-                    Ok::<_, Error>((at, block))
+                    let result = async {
+                        let local = Budget::new(2 * amount)?;
+                        let block = write::materialize(&store, &snapshot, at, amount, &local)
+                            .await?
+                            .with_owner(owner.split(amount));
+                        Ok::<_, Error>(block)
+                    }
+                    .await;
+                    (at, result)
                 });
             }
             let completed = tasks.join_next().await.expect("nonempty read task set");
-            let (at, block) = match completed {
-                Ok(Ok(value)) => value,
-                other => {
+            let (at, outcome) = match completed {
+                Ok(value) => value,
+                Err(_) => {
                     tasks.abort_all();
                     while tasks.join_next().await.is_some() {}
-                    return Err(match other {
-                        Ok(Err(error)) => error,
-                        _ => Error::Cancelled,
-                    });
+                    return Err(Error::Cancelled);
+                }
+            };
+            let block = match outcome {
+                Ok(block) => block,
+                Err(error) => {
+                    let chunk_end = (at + chunk as u64).min(end);
+                    if at >= offset + available as u64 || chunk_end <= offset {
+                        // A speculative failure cannot cancel a healthy requested
+                        // dependency. Retain it for the owner after publication.
+                        prefetch_error.get_or_insert(error);
+                        continue;
+                    }
+                    tasks.abort_all();
+                    while tasks.join_next().await.is_some() {}
+                    return Err(error);
                 }
             };
             let left = at.max(offset);
             let right = (at + block.as_slice().len() as u64).min(offset + available as u64);
             if right > left {
-                result.as_mut_slice()[(left - offset) as usize..(right - offset) as usize]
+                result
+                    .as_mut()
+                    .expect("incomplete requested result")
+                    .as_mut_slice()[(left - offset) as usize..(right - offset) as usize]
                     .copy_from_slice(
                         &block.as_slice()[(left - at) as usize..(right - at) as usize],
                     );
+                remaining -= (right - left) as usize;
+            }
+            if remaining == 0
+                && let Some(ready) = ready.take()
+            {
+                ready(Ok(result.take().expect("completed requested result")));
             }
             if cacheable {
                 // Pressure may have replaced the policy while GET was in flight.
@@ -946,9 +1010,12 @@ impl Filesystem {
                     .lock()
                     .unwrap()
                     .insert(ino, generation, at, block);
+                fill.published();
             }
         }
-        result.shrink(available);
+        if let Some(error) = prefetch_error {
+            return Err(error);
+        }
         Ok(result)
     }
 

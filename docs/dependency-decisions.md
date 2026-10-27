@@ -237,3 +237,15 @@ This reuses the
 existing allocation, semaphore ownership, Moka policy and fuser borrowed reply;
 it is not a new allocator, cache or FUSE implementation. Measurement is required
 before claiming that removing this copy resolves the observed CPU/tail deficit.
+
+## Requested-range publication with owned read-ahead
+
+Reuse the existing Tokio JoinSet, watch notification and request semaphore for
+read-window scheduling, cancellation and admission. A one-shot Rust callback can
+consume the existing fuser reply when its requested bytes are complete; the
+already admitted FUSE task continues owning the remaining window and reports its
+error. No extra spawned job or per-read channel is needed. Tests alone use
+Tokio oneshot channels to observe the callback while independently gating backend
+ranges. The ordinary awaitable read retains its full-window completion/error
+contract. This is application-level reply timing, not a new runtime, queue or
+FUSE protocol implementation.

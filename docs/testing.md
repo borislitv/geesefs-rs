@@ -21,19 +21,25 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
 ```
 
-The 157 Rust integration tests cover actual loopback SDK HTTP requests and signed
+The 170 Rust integration tests cover actual loopback SDK HTTP requests and signed
 extension transport, metadata/schema contracts, configuration, inode/namespace
 state, dirty generations and concurrency. The performance-gate test invokes 23
-Python evidence/summary tests. Five additional Python tests cover provenance and
-the fixture oracle. No Rust tests are ignored. These are not a
+Python evidence/summary tests. Fourteen additional Python tests cover provenance,
+the sealed fixture and metadata oracles. No Rust tests are ignored. These are not a
 claim of complete reference-test parity or production durability acceptance.
 
 The latest full checks ran in an isolated Kubernetes build Pod without S3
 credentials: formatting, all-target/all-feature tests and warning-denying Clippy,
-23 benchmark Python cases, five source/oracle Python cases, and the 336-package
+23 benchmark Python cases, fourteen source/oracle Python cases, and the 336-package
 public-source audit passed. Directory/preload guard mutations and CPU
 system-time/unit/identity mutations failed their expected assertions and were
 restored. A live process/cgroup smoke check also observed positive CPU deltas.
+
+The [requested-range reply cases](requested-read-reply.md) independently gate exact
+backend ranges and verify early complete bytes, waiting followers, requested and
+optional errors in both completion orders, cancellation/budget release, multi-chunk
+requests, EOF/validation and writes/fsync during a pending tail. They preserve the
+existing FIFO-pressure, cache-generation and concurrent-window assertions.
 
 The ub-mode follow-up checks adjacent, non-overlapping read windows through
 `Filesystem::read` in both arrival orders. Both requests must reach the gated

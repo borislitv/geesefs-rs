@@ -254,9 +254,14 @@ impl fuser::Filesystem for Fuse {
         reply: ReplyData,
     ) {
         self.spawn(reply, move |fs, reply| async move {
-            match fs.read(ino.0, offset, size as usize).await {
-                Ok(data) => reply.data(data.as_slice()),
-                Err(error) => reply.error(errno(error)),
+            if let Some(error) = fs
+                .read_reply(ino.0, offset, size as usize, move |result| match result {
+                    Ok(data) => reply.data(data.as_slice()),
+                    Err(error) => reply.error(errno(error)),
+                })
+                .await
+            {
+                eprintln!("read-ahead failed after reply: {error}");
             }
         });
     }

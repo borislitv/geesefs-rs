@@ -64,6 +64,7 @@ pub struct MemoryStore {
     pub completed_parts: AtomicUsize,
     pub part_completed: tokio::sync::Notify,
     pub read_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    pub read_range_gates: Mutex<BTreeMap<(u64, usize), Arc<tokio::sync::Semaphore>>>,
     pub read_started: tokio::sync::Notify,
     pub head_keys: Mutex<Vec<String>>,
     pub head_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
@@ -309,6 +310,15 @@ impl Store for MemoryStore {
         self.read_started.notify_one();
         let gate = self.read_gate.lock().unwrap().clone();
         if let Some(gate) = gate {
+            gate.acquire().await.map_err(|_| Error::Cancelled)?.forget();
+        }
+        let range_gate = self
+            .read_range_gates
+            .lock()
+            .unwrap()
+            .get(&(offset, length))
+            .cloned();
+        if let Some(gate) = range_gate {
             gate.acquire().await.map_err(|_| Error::Cancelled)?.forget();
         }
         let reservation = budget.reserve(length).await?;

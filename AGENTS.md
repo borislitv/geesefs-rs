@@ -11,6 +11,11 @@
   SSH must be noninteractive (BatchMode, connection/operation deadlines); do not
   prompt the user about SSH or wait for interactive authentication.
 - Read `docs/project-brief.md` before planning, implementation or review.
+- Follow the requested [ub-mode](https://github.com/unclebob/ub-mode) workflow:
+  understand the contract, choose the smallest cohesive change, observe a
+  meaningful failing test, implement, verify and only then refactor. Keep an
+  action/reason log and report quality-tool findings with their actual scope;
+  tool success does not replace compatibility or performance acceptance.
 - The current scope is a Linux/S3 replacement for both GeeseFS readers and
   writers, not an unlabelled read-only prototype or a Go wrapper.
 - Keep Go behavior, source revisions, compatibility gaps and performance

@@ -288,6 +288,54 @@ async fn disjoint_read_fills_of_one_inode_still_fetch_concurrently() {
 }
 
 #[tokio::test]
+async fn adjacent_read_windows_fetch_concurrently_in_both_arrival_orders() {
+    use std::{sync::Arc, time::Duration};
+    const STEP: usize = 128 * 1024;
+    let expected: Vec<u8> = (0..2 * MIB)
+        .map(|offset| if offset < MIB { b'a' } else { b'b' })
+        .collect();
+    for offsets in [[0, MIB], [MIB, 0]] {
+        let store = MemoryStore::new();
+        store.seed("file", &expected);
+        let mut config = MemoryStore::config(64);
+        config.read_ahead = 1024;
+        config.read_ahead_small = 1024;
+        config.read_ahead_large = 1024;
+        let fs = Filesystem::new(config, store.clone()).unwrap();
+        let node = fs.lookup(1, "file").await.unwrap();
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        *store.read_gate.lock().unwrap() = Some(gate.clone());
+        let mut reads = Vec::new();
+        for (index, offset) in offsets.into_iter().enumerate() {
+            let fs = fs.clone();
+            let ino = node.ino;
+            reads.push((
+                offset,
+                tokio::spawn(async move { fs.read(ino, offset as u64, STEP).await }),
+            ));
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while store.read_calls.load(Ordering::Relaxed) < index + 1 {
+                    store.read_started.notified().await;
+                }
+            })
+            .await
+            .expect("adjacent windows must both reach the backend before either completes");
+        }
+        gate.add_permits(2);
+        for (offset, read) in reads {
+            let block = tokio::time::timeout(Duration::from_secs(3), read)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(block.as_slice(), &expected[offset..offset + STEP]);
+        }
+        assert_eq!(store.read_calls.load(Ordering::Relaxed), 2);
+        assert!(fs.effective_budgets().data_used_bytes <= fs.effective_budgets().data_shared_bytes);
+    }
+}
+
+#[tokio::test]
 async fn sequential_128_kib_reads_track_cache_hits_and_keep_adaptive_windows() {
     const STEP: usize = 128 * 1024;
     let size = 32 * MIB;

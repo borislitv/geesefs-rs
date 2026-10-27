@@ -422,3 +422,25 @@ Transitive binary notices, full review and parent commit/push/draft PR remain.
   interrupted receipts preserve the unfavorable new-Rust fresh measurement.
   A full same-manifest comparison with CPU counters is still required; no CPU
   win or metadata throughput acceptance is claimed.
+
+## 2026-10-27: requested ub-mode and read-boundary failure sensitivity
+
+- Read and verified upstream ub-mode; executed its public Rust-capable crapper,
+  dryer and mutator tools in the secret-free Kubernetes build Pod. Complexity
+  and three duplicate candidates are recorded, with coverage/CRAP explicitly
+  unmeasured. This is not a completed whole-package cleanup.
+- Two selected strict-boundary mutations survived the previous read tests.
+  Added a public Filesystem::read check requiring adjacent half-open windows to
+  start concurrently in both arrival orders and return distinct expected bytes.
+  All three selected overlap mutants now die. Separate injected-boundary runs
+  failed the expected behavior assertion; restored production hashes match.
+- All 147 Rust tests, 23 benchmark Python tests, five source/oracle tests, fmt,
+  warning-denying Clippy and the 336-package public audit pass. Evidence and
+  action/reason log: _bmad-output/ub-mode-20261027.md and
+  docs/quality-results-20261027.json.
+- The unchanged-hash five-implementation, fifty-phase CPU comparison is running.
+  Listing discrepancies observed during the run remain failures to classify
+  against native state after completion; no performance or correctness win is
+  inferred from partial measurements. Earlier completed/interrupted evidence
+  and final build/check receipts were saved before deleting the three finished
+  owned Pods.

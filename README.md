@@ -44,6 +44,12 @@ The input is `docs/project-brief.md`; generated plans and actual run results
 belong under `_bmad-output/`. Commit initial configuration before starting a
 build iteration: BMAD requires a clean task branch.
 
+The requested [ub-mode workflow](https://github.com/unclebob/ub-mode) is applied
+to continued development. Its first [quality checkpoint](docs/quality-results-20261027.json)
+and [execution log](_bmad-output/ub-mode-20261027.md) retain complexity findings,
+duplicate candidates and a verified improvement to adjacent-read boundary tests.
+See the [glossary](docs/glossary.md) for ownership and measurement terminology.
+
 ## Status
 
 **Experimental read/write mounts work; do not replace a served mount.** The

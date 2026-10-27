@@ -16,7 +16,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
 ```
 
-The 146 Rust integration tests cover actual loopback SDK HTTP requests and signed
+The 147 Rust integration tests cover actual loopback SDK HTTP requests and signed
 extension transport, metadata/schema contracts, configuration, inode/namespace
 state, dirty generations and concurrency. The performance-gate test invokes 23
 Python evidence/summary tests. Five additional Python tests cover provenance and
@@ -29,6 +29,16 @@ credentials: formatting, all-target/all-feature tests and warning-denying Clippy
 public-source audit passed. Directory/preload guard mutations and CPU
 system-time/unit/identity mutations failed their expected assertions and were
 restored. A live process/cgroup smoke check also observed positive CPU deltas.
+
+The ub-mode follow-up checks adjacent, non-overlapping read windows through
+`Filesystem::read` in both arrival orders. Both requests must reach the gated
+backend before either completes, then return independently expected bytes.
+`mutator` originally left both strict-boundary mutations alive; the new test
+kills both. Separate runs retained the actual behavior assertion failures, not
+compilation errors or timeouts of the mutation runner. The restored full suite
+passes. See [the quality checkpoint](quality-results-20261027.json) and
+[execution log](../_bmad-output/ub-mode-20261027.md) for the deliberately limited
+mutation scope and the still-open complexity/coverage findings.
 
 CPU windows retain user/system/total seconds for daemon and client independently,
 plus cgroup usage and throttling counters. Reports distinguish wall time, occupied

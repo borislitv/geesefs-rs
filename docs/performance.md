@@ -382,3 +382,15 @@ mutation. The [CPU checkpoint](k8s-cpu-results-20261027.md) and
 their error counts, CPU scopes, exact provenance and limitations. An immutable or
 version-pinned dataset is required before claiming a repeated equivalent-workload
 win. Earlier adverse results and the ten-phase CPU-less interruption remain intact.
+
+## Metadata-coherence repair after the invalid comparison
+
+Deterministic Kubernetes tests subsequently reproduced successful lookup/getattr
+being rejected after an unrelated cached name disappeared remotely. The
+[coherence repair](metadata-coherence.md) validates affected bindings/ownership,
+retains necessary negative-directory snapshot checks, and prevents late responses
+from discarding cancelled moves or dirty/newly durable descendants. Ten added
+behavior tests, twelve independent guard faults and restored full checks provide
+correctness evidence. This does not retroactively attribute all six historical
+EAGAIN failures, repair changed-source equivalence, or establish a speed/CPU/RSS
+win. A new immutable/version-pinned mounted comparison remains required.

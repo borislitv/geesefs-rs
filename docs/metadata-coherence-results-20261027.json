@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "accepted": false,
+  "scope": "Deterministic public filesystem API metadata-coherence regressions in a secret-free Kubernetes build Pod; not mounted or comparative performance acceptance",
+  "base_revision": "9d75ea80473d8f8032851013b0063e477cdcd78c",
+  "source_sha256": {
+    "src/filesystem.rs": "507f5fad9faf5eafb3542f025cec623e76bbf97fb6b33c7b3e9ce318c1bcc28b",
+    "src/namespace.rs": "995f35ef79f3f711ec6176a82f0551ec16d0177a2a9593719b0153e59d1b896b",
+    "tests/review_regressions.rs": "31ab5ffa06e2d33c230c35a42fcd62fe36ff99fba0cb4c0f3e980e6d4f1516e5"
+  },
+  "initial_reproduction": {
+    "source_sha256": "bf0e71f079062c3408436cd5569667ad302c5dd52c3e517d2a0c02ed12619265",
+    "test_exitcode": 101,
+    "passed": 17,
+    "failed": 2,
+    "expected_errno": 11,
+    "observed_behavior_assertions": [
+      "an unrelated remote deletion must not invalidate a successful HEAD",
+      "an unrelated remote deletion must not invalidate getattr"
+    ]
+  },
+  "additional_intermediate_red_checks": [
+    {"case": "cancelled move ownership", "test_exitcode": 101, "expected_behavior_assertion_failed": true},
+    {"case": "dirty descendants and newly durable child during an empty directory probe", "test_exitcode": 101, "expected_behavior_assertion_failed": true}
+  ],
+  "final_checks": {
+    "rust_tests_passed": 157,
+    "rust_tests_ignored": 0,
+    "review_regressions_passed": 24,
+    "new_behavior_tests": 10,
+    "benchmark_python_tests_passed": 23,
+    "source_oracle_python_tests_passed": 5,
+    "fmt": "passed",
+    "clippy_all_targets_all_features_deny_warnings": "passed",
+    "public_cargo_packages_audited": 336,
+    "release_build": "passed"
+  },
+  "failure_sensitivity": {
+    "independent_guard_faults": 12,
+    "all_failed_expected_behavior_assertion": true,
+    "all_test_exitcodes": 101,
+    "restored_source_hash_verified": true,
+    "restored_full_checks_passed": true
+  },
+  "quality_tools": {
+    "crapper_revision": "6fd92c4c9bcc56efb64a2f8743d5a2993bcfd42d",
+    "dryer_revision": "66ff6d21a42c04afcad89c78a80066176d1294b0",
+    "mutator_revision": "a5a0cb803b66e0cdb8bf471b3b08af701d424a41",
+    "tree_sitter": "0.26.0",
+    "tree_sitter_language_pack": "1.22.1",
+    "selected_source": "src/filesystem.rs",
+    "selected_line": 325,
+    "selected_mutants": 2,
+    "initial": {"killed": 1, "survived": 1},
+    "final": {"killed": 2, "survived": 0},
+    "final_source_scanned_sites": 364,
+    "lookup_cc": 51,
+    "attribute_refresh_cc": 47,
+    "duplicate_candidates_at_threshold_0_8": 3,
+    "coverage": null,
+    "crap": null,
+    "whole_package_quality_gate_passed": false
+  },
+  "native_executable": {
+    "sha256": "876795011201d5098b4f60f25e3f98b6191c0d008fdef215894ab9a9bf77a2a7",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "cc": "cc (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+    "cargo": "build --release --locked --offline",
+    "compiled_source_files_hash_checked": 25
+  },
+  "limitations": [
+    "Attribution of the six historical mounted EAGAIN failures is not established",
+    "No post-fix equivalent repeated Go/Rust performance comparison",
+    "An immutable or version-pinned dataset is still required",
+    "Negative lookups and directory snapshots can still conservatively return EAGAIN",
+    "Coverage/CRAP and whole-package mutation/duplication acceptance are incomplete"
+  ]
+}

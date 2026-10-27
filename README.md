@@ -76,6 +76,10 @@ The [50-phase CPU-accounted diagnostic](docs/k8s-cpu-results-20261027.md)
 completed, but 214 objects disappeared during the run. It retained 5,522 file
 failures and 146 listing mismatches; its lower observed CPU costs do not prove
 a win on equivalent data. Six EAGAIN failures remain separately unresolved.
+The [metadata coherence follow-up](docs/metadata-coherence.md) reproduces and
+repairs unrelated-name EAGAIN plus response-publication ownership races with ten
+new behavior tests. Attribution of the six historical failures and a valid
+post-fix performance comparison are still open.
 
 Backend IAM/profile authentication, signature discovery/SigV2, encryption and
 request options now have loopback HTTP/TLS coverage. See [backend options](docs/backend-options.md)

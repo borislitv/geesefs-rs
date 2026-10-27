@@ -6,7 +6,9 @@
   A read-cache generation combines that version with the remote ETag so data from
   different versions cannot share cached payloads.
 - **Namespace epoch:** the local mutation counter protecting directory snapshots
-  from concurrent create, unlink and rename. It is distinct from payload version.
+  and negative namespace inferences from concurrent create, unlink and rename.
+  Successful single-name metadata publication instead checks the affected binding
+  and ownership. The epoch is distinct from payload version.
 - **Read window:** a half-open byte interval `[start, end)` fetched for a caller
   and possible subsequent reads. Adjacent windows do not overlap.
 - **Fill owner:** the generation-scoped owner of an in-flight read window. Its

@@ -47,6 +47,405 @@ async fn stale_lookup_head_cannot_replace_a_new_successfully_flushed_generation(
 }
 
 #[tokio::test]
+async fn lookup_survives_an_unrelated_cached_name_disappearing_remotely() {
+    for cached in [false, true] {
+        let store = MemoryStore::new();
+        store.seed("stable", b"unchanged payload");
+        store.seed("gone", b"old neighbor");
+        let fs = fs(&store);
+        fs.lookup(1, "gone").await.unwrap();
+        let original = if cached {
+            Some(fs.lookup(1, "stable").await.unwrap())
+        } else {
+            None
+        };
+        let (seen, release) = store.pause_head_response();
+        let lookup = tokio::spawn({
+            let fs = fs.clone();
+            async move { fs.lookup(1, "stable").await }
+        });
+        seen.await.unwrap();
+        store.objects.lock().unwrap().remove("gone");
+        assert!(matches!(
+            fs.lookup(1, "gone").await,
+            Err(Error::Fs(libc::ENOENT))
+        ));
+        release.send(()).unwrap();
+        let node = lookup
+            .await
+            .unwrap()
+            .expect("an unrelated remote deletion must not invalidate a successful HEAD");
+        if let Some(original) = original {
+            assert!(std::sync::Arc::ptr_eq(&original, &node));
+        }
+        assert_eq!(node.attr().size, 17);
+        assert_eq!(
+            fs.read(node.ino, 0, 17).await.unwrap().as_slice(),
+            b"unchanged payload"
+        );
+    }
+}
+
+#[tokio::test]
+async fn getattr_survives_an_unrelated_cached_name_disappearing_remotely() {
+    let store = MemoryStore::new();
+    store.seed("stable", b"unchanged payload");
+    store.seed("gone", b"old neighbor");
+    let fs = fs(&store);
+    let original = fs.lookup(1, "stable").await.unwrap();
+    fs.lookup(1, "gone").await.unwrap();
+    fs.open(original.ino, false).unwrap();
+    fs.reference(&original);
+    let (seen, release) = store.pause_head_response();
+    let refresh = tokio::spawn({
+        let fs = fs.clone();
+        let ino = original.ino;
+        async move { fs.refresh_inode_if_expired(ino).await }
+    });
+    seen.await.unwrap();
+    store.objects.lock().unwrap().remove("gone");
+    assert!(matches!(
+        fs.lookup(1, "gone").await,
+        Err(Error::Fs(libc::ENOENT))
+    ));
+    release.send(()).unwrap();
+    let refreshed = refresh
+        .await
+        .unwrap()
+        .expect("an unrelated remote deletion must not invalidate getattr");
+    assert!(std::sync::Arc::ptr_eq(&original, &refreshed));
+    assert_eq!(refreshed.attr().size, 17);
+    assert_eq!(
+        fs.read(refreshed.ino, 0, 17).await.unwrap().as_slice(),
+        b"unchanged payload"
+    );
+    let state = refreshed.state.lock().unwrap();
+    assert_eq!((state.opens, state.lookups), (1, 1));
+}
+
+#[tokio::test]
+async fn lookup_head_cannot_publish_under_a_renamed_or_deleted_parent() {
+    for rename in [false, true] {
+        let store = MemoryStore::new();
+        store.seed("dir/", b"");
+        store.seed("dir/file", b"payload");
+        let fs = fs(&store);
+        let parent = fs.lookup(1, "dir").await.unwrap();
+        let (seen, release) = store.pause_head_response();
+        let lookup = tokio::spawn({
+            let fs = fs.clone();
+            async move { fs.lookup(parent.ino, "file").await }
+        });
+        seen.await.unwrap();
+        if rename {
+            fs.rename(1, "dir", 1, "moved").await.unwrap();
+        } else {
+            store.objects.lock().unwrap().remove("dir/file");
+            fs.unlink(1, "dir", true).await.unwrap();
+        }
+        release.send(()).unwrap();
+        assert!(matches!(
+            lookup.await.unwrap(),
+            Err(Error::Fs(libc::EAGAIN))
+        ));
+        assert!(matches!(
+            fs.lookup(1, "dir").await,
+            Err(Error::Fs(libc::ENOENT))
+        ));
+        if rename {
+            let moved = fs.lookup(1, "moved").await.unwrap();
+            let file = fs.lookup(moved.ino, "file").await.unwrap();
+            assert_eq!(
+                fs.read(file.ino, 0, 7).await.unwrap().as_slice(),
+                b"payload"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn lookup_head_cannot_resurrect_a_remotely_removed_cached_name() {
+    let store = MemoryStore::new();
+    store.seed("file", b"old payload");
+    let fs = fs(&store);
+    fs.lookup(1, "file").await.unwrap();
+    let (seen, release) = store.pause_head_response();
+    let lookup = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.lookup(1, "file").await }
+    });
+    seen.await.unwrap();
+    store.objects.lock().unwrap().remove("file");
+    assert!(matches!(
+        fs.lookup(1, "file").await,
+        Err(Error::Fs(libc::ENOENT))
+    ));
+    release.send(()).unwrap();
+    assert!(matches!(
+        lookup.await.unwrap(),
+        Err(Error::Fs(libc::EAGAIN))
+    ));
+    assert!(matches!(
+        fs.lookup(1, "file").await,
+        Err(Error::Fs(libc::ENOENT))
+    ));
+}
+
+#[tokio::test]
+async fn lookup_head_cannot_publish_after_an_uncached_name_was_unlinked() {
+    let store = MemoryStore::new();
+    store.seed("file", b"old payload");
+    let fs = fs(&store);
+    let (seen, release) = store.pause_head_response();
+    let lookup = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.lookup(1, "file").await }
+    });
+    seen.await.unwrap();
+    fs.unlink(1, "file", false).await.unwrap();
+    release.send(()).unwrap();
+    assert!(matches!(
+        lookup.await.unwrap(),
+        Err(Error::Fs(libc::EAGAIN))
+    ));
+    assert!(matches!(
+        fs.lookup(1, "file").await,
+        Err(Error::Fs(libc::ENOENT))
+    ));
+}
+
+#[tokio::test]
+async fn metadata_head_cannot_publish_during_parent_rename() {
+    for getattr in [false, true] {
+        let store = MemoryStore::new();
+        store.seed("dir/", b"");
+        store.seed("dir/file", b"payload");
+        let mut config = MemoryStore::config(32);
+        config.stat_cache_ttl = Duration::ZERO;
+        config.no_implicit_dir = true;
+        let fs = Filesystem::new(config, store.clone()).unwrap();
+        let parent = fs.lookup(1, "dir").await.unwrap();
+        let file = fs.lookup(parent.ino, "file").await.unwrap();
+        let (seen, release) = store.pause_head_response();
+        let metadata = tokio::spawn({
+            let fs = fs.clone();
+            let parent = parent.ino;
+            let ino = file.ino;
+            async move {
+                if getattr {
+                    fs.refresh_inode_if_expired(ino).await
+                } else {
+                    fs.lookup(parent, "file").await
+                }
+            }
+        });
+        seen.await.unwrap();
+        let (moving, finish_move) = store.pause_list();
+        let rename = tokio::spawn({
+            let fs = fs.clone();
+            async move { fs.rename(1, "dir", 1, "moved").await }
+        });
+        moving.await.unwrap();
+        release.send(()).unwrap();
+        assert!(matches!(
+            metadata.await.unwrap(),
+            Err(Error::Fs(libc::EAGAIN))
+        ));
+        finish_move.send(()).unwrap();
+        rename.await.unwrap().unwrap();
+        let moved = fs.lookup(1, "moved").await.unwrap();
+        let moved_file = fs.lookup(moved.ino, "file").await.unwrap();
+        assert_eq!(moved_file.ino, file.ino);
+        assert_eq!(
+            fs.read(moved_file.ino, 0, 7).await.unwrap().as_slice(),
+            b"payload"
+        );
+    }
+}
+
+#[tokio::test]
+async fn metadata_head_cannot_publish_through_a_cancelled_pending_delete() {
+    for getattr in [false, true] {
+        let store = MemoryStore::new();
+        store.seed("file", b"payload");
+        let fs = fs(&store);
+        let file = fs.lookup(1, "file").await.unwrap();
+        let (seen, release) = store.pause_head_response();
+        let metadata = tokio::spawn({
+            let fs = fs.clone();
+            let ino = file.ino;
+            async move {
+                if getattr {
+                    fs.refresh_inode_if_expired(ino).await
+                } else {
+                    fs.lookup(1, "file").await
+                }
+            }
+        });
+        seen.await.unwrap();
+        let (deleting, _finish_delete) = store.pause_delete(false);
+        let delete = tokio::spawn({
+            let fs = fs.clone();
+            async move { fs.unlink(1, "file", false).await }
+        });
+        deleting.await.unwrap();
+        delete.abort();
+        assert!(delete.await.unwrap_err().is_cancelled());
+        release.send(()).unwrap();
+        assert!(matches!(
+            metadata.await.unwrap(),
+            Err(Error::Fs(libc::EAGAIN))
+        ));
+        fs.unlink(1, "file", false).await.unwrap();
+        assert!(matches!(
+            fs.lookup(1, "file").await,
+            Err(Error::Fs(libc::ENOENT))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn metadata_head_preserves_cancelled_parent_move_ownership() {
+    for getattr in [false, true] {
+        let store = MemoryStore::new();
+        store.seed("dir/", b"");
+        store.seed("dir/file", b"payload");
+        let mut config = MemoryStore::config(32);
+        config.stat_cache_ttl = Duration::ZERO;
+        config.no_implicit_dir = true;
+        let fs = Filesystem::new(config, store.clone()).unwrap();
+        let dir = fs.lookup(1, "dir").await.unwrap();
+        let (seen, release) = store.pause_head_response();
+        let metadata = tokio::spawn({
+            let fs = fs.clone();
+            let ino = dir.ino;
+            async move {
+                if getattr {
+                    fs.refresh_inode_if_expired(ino).await
+                } else {
+                    fs.lookup(1, "dir").await
+                }
+            }
+        });
+        seen.await.unwrap();
+        let (moving, _finish_move) = store.pause_list();
+        let rename = tokio::spawn({
+            let fs = fs.clone();
+            async move { fs.rename(1, "dir", 1, "moved").await }
+        });
+        moving.await.unwrap();
+        rename.abort();
+        assert!(rename.await.unwrap_err().is_cancelled());
+        release.send(()).unwrap();
+        assert_eq!(metadata.await.unwrap().unwrap().ino, dir.ino);
+        assert!(
+            matches!(
+                fs.rename(1, "dir", 1, "other").await,
+                Err(Error::Fs(libc::EBUSY))
+            ),
+            "an owned cancelled move must reject a different destination"
+        );
+        fs.rename(1, "dir", 1, "moved").await.unwrap();
+        let moved = fs.lookup(1, "moved").await.unwrap();
+        assert_eq!(moved.ino, dir.ino);
+        let file = fs.lookup(moved.ino, "file").await.unwrap();
+        assert_eq!(
+            fs.read(file.ino, 0, 7).await.unwrap().as_slice(),
+            b"payload"
+        );
+    }
+}
+
+#[tokio::test]
+async fn expired_directory_probes_cannot_orphan_new_dirty_descendants() {
+    for getattr in [false, true] {
+        for create in [false, true] {
+            let store = MemoryStore::new();
+            store.seed("dir/old", b"old");
+            let fs = fs(&store);
+            let dir = fs.lookup(1, "dir").await.unwrap();
+            let old = fs.lookup(dir.ino, "old").await.unwrap();
+            store.objects.lock().unwrap().remove("dir/old");
+            let (seen, release) = store.pause_list();
+            let probe = tokio::spawn({
+                let fs = fs.clone();
+                let ino = dir.ino;
+                async move {
+                    if getattr {
+                        fs.refresh_inode_if_expired(ino).await
+                    } else {
+                        fs.lookup(1, "dir").await
+                    }
+                }
+            });
+            seen.await.unwrap();
+            let file = if create {
+                fs.create(dir.ino, "new", libc::S_IFREG | 0o600, None, 0)
+                    .await
+                    .unwrap()
+            } else {
+                old
+            };
+            fs.write(file.ino, 0, b"local payload").await.unwrap();
+            release.send(()).unwrap();
+            let result = probe.await.unwrap();
+            assert!(
+                if getattr {
+                    result.is_ok()
+                } else {
+                    matches!(result, Err(Error::Fs(libc::EAGAIN)))
+                },
+                "a late empty LIST must not orphan dirty descendants"
+            );
+            assert_eq!(fs.lookup(1, "dir").await.unwrap().ino, dir.ino);
+            let name = if create { "new" } else { "old" };
+            let child = fs.lookup(dir.ino, name).await.unwrap();
+            assert_eq!(child.ino, file.ino);
+            assert_eq!(
+                fs.read(child.ino, 0, 13).await.unwrap().as_slice(),
+                b"local payload"
+            );
+            fs.fsync(child.ino).await.unwrap();
+            assert_eq!(store.bytes(&format!("dir/{name}")), b"local payload");
+        }
+    }
+}
+
+#[tokio::test]
+async fn empty_directory_refresh_cannot_erase_a_child_created_and_flushed_during_the_probe() {
+    let store = MemoryStore::new();
+    store.seed("dir/old", b"old");
+    let fs = fs(&store);
+    let dir = fs.lookup(1, "dir").await.unwrap();
+    store.objects.lock().unwrap().remove("dir/old");
+    let (seen, release) = store.pause_list();
+    let refresh = tokio::spawn({
+        let fs = fs.clone();
+        let ino = dir.ino;
+        async move { fs.refresh_inode_if_expired(ino).await }
+    });
+    seen.await.unwrap();
+    let child = fs
+        .create(dir.ino, "new", libc::S_IFREG | 0o600, None, 0)
+        .await
+        .unwrap();
+    fs.write(child.ino, 0, b"durable payload").await.unwrap();
+    fs.fsync(child.ino).await.unwrap();
+    release.send(()).unwrap();
+    assert!(
+        matches!(refresh.await.unwrap(), Err(Error::Fs(libc::EAGAIN))),
+        "a late empty LIST must not erase a directory with a newly durable child"
+    );
+    assert_eq!(fs.lookup(1, "dir").await.unwrap().ino, dir.ino);
+    let current = fs.lookup(dir.ino, "new").await.unwrap();
+    assert_eq!(current.ino, child.ino);
+    assert_eq!(
+        fs.read(current.ino, 0, 15).await.unwrap().as_slice(),
+        b"durable payload"
+    );
+}
+
+#[tokio::test]
 async fn committed_multipart_generation_and_cancelled_verification_remain_retryable() {
     for cancelled in [false, true] {
         let store = MemoryStore::new();

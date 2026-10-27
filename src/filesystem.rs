@@ -256,18 +256,8 @@ impl Filesystem {
                     || state.data_key.is_some()
                     || state.version > state.durable
                     || state.metadata_known && state.fetched.elapsed() < self.config.stat_cache_ttl
-                    || file_type(state.mode) == FileType::Directory && {
-                        let prefix = format!("{key}/");
-                        ns.names
-                            .range(prefix.clone()..)
-                            .take_while(|(name, _)| name.starts_with(&prefix))
-                            .any(|(_, ino)| {
-                                ns.nodes.get(ino).is_some_and(|child| {
-                                    let state = child.state.lock().unwrap();
-                                    !state.deleted && state.version > state.durable
-                                })
-                            })
-                    }
+                    || file_type(state.mode) == FileType::Directory
+                        && ns.has_dirty_descendants(&key)
                 {
                     drop(state);
                     return Ok(node);
@@ -325,7 +315,14 @@ impl Filesystem {
             Err(error) => return Err(error),
         };
         let mut ns = self.namespace.lock().unwrap();
-        if ns.epoch != epoch || ns.hidden(&key) {
+        {
+            let parent = ns.get(parent)?;
+            let state = parent.state.lock().unwrap();
+            if state.deleted || child(&state.key, name)? != key {
+                return Err(Error::Fs(libc::EAGAIN));
+            }
+        }
+        if ns.is_moving(&key) || ns.is_deleting(&key) || ns.hidden(&key) {
             return Err(Error::Fs(libc::EAGAIN));
         }
         if let Some(node) = ns.named(&key) {
@@ -340,7 +337,10 @@ impl Filesystem {
             {
                 return Err(Error::Fs(libc::EAGAIN));
             }
-            if state.version == state.durable {
+            if state.version == state.durable
+                && state.rename_target.is_none()
+                && state.data_key.is_none()
+            {
                 let mut replacement = fresh.state.into_inner().unwrap();
                 replacement.lookups = state.lookups;
                 replacement.opens = state.opens;
@@ -351,6 +351,9 @@ impl Filesystem {
             }
             drop(state);
             return Ok(node);
+        }
+        if observed.is_some() {
+            return Err(Error::Fs(libc::EAGAIN));
         }
         ns.install(&key, |ino| {
             Inode::new(ino, key.clone(), directory, head, &self.config)
@@ -465,21 +468,8 @@ impl Filesystem {
                 return Ok(node.clone());
             }
             let directory = file_type(s.mode) == FileType::Directory;
-            if directory {
-                let prefix = format!("{}/", s.key);
-                if ns
-                    .names
-                    .range(prefix.clone()..)
-                    .take_while(|(name, _)| name.starts_with(&prefix))
-                    .any(|(_, ino)| {
-                        ns.nodes.get(ino).is_some_and(|node| {
-                            let s = node.state.lock().unwrap();
-                            !s.deleted && s.version > s.durable
-                        })
-                    })
-                {
-                    return Ok(node.clone());
-                }
+            if directory && ns.has_dirty_descendants(&s.key) {
+                return Ok(node.clone());
             }
             (
                 s.key.clone(),
@@ -525,14 +515,25 @@ impl Filesystem {
         };
         let mut ns = self.namespace.lock().unwrap();
         let mut s = node.state.lock().unwrap();
-        if ns.epoch != epoch || s.deleted || s.key != key || ns.names.get(&key) != Some(&ino) {
+        if s.deleted
+            || s.key != key
+            || ns.names.get(&key) != Some(&ino)
+            || ns.is_moving(&key)
+            || ns.is_deleting(&key)
+        {
             return Err(Error::Fs(libc::EAGAIN));
         }
         if s.version != version
             || s.remote.as_ref().map(|h| &h.etag) != remote.as_ref().map(|h| &h.etag)
             || s.version > s.durable
+            || s.rename_target.is_some()
+            || s.data_key.is_some()
+            || directory && ns.has_dirty_descendants(&key)
         {
             return Ok(node.clone());
+        }
+        if directory && ns.epoch != epoch && fetched.as_ref().is_err_and(not_found) {
+            return Err(Error::Fs(libc::EAGAIN));
         }
         match fetched {
             Ok(head) => {
@@ -574,6 +575,7 @@ impl Filesystem {
         if let Some(node) = ns.named(key) {
             let mut state = node.state.lock().unwrap();
             if state.version > state.durable
+                || file_type(state.mode) == FileType::Directory && ns.has_dirty_descendants(key)
                 || observed.as_ref()
                     != Some(&(
                         node.ino,

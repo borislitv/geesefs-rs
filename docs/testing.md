@@ -16,7 +16,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
 ```
 
-The 147 Rust integration tests cover actual loopback SDK HTTP requests and signed
+The 157 Rust integration tests cover actual loopback SDK HTTP requests and signed
 extension transport, metadata/schema contracts, configuration, inode/namespace
 state, dirty generations and concurrency. The performance-gate test invokes 23
 Python evidence/summary tests. Five additional Python tests cover provenance and
@@ -39,6 +39,14 @@ compilation errors or timeouts of the mutation runner. The restored full suite
 passes. See [the quality checkpoint](quality-results-20261027.json) and
 [execution log](../_bmad-output/ub-mode-20261027.md) for the deliberately limited
 mutation scope and the still-open complexity/coverage findings.
+
+The [metadata coherence follow-up](metadata-coherence.md) adds ten public behavior
+tests. Unrelated remote-name removal no longer invalidates successful lookup or
+getattr; old responses cannot erase move/delete ownership or orphan dirty/newly
+durable children. Twelve independent guard faults failed their actual assertions,
+two selected tool mutants are killed, and the restored full checks and native
+release build pass in the secret-free Kubernetes Pod. This is not a mounted
+reproduction of all six historical EAGAIN failures or a measured performance win.
 
 CPU windows retain user/system/total seconds for daemon and client independently,
 plus cgroup usage and throttling counters. Reports distinguish wall time, occupied

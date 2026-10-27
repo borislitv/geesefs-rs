@@ -45,6 +45,23 @@ impl Namespace {
         self.names.get(key).and_then(|i| self.nodes.get(i)).cloned()
     }
 
+    pub(crate) fn has_dirty_descendants(&self, key: &str) -> bool {
+        let prefix = if key.is_empty() {
+            String::new()
+        } else {
+            format!("{key}/")
+        };
+        self.names
+            .range(prefix.clone()..)
+            .take_while(|(name, _)| name.starts_with(&prefix))
+            .any(|(_, ino)| {
+                self.nodes.get(ino).is_some_and(|node| {
+                    let state = node.state.lock().unwrap();
+                    !state.deleted && state.version > state.durable
+                })
+            })
+    }
+
     pub fn hidden(&mut self, key: &str) -> bool {
         let now = Instant::now();
         self.tombstones.retain(|_, until| *until > now);

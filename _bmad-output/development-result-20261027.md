@@ -18,7 +18,7 @@ subsequent actual-FUSE overlapping-fill ownership repair is measured at
 
 ## Verification and measured limits
 
-- Format check, warning-denying all-target/all-feature Clippy and all 147 Rust
+- Format check, warning-denying all-target/all-feature Clippy and all 157 Rust
   tests passed in isolated Kubernetes, none ignored. The Rust evidence wrapper
   runs 23 Python benchmark
   cases; five additional Python provenance/oracle cases passed.
@@ -66,6 +66,13 @@ subsequent actual-FUSE overlapping-fill ownership repair is measured at
   were verified. The failed comparison cannot establish CPU/performance wins.
   Six EAGAIN failures remain distinct from remotely deleted data. See
   docs/k8s-cpu-results-20261027.md and the whitelisted JSON.
+- The subsequent metadata-coherence follow-up reproduces unrelated-name EAGAIN
+  through public lookup/getattr calls, fixes affected-binding publication and
+  preserves move/delete and dirty-descendant ownership. Ten additional behavior
+  tests, twelve assertion-level guard faults, two selected tool mutants, restored
+  full checks and a native release build passed in isolated Kubernetes. The six
+  historical mounted failures still require attribution and a valid paired rerun;
+  no post-fix comparative performance win is claimed. See docs/metadata-coherence.md.
 
 ## Remaining work and decision
 

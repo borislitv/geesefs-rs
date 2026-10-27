@@ -476,3 +476,29 @@ Transitive binary notices, full review and parent commit/push/draft PR remain.
 - This is a reporting correction, not a workload rerun or an acceptance change.
   Source mutation and the six EAGAIN errors remain explicit. Future checkpoints
   must keep RSS visible alongside CPU under the project's agent rules.
+
+## 2026-10-27: affected-binding metadata coherence and ownership
+
+- Reproduced lookup/getattr EAGAIN from unrelated cached-name removal in a new
+  secret-free Kubernetes build Pod: two expected errno-11 assertions failed on
+  the prior source. Replaced global invalidation of successful metadata responses
+  with affected parent/binding/version/ETag and move/delete/tombstone checks.
+- Intermediate red checks exposed lost cancelled-move ownership and directory
+  probes orphaning dirty/newly durable children. Preserved pending move/backing
+  state; centralized dirty-descendant detection and rechecked it after I/O;
+  retained the epoch guard for negative directory publication after local changes.
+- Ten new public tests pass. All 157 Rust tests, 23 benchmark Python cases, five
+  provenance/oracle cases, fmt, warning-denying Clippy, the 336-package audit and
+  native release build passed in Kubernetes. Twelve independent guard faults fail
+  the required assertions and restored checks pass. A surviving tombstone mutant
+  prompted an additional uncached lookup/unlink test; both selected tool mutants
+  are now killed. Failed/intermediate receipts remain alongside the final ones.
+- Crapper/dryer were repeated. Coverage/CRAP and the three existing duplicate
+  candidates remain open. The whitelisted receipt and action/reason log are in
+  docs/metadata-coherence-results-20261027.json and _bmad-output/ub-mode-20261027.md.
+- This repairs a reproduced mechanism, not attribution of all six historical
+  EAGAIN errors or acceptance. Immutable/version-pinned mounted data and equivalent
+  repeated CPU/RSS/throughput/tail measurements remain the next performance work.
+- Verified all 93 retained raw evidence artifacts and 25 compiled-input hashes,
+  saved the native release, and removed the completed owned build Pod. No owned
+  task Pods remain. Production data, served mounts and writer schedules are unchanged.

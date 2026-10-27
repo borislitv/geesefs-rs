@@ -1,0 +1,69 @@
+{
+  "schema": "streamed-read-body-quality-v1",
+  "accepted": false,
+  "scope": "Bounded conditional-GET body delivery and same-generation cached fragment composition; not whole-filesystem acceptance",
+  "source_base": "d17a5a6d4eb1a0c080be69e00ba7478a50f72f48",
+  "verification": {
+    "environment": "isolated secret-free Kubernetes build Pod",
+    "rust_tests_passed": 178,
+    "rust_tests_failed": 0,
+    "rust_tests_ignored": 0,
+    "affected_tests_passed": 56,
+    "source_oracle_python_cases_passed": 14,
+    "benchmark_python_cases_passed": 23,
+    "format_check_passed": true,
+    "all_target_all_feature_warning_denying_clippy_passed": true,
+    "public_cargo_packages_audited": 336,
+    "audit_errors": [],
+    "explicit_package_clean_after_mutations": true
+  },
+  "source_hashes": {
+    "src/budget.rs": "3e0ade5c7129539763859d5eed9e3e56fdf2035f2ead5dfc45edf917ec64cd8c",
+    "src/cache.rs": "243f025a91fbf1420e51ad4fc821707f99e155e759f81f3329141bc3f075ea55",
+    "src/backend/mod.rs": "f5881062acd2379472355ea3b17ce502196ed44da30c66891fffcf2bb0de9eac",
+    "src/backend/s3.rs": "c91e0f454b43f6c424c91a06c8fcfc8924cd206a389b8f33df837a733cf49309",
+    "src/filesystem.rs": "2a9ad5027895491d5f19489ecc983dce164604c10267be030ecf4060498803d2",
+    "tests/backend_contract.rs": "e56724cec6ec1db2712f9e71df99c0f8ba2d8785adf7d4bd540e05a53b55552c"
+  },
+  "independent_faults": [
+    {"fault": "defer-body-prefix", "exitcode": 101, "assertion_failure": true, "log_sha256": "e5b2cce771d0b8caa11114ca2277e584f38943c74b2d3c6d79acf1a0efe24f8f"},
+    {"fault": "omit-complete-get-charge", "exitcode": 101, "assertion_failure": true, "log_sha256": "2a0fc08cf03ca45b7f2265e849cf3fa31614ba103663f4c7accaa95ed3a8bd99"},
+    {"fault": "skip-cached-fragment-span", "exitcode": 101, "assertion_failure": true, "log_sha256": "e779b4f4a092b950abfed2783d47c7aebc4b68a71f3940415824d1557982b5a1"},
+    {"fault": "publish-before-checksum", "exitcode": 101, "assertion_failure": true, "log_sha256": "090739f39958ecd0d91303d02ac784a52c5000a047b2937199feae876af664f2"},
+    {"fault": "ignore-short-read", "exitcode": 101, "assertion_failure": true, "log_sha256": "babe7b0d2cea2b386605a785380362182d1eb83b6badd9a8b9612949672e48b4"},
+    {"fault": "hide-late-body-error", "exitcode": 101, "assertion_failure": true, "log_sha256": "67913187905af733b8a92db7d044a4db1ee2aacba8d9297fe7015e0bb3d4d56e"},
+    {"fault": "lose-fragment-offset", "exitcode": 101, "assertion_failure": true, "log_sha256": "51bb5f872e25977ffce244cbd6a8e7e9955cb4334d58121838705a28e65cc438"}
+  ],
+  "companion_tools": {
+    "crapper_revision": "6fd92c4c9bcc56efb64a2f8743d5a2993bcfd42d",
+    "dryer_revision": "66ff6d21a42c04afcad89c78a80066176d1294b0",
+    "mutator_revision": "a5a0cb803b66e0cdb8bf471b3b08af701d424a41",
+    "reported_complexity": {
+      "body_function_before_refactor": 18,
+      "deliver_range": 9,
+      "read_range_chunks_inner": 7,
+      "require_eof": 3,
+      "cached_fragment_read": 6,
+      "filesystem_read_inner": 49
+    },
+    "coverage": null,
+    "CRAP": null,
+    "remaining_duplicate_candidates_at_0_8": 3,
+    "cache_mutation_sites_scanned": 25,
+    "selected_mutations_executed": 1,
+    "selected_mutations_killed": 1,
+    "selected_mutations_survived": 0,
+    "unselected_mutation_sites": 24,
+    "selected_line": 122,
+    "selected_mutation": "src/cache.rs:122 == -> !=",
+    "complexity_log_sha256": "68b853db263666d419e4df22254d6c7b8c4314c2a0f09df35b991ea12acbf4b8",
+    "duplicate_log_sha256": "49a46aaecc603c8e3ae0fca38382b2281aac7871ece6379d5b50a0f321f97577",
+    "mutation_log_sha256": "6afd8f4085458b9081f24329b20275f32d25a65df31518b774fda1c8fe8c1c27"
+  },
+  "remaining": [
+    "Matched native performance measurement and representative writer/random/HTTP workloads",
+    "Complete compatibility, historical EAGAIN attribution and binary-distribution notices",
+    "Whole-package coverage/CRAP, existing complexity and duplication findings",
+    "Unselected mutation sites and full boundary/failure matrix"
+  ]
+}

@@ -1,12 +1,12 @@
 # Progress tracker for plan-geesefs-rust-rewrite.md
 
-Latest checkpoint: the sealed native S3 diagnostic completes forty equivalent
-explicit-metadata phases with 120,000 correct full-byte checks and stable
-generations/listings. Original plain Go metadata failures remain retained. Rust
-still loses throughput/p99/CPU/cold listing despite lower process RSS; profiles
-and a same-binary allocator A/B retain partial causes. Stage 10 and overall
-compatibility/performance acceptance remain incomplete. See
-`docs/immutable-read-results-20261027.md` and the appended ub-mode action log.
+Latest checkpoint: the sealed native, charged-view and requested-reply matched
+comparisons retain equivalent bytes and adverse CPU/throughput/tail results.
+Incremental conditional-GET publication now has real HTTP/filesystem regressions,
+178 passing Rust cases, seven assertion-sensitive faults and complete ownership/
+checksum barriers. Its matched native measurement is still required. Stage 10
+and overall compatibility/performance acceptance remain incomplete. See
+`docs/streamed-read-body.md` and the appended ub-mode action log.
 
 Status format: [ ] - incomplete, [X] - completed. Updated: 2026-10-26.
 The parent owns BMAD orchestration, final review and all VCS delivery.
@@ -509,4 +509,25 @@ Transitive binary notices, full review and parent commit/push/draft PR remain.
   repeated CPU/RSS/throughput/tail measurements remain the next performance work.
 - Verified all 93 retained raw evidence artifacts and 25 compiled-input hashes,
   saved the native release, and removed the completed owned build Pod. No owned
-  task Pods remain. Production data, served mounts and writer schedules are unchanged.
+   task Pods remain. Production data, served mounts and writer schedules are unchanged.
+
+## 2026-10-27: conditional-GET body publication
+
+- Retained the completed forty-phase copy/view and requested-reply comparisons:
+  neither closes Go throughput, CPU or tail losses. Published CPU with peak/
+  final-fifth RSS and preserved all adverse phases and raw integrity receipts.
+- Reproduced both whole-GET prefix delay and lost delivery admission through the
+  actual SDK. A real Filesystem/S3 test then reproduced the separate core delay
+  and the intermediate cache's inability to join adjacent fragments.
+- Reused SDK/Tokio body reading and bounded delivery. Complete-GET admission stays
+  shared through producer, queue, cache and borrower. Advertised body checksums
+  still require complete SDK validation; writers retain complete-range reads.
+- All 178 Rust cases, 14 source/oracle and 23 benchmark Python cases, formatting,
+  warning-denying Clippy and the 336-package public audit pass in Kubernetes.
+  Seven independent faults fail actual assertions before and after the scoped
+  refactor. One selected cached-fragment completion mutant is killed; unselected
+  sites, coverage/CRAP and three earlier duplicate candidates remain open.
+- This is a verified behavior/ownership change, not a measured speed claim or
+  completion of Stage 10. Freeze the native release and repeat the same sealed
+  fixture against the exact prior Rust and both Go references before accepting
+  any performance conclusion. Production resources and credentials are unchanged.

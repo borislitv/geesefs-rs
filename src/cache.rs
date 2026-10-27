@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-use crate::budget::Block;
+use crate::budget::{Block, Reservation};
 
 /// Best-effort retained policy. Blocks remain charged to their allocation budget
 /// after eviction while any reader pins them. Cache admission never reserves bytes.
@@ -96,6 +96,34 @@ impl ReadCache {
             upper = (inode, generation, start - 1);
         }
         None
+    }
+
+    /// Reuse one immutable view, or join adjacent fragments into admitted output.
+    /// A gap remains a miss; bytes from different generations are never combined.
+    pub(crate) fn read(
+        &self,
+        inode: u64,
+        generation: u64,
+        offset: u64,
+        length: usize,
+        reply: Reservation,
+    ) -> Option<Block> {
+        if let Some((block, relative)) = self.covering(inode, generation, offset, length) {
+            return Some(block.slice(relative..relative + length));
+        }
+        let (mut block, mut relative) = self.covering(inode, generation, offset, 1)?;
+        let mut result = reply.zeroed();
+        let mut filled = 0;
+        loop {
+            let amount = (block.as_slice().len() - relative).min(length - filled);
+            result.as_mut_slice()[filled..filled + amount]
+                .copy_from_slice(&block.as_slice()[relative..relative + amount]);
+            filled += amount;
+            if filled == length {
+                return Some(result);
+            }
+            (block, relative) = self.covering(inode, generation, offset + filled as u64, 1)?;
+        }
     }
 
     pub fn insert(&self, inode: u64, generation: u64, offset: u64, block: Block) {

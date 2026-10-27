@@ -4,13 +4,45 @@ pub mod metadata;
 pub mod s3;
 
 use crate::{
-    budget::{Block, Budget},
-    error::Result,
+    budget::{Block, Budget, Reservation},
+    error::{Error, Result},
 };
 use aws_sdk_s3::{primitives::ByteStream, types::CompletedPart};
 use extended_list::ListPage;
 use s3::ObjectHead;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
+
+/// Bounded delivery owned by one admitted range producer.
+pub struct RangeSink {
+    sender: tokio::sync::mpsc::Sender<(u64, Block)>,
+    owner: Arc<Reservation>,
+}
+
+impl RangeSink {
+    pub fn new(sender: tokio::sync::mpsc::Sender<(u64, Block)>, owner: Reservation) -> Self {
+        Self {
+            sender,
+            owner: Arc::new(owner),
+        }
+    }
+
+    fn check(&self, length: usize) -> Result<()> {
+        if length > self.owner.size() {
+            return Err(Error::Budget {
+                requested: length,
+                limit: self.owner.size(),
+            });
+        }
+        Ok(())
+    }
+
+    pub async fn send(&self, offset: u64, block: Block) -> Result<()> {
+        self.sender
+            .send((offset, block.with_shared_owner(self.owner.clone())))
+            .await
+            .map_err(|_| Error::Cancelled)
+    }
+}
 
 /// The storage boundary is shared by the real SDK backend and small deterministic
 /// in-memory stores. Filesystem state, generation barriers and overlays are never mocked.
@@ -37,6 +69,19 @@ pub trait Store: Send + Sync + 'static {
         head: &ObjectHead,
         budget: &Budget,
     ) -> Result<Block>;
+    async fn read_range_chunks(
+        &self,
+        key: &str,
+        offset: u64,
+        length: usize,
+        head: &ObjectHead,
+        budget: &Budget,
+        output: &RangeSink,
+    ) -> Result<()> {
+        output.check(length.min(head.size.saturating_sub(offset) as usize))?;
+        let block = self.read_range(key, offset, length, head, budget).await?;
+        output.send(offset, block).await
+    }
     async fn put(
         &self,
         key: &str,
@@ -112,6 +157,18 @@ impl Store for s3::S3 {
         budget: &Budget,
     ) -> Result<Block> {
         self.read_range(key, offset, length, head, budget).await
+    }
+    async fn read_range_chunks(
+        &self,
+        key: &str,
+        offset: u64,
+        length: usize,
+        head: &ObjectHead,
+        budget: &Budget,
+        output: &RangeSink,
+    ) -> Result<()> {
+        self.read_range_chunks(key, offset, length, head, budget, output)
+            .await
     }
     async fn put(
         &self,

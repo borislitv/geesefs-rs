@@ -11,16 +11,20 @@ use aws_sdk_s3::{
     Client,
     config::{BehaviorVersion, Region},
     error::ProvideErrorMetadata,
+    operation::get_object::GetObjectOutput,
     primitives::ByteStream,
     types::{CompletedMultipartUpload, CompletedPart},
 };
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::{
-    budget::{Block, Budget},
+    budget::{Block, Budget, Reservation},
     config::{Config, ListType, SignatureVersion},
     error::{Error, Result},
 };
+
+const READ_CHUNK_BYTES: usize = 128 * 1024;
 
 /// One SDK client owns ordinary transport, TLS, credentials, signing and retries.
 #[derive(Clone)]
@@ -1038,13 +1042,132 @@ impl S3 {
         if length == 0 {
             return Ok(block);
         }
+        let response = self.get_range(key, offset, length, head).await?;
+        Self::finish_range(response.body, &mut block).await?;
+        Ok(block)
+    }
+
+    pub async fn read_range_chunks(
+        &self,
+        key: &str,
+        offset: u64,
+        length: usize,
+        head: &ObjectHead,
+        budget: &Budget,
+        output: &super::RangeSink,
+    ) -> Result<()> {
+        let length = u64::try_from(length)
+            .map_err(|_| Error::Config("read length overflow".into()))?
+            .min(head.size.saturating_sub(offset)) as usize;
+        if length == 0 {
+            return Ok(());
+        }
+        tokio::time::timeout(
+            self.read_timeout,
+            self.read_range_chunks_inner(key, offset, length, head, budget, output),
+        )
+        .await
+        .map_err(|_| Error::Timeout("GET chunk admission/response/body/delivery"))?
+    }
+
+    async fn read_range_chunks_inner(
+        &self,
+        key: &str,
+        offset: u64,
+        length: usize,
+        head: &ObjectHead,
+        budget: &Budget,
+        output: &super::RangeSink,
+    ) -> Result<()> {
+        output.check(length)?;
+        let first = budget.reserve(length.min(READ_CHUNK_BYTES)).await?;
+        let response = self.get_range(key, offset, length as u64, head).await?;
+        if Self::checksummed(&response) {
+            // The SDK validates a whole-body checksum only at completion. Never
+            // expose bytes that could subsequently fail that integrity check.
+            drop(first);
+            let mut block = budget.reserve(length).await?.zeroed();
+            Self::finish_range(response.body, &mut block).await?;
+            return output.send(offset, block).await;
+        }
+        Self::deliver_range(response.body, offset, length, budget, first, output).await
+    }
+
+    async fn deliver_range(
+        body: ByteStream,
+        offset: u64,
+        length: usize,
+        budget: &Budget,
+        first: Reservation,
+        output: &super::RangeSink,
+    ) -> Result<()> {
+        let mut body = body.into_async_read();
+        let mut first = Some(first);
+        let mut filled = 0;
+        while filled < length {
+            let amount = READ_CHUNK_BYTES.min(length - filled);
+            let reservation = match first.take() {
+                Some(reservation) => reservation,
+                None => budget.reserve(amount).await?,
+            };
+            let mut block = reservation.zeroed();
+            body.read_exact(block.as_mut_slice())
+                .await
+                .map_err(|error| backend("GET body", None, error))?;
+            if filled + amount == length {
+                Self::require_eof(&mut body).await?;
+            }
+            output.send(offset + filled as u64, block).await?;
+            filled += amount;
+        }
+        Ok(())
+    }
+
+    async fn require_eof(body: &mut (impl AsyncRead + Unpin)) -> Result<()> {
+        let mut extra = [0];
+        if body
+            .read(&mut extra)
+            .await
+            .map_err(|error| backend("GET body", None, error))?
+            != 0
+        {
+            return Err(Error::InvalidResponse("GET body longer than Range".into()));
+        }
+        Ok(())
+    }
+
+    fn checksummed(response: &GetObjectOutput) -> bool {
+        response.checksum_type().is_some()
+            || [
+                response.checksum_crc32(),
+                response.checksum_crc32_c(),
+                response.checksum_crc64_nvme(),
+                response.checksum_sha1(),
+                response.checksum_sha256(),
+                response.checksum_sha512(),
+                response.checksum_md5(),
+                response.checksum_xxhash64(),
+                response.checksum_xxhash3(),
+                response.checksum_xxhash128(),
+            ]
+            .iter()
+            .any(Option::is_some)
+    }
+
+    async fn get_range(
+        &self,
+        key: &str,
+        offset: u64,
+        length: u64,
+        head: &ObjectHead,
+    ) -> Result<GetObjectOutput> {
         if head.etag.is_empty() {
             return Err(Error::Config("conditional read requires ETag".into()));
         }
         let end = offset
             .checked_add(length - 1)
             .ok_or_else(|| Error::Config("range overflow".into()))?;
-        let mut response = self
+        let response = self
             .client
             .get_object()
             .bucket(&self.bucket)
@@ -1062,23 +1185,27 @@ impl S3 {
                 "GET range/length differs from requested generation".into(),
             ));
         }
+        Ok(response)
+    }
+
+    async fn finish_range(mut body: ByteStream, block: &mut Block) -> Result<()> {
+        let length = block.as_slice().len();
         let mut filled = 0;
-        while let Some(chunk) = response
-            .body
+        while let Some(chunk) = body
             .try_next()
             .await
             .map_err(|e| backend("GET body", None, e))?
         {
-            if chunk.len() > length as usize - filled {
+            if chunk.len() > length - filled {
                 return Err(Error::InvalidResponse("GET body longer than Range".into()));
             }
             block.as_mut_slice()[filled..filled + chunk.len()].copy_from_slice(&chunk);
             filled += chunk.len();
         }
-        if filled != length as usize {
+        if filled != length {
             return Err(Error::InvalidResponse("short GET body".into()));
         }
-        Ok(block)
+        Ok(())
     }
 
     /// Streaming input must be independently bounded by its allocation owner.

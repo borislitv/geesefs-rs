@@ -26,8 +26,10 @@ RSS and CPU with allocator, client, cgroup and separate native-backend scope.
 The [requested-range reply comparison](requested-read-reply.md#matched-native-result)
 adds forty more correct phases. Its behavior fix lets a requested result precede
 unrelated parallel read-ahead, but it does not resolve throughput, CPU, p99 or
-whole-memory losses. The complete-GET buffering boundary remains distinct and
-requires its own transport regression before another implementation change.
+whole-memory losses. The separate
+[complete-GET buffering follow-up](streamed-read-body.md) has failure-sensitive
+real HTTP and filesystem prefix tests. Comparative measurement remains required
+before attributing a performance improvement to that change.
 
 ## Runner and reproduction
 

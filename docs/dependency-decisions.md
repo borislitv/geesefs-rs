@@ -249,3 +249,17 @@ Tokio oneshot channels to observe the callback while independently gating backen
 ranges. The ordinary awaitable read retains its full-window completion/error
 contract. This is application-level reply timing, not a new runtime, queue or
 FUSE protocol implementation.
+
+## Incremental conditional-GET publication
+
+The public AWS SDK's ByteStream and Tokio AsyncRead adapter already own body
+framing, errors and cancellation. Reuse them for bounded 128 KiB completed body
+buffers, with a bounded Tokio mpsc channel to the existing window owner. The
+configured conditional GET ranges and request concurrency remain unchanged;
+do not add a small duplicate GET or implement an HTTP/S3 protocol. A shared Arc
+reservation must retain the complete admitted GET charge through producer,
+queued fragments, cache and last borrower. The existing charged Block owns each
+immutable completed buffer. Retain complete-body SDK validation before exposing
+any prefix when the response advertises a whole-body checksum, rather than
+publishing bytes before that integrity check can finish. Existing whole-range
+reads and writer materialization keep their full validation contract.

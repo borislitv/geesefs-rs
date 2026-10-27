@@ -93,6 +93,9 @@ and 120,000 file checks pass, but overall performance remains unaccepted.
 The [requested-range reply follow-up](docs/requested-read-reply.md) gives ready
 bytes to FUSE before unrelated parallel read-ahead completes, while retaining the
 same bounded request owner, byte charges, deadline and observable tail errors.
+The [incremental conditional-GET follow-up](docs/streamed-read-body.md) separately
+publishes complete body fragments, preserving advertised whole-body checksum
+validation and full admitted ownership. Its gated tests are not a speed claim.
 
 Backend IAM/profile authentication, signature discovery/SigV2, encryption and
 request options now have loopback HTTP/TLS coverage. See [backend options](docs/backend-options.md)

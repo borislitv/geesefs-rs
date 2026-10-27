@@ -90,10 +90,14 @@ pub struct Block {
 struct Allocation {
     data: Box<[u8]>,
     _reservation: Reservation,
-    _owner: Option<Reservation>,
+    _owner: Option<Arc<Reservation>>,
 }
 
 impl Reservation {
+    pub(crate) fn size(&self) -> usize {
+        self.size
+    }
+
     pub(crate) fn split(&mut self, size: usize) -> Self {
         assert!(
             size <= self.size,
@@ -155,7 +159,10 @@ impl Block {
         allocation.data = bytes.into_boxed_slice();
         self.range.end = allocation.data.len();
     }
-    pub(crate) fn with_owner(mut self, owner: Reservation) -> Self {
+    pub(crate) fn with_owner(self, owner: Reservation) -> Self {
+        self.with_shared_owner(Arc::new(owner))
+    }
+    pub(crate) fn with_shared_owner(mut self, owner: Arc<Reservation>) -> Self {
         let allocation =
             Arc::get_mut(&mut self.allocation).expect("new allocation is exclusively owned");
         assert_eq!(self.range, 0..allocation.data.len());

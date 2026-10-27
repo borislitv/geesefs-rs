@@ -828,24 +828,20 @@ impl Filesystem {
         };
         // Participate in pressure reclamation before borrowing a cache block:
         // an earlier FIFO waiter may need bytes published after its eviction.
-        // A hit drops this unused reservation and shares the backing allocation.
+        // One-block hits share their allocation; fragment spans use this output.
         let reply = self.admit(length).await?;
         if length == 0 {
             return reply.copy(&[]).map(Some);
         }
-        let cached = {
-            self.cache
-                .lock()
-                .unwrap()
-                .covering(ino, generation, offset, length)
-        };
-        if let Some((block, relative)) = cached {
-            // The immutable view retains the entire backing charge through the
-            // synchronous reply without another payload allocation or copy.
-            return Ok(Some(block.slice(relative..relative + length)));
+        if let Some(block) = self
+            .cache
+            .lock()
+            .unwrap()
+            .read(ino, generation, offset, length, reply)
+        {
+            return Ok(Some(block));
         }
         // Miss admission reserves output and scratch atomically below.
-        drop(reply);
         let budgets = self.effective_budgets();
         let mut start = if clean {
             offset / (128 * 1024) * (128 * 1024)
@@ -886,11 +882,10 @@ impl Filesystem {
                 .cache
                 .lock()
                 .unwrap()
-                .covering(ino, generation, offset, length);
-            if let Some((block, relative)) = cached {
-                return Ok(Some(block.slice(relative..relative + length)));
+                .read(ino, generation, offset, length, reply);
+            if let Some(block) = cached {
+                return Ok(Some(block));
             }
-            drop(reply);
             match admission {
                 read::FillAdmission::Leader(owner) => break owner,
                 read::FillAdmission::Wait(mut done) => {
@@ -941,50 +936,75 @@ impl Filesystem {
         }
         let end = (start + prefetch as u64).min(snapshot.size);
         let mut tasks = tokio::task::JoinSet::new();
+        let (sender, mut chunks) = tokio::sync::mpsc::channel(self.config.max_requests);
         let mut next = start;
         let mut prefetch_error = None;
-        while next < end || !tasks.is_empty() {
+        while next < end || !tasks.is_empty() || !chunks.is_empty() {
             while next < end && tasks.len() < self.config.max_requests {
                 let at = next;
                 let amount = (end - next).min(chunk as u64) as usize;
                 next += amount as u64;
                 let mut owner = charge.split((if single_buffer { 1 } else { 2 }) * amount);
                 let (store, snapshot) = (self.store.clone(), snapshot.clone());
+                let sender = sender.clone();
                 tasks.spawn(async move {
                     let result = async {
                         let local = Budget::new(2 * amount)?;
-                        let block = write::materialize(&store, &snapshot, at, amount, &local)
-                            .await?
-                            .with_owner(owner.split(amount));
-                        Ok::<_, Error>(block)
+                        let output = crate::backend::RangeSink::new(sender, owner.split(amount));
+                        if single_buffer {
+                            store
+                                .read_range_chunks(
+                                    &snapshot.key,
+                                    at,
+                                    amount,
+                                    snapshot.remote.as_ref().expect("clean remote snapshot"),
+                                    &local,
+                                    &output,
+                                )
+                                .await
+                        } else {
+                            let block =
+                                write::materialize(&store, &snapshot, at, amount, &local).await?;
+                            output.send(at, block).await
+                        }
                     }
                     .await;
                     (at, result)
                 });
             }
-            let completed = tasks.join_next().await.expect("nonempty read task set");
-            let (at, outcome) = match completed {
-                Ok(value) => value,
-                Err(_) => {
-                    tasks.abort_all();
-                    while tasks.join_next().await.is_some() {}
-                    return Err(Error::Cancelled);
+            let completed = tokio::select! {
+                // A producer can finish with a late body error after enqueueing
+                // valid requested bytes. Process those bytes before its result.
+                biased;
+                value = chunks.recv(), if !chunks.is_empty() || !tasks.is_empty() => {
+                    Some(value.expect("window retains its delivery sender"))
+                }
+                completed = tasks.join_next(), if !tasks.is_empty() => {
+                    let (at, outcome) = match completed.expect("nonempty read task set") {
+                        Ok(value) => value,
+                        Err(_) => {
+                            tasks.abort_all();
+                            while tasks.join_next().await.is_some() {}
+                            return Err(Error::Cancelled);
+                        }
+                    };
+                    if let Err(error) = outcome {
+                        let chunk_end = (at + chunk as u64).min(end);
+                        if at >= offset + available as u64 || chunk_end <= offset {
+                            // Optional read-ahead cannot cancel a healthy requested
+                            // dependency, irrespective of completion order.
+                            prefetch_error.get_or_insert(error);
+                            continue;
+                        }
+                        tasks.abort_all();
+                        while tasks.join_next().await.is_some() {}
+                        return Err(error);
+                    }
+                    None
                 }
             };
-            let block = match outcome {
-                Ok(block) => block,
-                Err(error) => {
-                    let chunk_end = (at + chunk as u64).min(end);
-                    if at >= offset + available as u64 || chunk_end <= offset {
-                        // A speculative failure cannot cancel a healthy requested
-                        // dependency. Retain it for the owner after publication.
-                        prefetch_error.get_or_insert(error);
-                        continue;
-                    }
-                    tasks.abort_all();
-                    while tasks.join_next().await.is_some() {}
-                    return Err(error);
-                }
+            let Some((at, block)) = completed else {
+                continue;
             };
             let left = at.max(offset);
             let right = (at + block.as_slice().len() as u64).min(offset + available as u64);

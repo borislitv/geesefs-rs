@@ -21,7 +21,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
 ```
 
-The 170 Rust integration tests cover actual loopback SDK HTTP requests and signed
+The 178 Rust integration tests cover actual loopback SDK HTTP requests and signed
 extension transport, metadata/schema contracts, configuration, inode/namespace
 state, dirty generations and concurrency. The performance-gate test invokes 23
 Python evidence/summary tests. Fourteen additional Python tests cover provenance,
@@ -40,6 +40,12 @@ backend ranges and verify early complete bytes, waiting followers, requested and
 optional errors in both completion orders, cancellation/budget release, multi-chunk
 requests, EOF/validation and writes/fsync during a pending tail. They preserve the
 existing FIFO-pressure, cache-generation and concurrent-window assertions.
+
+The [incremental body cases](streamed-read-body.md) add real conditional-GET
+prefix timing, complete admission transfer, checksum barriers, cached-fragment
+spans, truncated bodies and delivery/filesystem cancellation. Seven independent
+faults fail their intended assertions, and one selected tool completion-condition
+mutation is killed. Unselected sites and coverage/CRAP remain unmeasured.
 
 The ub-mode follow-up checks adjacent, non-overlapping read windows through
 `Filesystem::read` in both arrival orders. Both requests must reach the gated

@@ -23,6 +23,12 @@ against that copy binary, but still lose to Go on throughput, CPU and p99; stead
 RSS and system CPU are not uniformly improved. The numeric receipt retains both
 RSS and CPU with allocator, client, cgroup and separate native-backend scope.
 
+The [requested-range reply comparison](requested-read-reply.md#matched-native-result)
+adds forty more correct phases. Its behavior fix lets a requested result precede
+unrelated parallel read-ahead, but it does not resolve throughput, CPU, p99 or
+whole-memory losses. The complete-GET buffering boundary remains distinct and
+requires its own transport regression before another implementation change.
+
 ## Runner and reproduction
 
 `bench/workloads.json`, `bench/compare.py` and `scripts/bench_worker.py` build the

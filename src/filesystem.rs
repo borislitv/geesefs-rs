@@ -794,9 +794,9 @@ impl Filesystem {
         } else {
             0
         };
-        // Never pin a cache allocation across output admission. An older large
-        // FIFO waiter may need those exact permits before this small reply can
-        // be admitted. Reclaim policy entries before borrowing a cache block.
+        // Participate in pressure reclamation before borrowing a cache block:
+        // an earlier FIFO waiter may need bytes published after its eviction.
+        // A hit drops this unused reservation and shares the backing allocation.
         let reply = self.admit(length).await?;
         if length == 0 {
             return reply.copy(&[]);
@@ -808,7 +808,9 @@ impl Filesystem {
                 .covering(ino, generation, offset, length)
         };
         if let Some((block, relative)) = cached {
-            return reply.copy(&block.as_slice()[relative..relative + length]);
+            // The immutable view retains the entire backing charge through the
+            // synchronous reply without another payload allocation or copy.
+            return Ok(block.slice(relative..relative + length));
         }
         // Miss admission reserves output and scratch atomically below.
         drop(reply);
@@ -864,7 +866,7 @@ impl Filesystem {
                 .unwrap()
                 .covering(ino, generation, offset, length);
             if let Some((block, relative)) = cached {
-                return reply.copy(&block.as_slice()[relative..relative + length]);
+                return Ok(block.slice(relative..relative + length));
             }
             drop(reply);
             if let Some(owner) = owner {

@@ -15,6 +15,9 @@
   guard wakes overlapping followers on completion, failure or cancellation.
 - **Payload budget:** the bounded ownership charge shared by cached, queued,
   in-flight and output payloads; retained cache alone is not total memory use.
+- **Charged view:** an immutable visible range retaining the complete backing
+  allocation and its reservations, including when its visible length is zero.
+  Cache eviction does not release that allocation's charge while a view survives.
 - **CPU seconds:** differences between cumulative CPU counters at two boundaries.
   Process user/system CPU, whole-cgroup CPU and elapsed wall time are separate
   measurements. Adding process totals to cgroup totals would double-count work.

@@ -221,3 +221,19 @@ and closes the channel on every exit; followers retry the normal cache check
 under the existing request deadline. Disjoint windows still run concurrently.
 Publish completed blocks into the current cache policy, not a clone detached
 by a concurrent pressure eviction. Do not change payload/cache budgets.
+
+## Charged cached-read views
+
+Evaluated the already selected public `bytes::Bytes::slice` API before changing
+cache-hit reply ownership. `Block` also provides exclusive mutable fill access
+and carries allocation and optional outer-owner reservations; its live charge
+must describe the complete backing allocation, even for a small immutable view.
+Replacing that mutable owner with Bytes would introduce a second mutable/shared
+representation or a separate owner adapter. Use a narrow `Arc<Allocation>` plus
+standard-library `Range<usize>` view inside the existing charged Block. A public
+read regression first observed the redundant 4 KiB reply allocation; the view
+retains the complete backing charge through eviction and last-owner drop.
+This reuses the
+existing allocation, semaphore ownership, Moka policy and fuser borrowed reply;
+it is not a new allocator, cache or FUSE implementation. Measurement is required
+before claiming that removing this copy resolves the observed CPU/tail deficit.

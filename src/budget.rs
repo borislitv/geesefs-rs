@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -79,10 +79,13 @@ pub struct Reservation {
     size: usize,
 }
 
-/// Cloning a block pins the same allocation and its permit. No subslice escapes
-/// with a misleading smaller charge; callers copy through as_slice when needed.
+/// Clones and immutable views retain the complete allocation and its permits.
+/// The visible range never replaces its backing allocation's ownership charge.
 #[derive(Clone)]
-pub struct Block(Arc<Allocation>);
+pub struct Block {
+    allocation: Arc<Allocation>,
+    range: Range<usize>,
+}
 
 struct Allocation {
     data: Box<[u8]>,
@@ -107,46 +110,66 @@ impl Reservation {
     }
     pub fn zeroed(self) -> Block {
         let data = vec![0; self.size].into_boxed_slice();
-        Block(Arc::new(Allocation {
-            data,
-            _reservation: self,
-            _owner: None,
-        }))
+        Block::owned(data, self)
     }
 
     pub fn copy(self, bytes: &[u8]) -> Result<Block> {
         if bytes.len() != self.size {
             return Err(Error::Config("reservation length mismatch".into()));
         }
-        Ok(Block(Arc::new(Allocation {
-            data: bytes.into(),
-            _reservation: self,
-            _owner: None,
-        })))
+        Ok(Block::owned(bytes.into(), self))
     }
 }
 
 impl Block {
+    fn owned(data: Box<[u8]>, reservation: Reservation) -> Self {
+        let range = 0..data.len();
+        Self {
+            allocation: Arc::new(Allocation {
+                data,
+                _reservation: reservation,
+                _owner: None,
+            }),
+            range,
+        }
+    }
+
+    /// Share a visible range while retaining the whole backing allocation charge.
+    /// Like ordinary slice indexing, an out-of-bounds range panics.
+    pub fn slice(&self, range: Range<usize>) -> Self {
+        assert!(
+            self.as_slice().get(range.clone()).is_some(),
+            "block view must be within its visible range"
+        );
+        Self {
+            allocation: self.allocation.clone(),
+            range: self.range.start + range.start..self.range.start + range.end,
+        }
+    }
+
     pub(crate) fn shrink(&mut self, length: usize) {
-        let allocation = Arc::get_mut(&mut self.0).expect("unshared output block");
+        let allocation = Arc::get_mut(&mut self.allocation).expect("unshared output block");
+        assert_eq!(self.range, 0..allocation.data.len());
         let mut bytes = std::mem::take(&mut allocation.data).into_vec();
         bytes.truncate(length);
         allocation.data = bytes.into_boxed_slice();
+        self.range.end = allocation.data.len();
     }
     pub(crate) fn with_owner(mut self, owner: Reservation) -> Self {
-        Arc::get_mut(&mut self.0)
-            .expect("new allocation is exclusively owned")
-            ._owner = Some(owner);
+        let allocation =
+            Arc::get_mut(&mut self.allocation).expect("new allocation is exclusively owned");
+        assert_eq!(self.range, 0..allocation.data.len());
+        allocation._owner = Some(owner);
         self
     }
     pub fn as_slice(&self) -> &[u8] {
-        &self.0.data
+        &self.allocation.data[self.range.clone()]
     }
 
     pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
-        &mut Arc::get_mut(&mut self.0)
+        &mut Arc::get_mut(&mut self.allocation)
             .expect("new block must not be shared during fill")
-            .data
+            .data[self.range.clone()]
     }
 }
 

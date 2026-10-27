@@ -2,6 +2,49 @@
 use geesefs_rs::{budget::Budget, error::Error};
 mod support;
 
+#[test]
+fn nested_views_keep_the_full_charge_until_the_last_owner_is_dropped() {
+    let budget = Budget::new(8).unwrap();
+    let allocation = budget.try_reserve(8).unwrap().copy(b"abcdefgh").unwrap();
+    let middle = allocation.slice(2..7);
+    let tail = middle.slice(2..5);
+    let empty = tail.slice(1..1);
+    assert_eq!(middle.as_slice(), b"cdefg");
+    assert_eq!(tail.as_slice(), b"efg");
+    assert_eq!(empty.as_slice(), b"");
+    drop(allocation);
+    drop(middle);
+    drop(tail);
+    assert_eq!(budget.used(), 8);
+    assert!(budget.try_reserve(1).is_err());
+    drop(empty);
+    assert_eq!(budget.used(), 0);
+    assert_eq!(
+        budget
+            .try_reserve(8)
+            .unwrap()
+            .copy(b"ABCDEFGH")
+            .unwrap()
+            .as_slice(),
+        b"ABCDEFGH"
+    );
+}
+
+#[test]
+fn views_cannot_read_outside_their_parent_even_when_the_backing_allocation_is_larger() {
+    let budget = Budget::new(8).unwrap();
+    let allocation = budget.try_reserve(8).unwrap().copy(b"abcdefgh").unwrap();
+    let view = allocation.slice(2..5);
+    for (start, end) in [(0, 4), (4, 4), (2, 1)] {
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| view.slice(start..end)))
+                .is_err()
+        );
+    }
+    assert_eq!(view.as_slice(), b"cde");
+    assert_eq!(budget.used(), 8);
+}
+
 #[tokio::test]
 #[cfg(target_pointer_width = "64")]
 async fn large_total_budget_admits_small_owners_without_allocating_the_limit() {

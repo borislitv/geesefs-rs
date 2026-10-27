@@ -21,3 +21,9 @@
 - **Fresh / warm revisit:** respectively a new mount/process and a second full
   dataset traversal. Neither label establishes controlled cold kernel or remote
   caches; see [the performance methodology](performance.md).
+- **Sealed fixture:** disposable synthetic S3 data verified in full after removing
+  its write identity and restarting the native server read-only. Its generations
+  and independent payload/listing oracles are checked before and after workloads.
+- **Explicit metadata roundtrip:** an additional workload reading stored xattrs,
+  forcing attribute revalidation and checking ordinary stat plus payload bytes;
+  it does not erase a failure of the original plain-list/stat workload.

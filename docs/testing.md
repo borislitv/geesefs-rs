@@ -6,9 +6,14 @@ Use only disposable fixtures, never existing mounts or production credentials.
 ## Repeatable library checks
 
 Install Rust 1.96.0 or newer with rustfmt/clippy and the Python dependencies from
-`requirements-bench.txt` in the selected environment. The verified toolchain is
+`requirements-fixture.txt` in the selected environment. The verified toolchain is
 Rust 1.99.1. Dependencies resolve from public crates.io with Cargo.lock; process
 CPU accounting uses the public pinned psutil package.
+
+The [sealed native read diagnostic](immutable-read-dataset.md) adds synthetic
+immutable data, independently checked listings and native generation checks,
+plus explicit metadata-roundtrip behavior tests. It preserves the failing plain
+standard-listing Go workload and does not replace the complete acceptance matrix.
 
 ```bash
 cargo fmt --all -- --check

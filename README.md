@@ -25,7 +25,7 @@ mounted comparison additionally needs Linux FUSE, rsync, Go and the test require
 The initial environment uses Rust 1.99.1.
 
 Install the public Python benchmark dependencies in your selected virtual
-environment before the evidence/CPU tests: `pip install -r requirements-bench.txt`.
+environment before the Python tests: `pip install -r requirements-fixture.txt`.
 
 Optional BMAD setup uses `uv` (initial version 0.13.5), Node.js and GitHub CLI.
 BMAD skills are project-local; `skills-lock.json` records their source hashes.
@@ -78,8 +78,14 @@ failures and 146 listing mismatches; its lower observed CPU costs do not prove
 a win on equivalent data. Six EAGAIN failures remain separately unresolved.
 The [metadata coherence follow-up](docs/metadata-coherence.md) reproduces and
 repairs unrelated-name EAGAIN plus response-publication ownership races with ten
-new behavior tests. Attribution of the six historical failures and a valid
-post-fix performance comparison are still open.
+new behavior tests. Attribution of the six historical failures remains open.
+
+The [sealed native S3 diagnostic](docs/immutable-read-results-20261027.md) then
+completed forty equivalent explicit-metadata phases and 120,000 complete file
+checks on unchanged synthetic data. Rust still loses throughput, p99 and CPU,
+while retaining lower process RSS. Plain standard-listing Go metadata failures,
+owned profiles and an unchanged-binary allocator A/B are retained separately.
+This additional read workload does not complete the full acceptance matrix.
 
 Backend IAM/profile authentication, signature discovery/SigV2, encryption and
 request options now have loopback HTTP/TLS coverage. See [backend options](docs/backend-options.md)

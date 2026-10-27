@@ -1,0 +1,3 @@
+# Public SDK for the disposable sealed native S3 benchmark fixture.
+-r requirements-bench.txt
+boto3==1.40.59

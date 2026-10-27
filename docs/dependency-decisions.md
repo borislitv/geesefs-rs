@@ -91,6 +91,22 @@ counters cannot provide. Standard monotonic clocks define the measurement window
 no sampled percent-CPU estimate or sum of parent/child cumulative CPU is substituted
 for counter deltas. This Python dependency is test/benchmark-only.
 
+The immutable Kubernetes diagnostic reuses the native, maintained SeaweedFS
+4.51 S3 server (Apache-2.0, public
+https://github.com/seaweedfs/seaweedfs/tree/153ab668c99731a6d29492bf6c61d0b4fa701101).
+Its upstream `weed mini` command owns S3, conditional/range reads, storage and
+identity permissions. The Linux amd64 release archive is pinned to SHA-256
+`c03be37416a8ee672c77766e20b22a4e1430744c3af2668599a4b6eeaec14cee`.
+No new S3 protocol implementation or production storage deployment is introduced.
+Existing Moto 5.1.17 remains the disposable fault-injection fixture; a separately
+accounted native backend avoids conflating its Python service with filesystem
+daemon CPU in the multi-gigabyte diagnostic. The controller uses public boto3
+for seeding, full-byte checks and read-only permission probes. It removes the
+seed identity and restarts the persistent disposable server before measurement;
+both filesystems use the same read-only identity and standard S3 listing. This
+fixture does not establish actual-service extended-metadata compatibility or
+performance. Its backend CPU/cache scope is reported separately from clients.
+
 Cargo.lock is reviewed for public registry origins and CI for public actions.
 `cargo metadata --locked --format-version 1` reported 336 packages (including
 this root package), with no non-public source: every dependency resolves from

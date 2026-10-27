@@ -76,6 +76,16 @@ subsequent actual-FUSE overlapping-fill ownership repair is measured at
 
 ## Remaining work and decision
 
+The sealed native S3 follow-up completes 40 additional equivalent read phases and
+120,000 full-byte/metadata checks. Native generations and exact listings are stable;
+280 CPU windows and every RSS/cgroup summary are independently checked. Plain
+standard-listing Go metadata failures remain retained; the passing additional
+workload explicitly reads xattrs and revalidates attributes for every implementation.
+Rust still loses throughput, p99, cold listing and CPU while using lower daemon RSS.
+Owned perf/syscall diagnostics and a three-repeat unchanged-binary allocator A/B
+preserve a partially confirmed allocation cost, not a completed performance fix.
+See docs/immutable-read-results-20261027.md and docs/immutable-read-dataset.md.
+
 Compatibility and comparative performance are **UNACCEPTED**. Delivery is a draft
 for review, not a complete port or permission to replace a served mount. Reduce
 the remaining tail latency and metadata cost, resolve compatibility gaps and Go

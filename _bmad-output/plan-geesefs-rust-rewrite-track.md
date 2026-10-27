@@ -1,5 +1,13 @@
 # Progress tracker for plan-geesefs-rust-rewrite.md
 
+Latest checkpoint: the sealed native S3 diagnostic completes forty equivalent
+explicit-metadata phases with 120,000 correct full-byte checks and stable
+generations/listings. Original plain Go metadata failures remain retained. Rust
+still loses throughput/p99/CPU/cold listing despite lower process RSS; profiles
+and a same-binary allocator A/B retain partial causes. Stage 10 and overall
+compatibility/performance acceptance remain incomplete. See
+`docs/immutable-read-results-20261027.md` and the appended ub-mode action log.
+
 Status format: [ ] - incomplete, [X] - completed. Updated: 2026-10-26.
 The parent owns BMAD orchestration, final review and all VCS delivery.
 

@@ -8,6 +8,14 @@ Lower daemon RSS is not a whole-cgroup memory win under file-cache pressure.
 The full matrix and compatibility remain incomplete. Favorable and unfavorable
 attempts are retained below; CPU cost is now measured separately from wall time.
 
+The subsequent [sealed native S3 checkpoint](immutable-read-results-20261027.md)
+completes 40 equivalent explicit-metadata phases: 120,000 complete file checks,
+unchanged generations, exact listings and 280 independently recomputed CPU windows.
+Rust still loses throughput, cold listing time, p99 and CPU while retaining lower
+daemon RSS. The original plain standard-listing Go metadata failures remain
+separate. Profiles, syscall counts and an unchanged-binary allocator A/B identify
+partial allocation cost without claiming that tuning alone fixes the regressions.
+
 ## Runner and reproduction
 
 `bench/workloads.json`, `bench/compare.py` and `scripts/bench_worker.py` build the

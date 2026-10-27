@@ -1,10 +1,12 @@
 # Performance acceptance: UNACCEPTED
 
-No overall memory/speed acceptance is claimed. After diagnosing actual FUSE
-overlap and repairing fill ownership, all 80 selected sequential/eviction results
-complete correctly, with higher mean throughput and lower mean RSS/cgroup memory
-than both Go baselines. However p95 latency regresses, the full matrix is incomplete
-and compatibility remains open. Earlier unfavorable attempts are retained below.
+No overall memory/speed acceptance is claimed. Selected local sequential/eviction
+matrices complete correctly with higher group mean throughput, but cold tail
+regressions remain. A separate real-object Kubernetes diagnostic completes all
+18 phases correctly and shows **lower Rust throughput** than both Go references.
+Lower daemon RSS is not a whole-cgroup memory win under file-cache pressure.
+The full matrix and compatibility remain incomplete. Favorable and unfavorable
+attempts are retained below; CPU cost is now measured separately from wall time.
 
 ## Runner and reproduction
 
@@ -111,7 +113,10 @@ fixture, not an actual cloud-service validation. Provenance:
 | Packaged Go, built but not reached | `80c214ef14f620d93407454fc76ca01dd71fa25f` | `41fc45dcaf5b672303e4dad4f824f276b9137d1ef9e1676d3a5c1c55c97eb74f` |
 | Rust | `830d7a41d4dc17d0f66ee50bf7ed0b827806512e` | `b170731dcf63a1c9ff43ef655195ab3ebec342624c83b3c4df4debc0418947ee` |
 
-Toolchains: Go 1.22.2 linux/amd64 and rustc 1.99.1. Original per-run records,
+The original Go 1.22.2 field identified the launcher, not the auto-selected build
+compiler. Retained exact-hash binaries establish **go1.25.9**; see the
+[hash-bound correction for all 12 retained Go executables](go-toolchain-correction-20261027.json).
+Rust used rustc 1.99.1. Original per-run records,
 memory/allocator traces and errors remain in the ignored
 `benchmark-results/private/paired-full-20261026-v1/`. The dedicated unit stopped
 and no owned FUSE mounts remained after the deadline.
@@ -265,8 +270,96 @@ behavior were verified; no raw private receipts were committed.
 - Full compatibility receipts, actual-service PATCH/IAM/encryption, complete CLI
   parity, imported multipart layouts and mounted failure cases remain unresolved.
   The gate requires these receipts, complete paired results and unchanged effective
-  budgets. Eleven Python cases exercise evidence rejection, not real performance.
+  budgets. Python evidence/CPU tests exercise accounting and rejection, not real performance.
 - `--smoke`, diagnostic selection and `--allow-incomplete-accounting` cannot pass acceptance. Preserve
   unfavorable samples/errors; do not lower caches, change durability, omit metadata,
   force GC or invent a percentage threshold. Private receipts/credentials are not
   shared source artifacts.
+
+## Clean-buffer follow-up: local selected matrix
+
+Source `ba405d3485e66b00ad3bacc716177f0f9a145eb6` completed another 80 selected
+results with full-byte correctness, the same 256 MiB data, 64 MiB user budget,
+100,000 entries, one CPU quota, 1 GiB cgroup and five repetitions. The
+[complete whitelisted summary](clean-read-results-20261027.json) retains mean,
+dispersion, missing metrics, all memory/tail values and exact executable hashes.
+
+| Baseline/state/workload | Go MB/s | Rust MB/s | Go p95 ms | Rust p95 ms | Go p99 ms | Rust p99 ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Experimental/cold/sequential | 75.82 | 111.66 | 31.286 | 66.759 | 230.279 | 244.827 |
+| Experimental/cold/eviction | 66.98 | 110.78 | 28.926 | 25.195 | 232.504 | 254.265 |
+| Experimental/warm/sequential | 64.69 | 135.48 | 22.709 | 2.601 | 312.806 | 251.920 |
+| Experimental/warm/eviction | 59.28 | 135.92 | 33.342 | 2.693 | 411.770 | 254.471 |
+| Packaged/cold/sequential | 68.28 | 110.72 | 24.638 | 46.915 | 253.867 | 248.282 |
+| Packaged/cold/eviction | 58.56 | 120.44 | 34.050 | 2.938 | 428.457 | 246.459 |
+| Packaged/warm/sequential | 66.28 | 114.59 | 28.724 | 3.197 | 400.545 | 290.191 |
+| Packaged/warm/eviction | 62.61 | 117.30 | 37.956 | 25.235 | 283.100 | 268.706 |
+
+Values are means of per-run metrics, not pooled percentiles. Mean Rust combined
+daemon/client peak RSS is 129–137 MB versus Go 216–246 MB; cgroup peak is 359–367
+MB versus 419–447 MB. Cold sequential p95 still loses against both references;
+experimental cold p99 and individual file/kernel cache indicators also regress.
+The full gate is false with 248 errors. CPU counters were not captured in this
+historical run and must not be inferred from elapsed time.
+
+## Real-object Kubernetes diagnostic
+
+The same frozen Rust source and exact Go executables completed **18/18 phases**:
+three order permutations, three implementations and fresh/warm-revisit states.
+All phases verified **3,000/3,000 complete file hashes**, 8,298,727,528 bytes per
+phase and 96 directory listings, without errors. The native oracle used If-Match
+and SHA-256. The [full phase summary](k8s-readonly-results-20261027.json) preserves
+the dispersion and every measured memory/latency field without production paths.
+
+Common limits were two CPUs, 4 GiB container cgroup, 512 MiB user cache, 100,000
+entries, four readers and 128 KiB reads. Every mount was isolated RO with multipart
+expiration disabled. No served mount or data was changed. Fresh is a new mount,
+not a controlled cold host/service cache. Warm revisits the complete working set.
+
+| Implementation | State | MB/s, mean [min–max] | Mean read p95 / p99 ms | Mean listing seconds | Mean daemon peak RSS MB |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Experimental Go | Fresh | 252.64 [239.99–261.87] | 6.955 / 24.048 | 9.859 | 1143.9 |
+| Experimental Go | Warm revisit | 300.27 [293.78–304.45] | 6.938 / 22.080 | 0.042 | 1222.2 |
+| Packaged Go | Fresh | 227.38 [225.13–229.10] | 7.197 / 25.575 | 10.357 | 1251.0 |
+| Packaged Go | Warm revisit | 281.43 [270.56–295.17] | 7.220 / 23.573 | 0.526 | 1377.0 |
+| Rust | Fresh | 200.84 [198.44–204.42] | 6.239 / 38.081 | 8.481 | 543.7 |
+| Rust | Warm revisit | 265.42 [247.08–280.90] | 6.208 / 34.847 | 3.803 | 667.4 |
+
+Rust fresh throughput and read p99 lose in all three repetitions. Summed per-file
+stat time is about 55 worker-seconds versus 18–30 for Go; these sums overlap across
+four workers. Repeated READDIR also incurs backend calls. The
+[bounded metadata follow-up](metadata-page-reuse.md) tests these paths; its complete
+speed benefit is not established. An interrupted next diagnostic retained ten
+completed byte-correct phases, including an unfavorable new-Rust fresh result,
+before the operator requested CPU accounting from the first phase. Those receipts
+remain separate and are not substituted for a completed comparison.
+
+All implementations fill roughly the 4 GiB cgroup limit with reclaimable file
+cache. Rust holds more file cache and less anonymous/kernel memory. This diagnostic
+cannot establish a strict lower total-memory peak merely from lower daemon RSS.
+Unlike the earlier local table, Kubernetes RSS above covers the daemon only;
+cgroup totals include client/controller. Samples are 50 ms and earlier mount
+cache can remain. No forced GC or global cache drop was used. Go heap series,
+writers and full compatibility remain incomplete. Historical CPU cost is missing.
+
+## CPU cost and regression accounting
+
+New windows use psutil 7.2.2 process user/system counters and owned cgroup v2
+`cpu.stat` deltas. Reports retain daemon/client CPU seconds, complete cgroup CPU
+seconds, CPU seconds per GiB or operation, average occupied cores, and quota
+throttling/period counters. Throttled duration is not counted as useful CPU time.
+Linux process counters have clock-tick precision; cgroup counters use microseconds.
+
+The local runner measures the active workload after initialization/warmup and
+before end pprof. Its owned cgroup includes daemon and client. Kubernetes also
+retains whole-phase, listing-only and file-worker windows, plus whole-experiment
+cgroup cost including the generation inventories. Its cgroup includes all owned
+container work. These scopes are explicit and must not be mixed. Missing counters
+or zero denominators stay missing, not zero. Original reports are not rewritten.
+
+The fail-closed gate now requires daemon/client/cgroup CPU totals and checks
+daemon/total CPU non-regression as well as wall throughput, memory and latency.
+Faster elapsed time does not excuse higher CPU cost. Unit regressions first
+rejected absent/greater CPU and missing summary fields on the old tooling;
+system-time, microsecond-unit and process-identity mutations also failed. These
+checks establish accounting behavior, not a measured CPU win.

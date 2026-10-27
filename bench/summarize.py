@@ -9,7 +9,14 @@ import statistics
 
 METRICS = ["throughput", "elapsed_seconds", "rss_peak_bytes", "rss_steady_bytes",
            "cgroup_peak_bytes", "cgroup_steady_bytes", "file_cache_steady_bytes", "kernel_steady_bytes",
-           "allocator_peak_bytes", "allocator_steady_bytes", "p50_ms", "p95_ms", "p99_ms"]
+           "allocator_peak_bytes", "allocator_steady_bytes", "p50_ms", "p95_ms", "p99_ms",
+           "cpu_wall_seconds", "daemon_cpu_seconds", "daemon_cpu_user_seconds", "daemon_cpu_system_seconds",
+           "client_cpu_seconds", "client_cpu_user_seconds", "client_cpu_system_seconds",
+           "cgroup_cpu_seconds", "cgroup_cpu_user_seconds", "cgroup_cpu_system_seconds",
+           "daemon_average_cores", "client_average_cores", "cgroup_average_cores",
+           "daemon_cpu_seconds_per_gib", "client_cpu_seconds_per_gib", "cgroup_cpu_seconds_per_gib",
+           "daemon_cpu_seconds_per_operation", "client_cpu_seconds_per_operation", "cgroup_cpu_seconds_per_operation",
+           "cgroup_throttled_seconds", "cgroup_nr_throttled", "cgroup_nr_periods"]
 PUBLIC_LIMITS = ["schema", "repetitions", "memory_limit_mb", "entry_limit", "dataset_bytes",
                  "metadata_entries", "concurrency", "random_operations", "random_block_bytes",
                  "writer_bytes", "cpu_quota_us", "cpu_period_us", "cgroup_memory_max_mb", "states", "workloads"]
@@ -65,7 +72,8 @@ def main():
     if args.table:
         print(f"accepted={summary['accepted']} runs={summary['runs']} gate_errors={summary['gate_error_count']}")
         columns = ([(name, "mean") for name in args.metrics] if args.metrics else
-                   [("throughput", "mean"), ("throughput", "stdev"), ("elapsed_seconds", "mean"), ("rss_peak_bytes", "mean")])
+                   [("throughput", "mean"), ("throughput", "stdev"), ("elapsed_seconds", "mean"), ("rss_peak_bytes", "mean"),
+                    ("daemon_cpu_seconds", "mean"), ("cgroup_cpu_seconds", "mean")])
         print("baseline state workload implementation correct/runs", *[f"{name}_{stat}" for name, stat in columns])
         for group in summary["groups"]:
             metrics = group["metrics"]

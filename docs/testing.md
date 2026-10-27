@@ -5,8 +5,10 @@ Use only disposable fixtures, never existing mounts or production credentials.
 
 ## Repeatable library checks
 
-Install Rust 1.96.0 or newer with rustfmt/clippy. The locally verified toolchain
-is Rust 1.99.1. Dependencies resolve from public crates.io with Cargo.lock.
+Install Rust 1.96.0 or newer with rustfmt/clippy and the Python dependencies from
+`requirements-bench.txt` in the selected environment. The verified toolchain is
+Rust 1.99.1. Dependencies resolve from public crates.io with Cargo.lock; process
+CPU accounting uses the public pinned psutil package.
 
 ```bash
 cargo fmt --all -- --check
@@ -14,12 +16,24 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
 ```
 
-The 130 Rust integration tests cover actual loopback SDK HTTP requests and signed
+The 146 Rust integration tests cover actual loopback SDK HTTP requests and signed
 extension transport, metadata/schema contracts, configuration, inode/namespace
-state, dirty generations and concurrency. The performance-gate test invokes 12
+state, dirty generations and concurrency. The performance-gate test invokes 23
 Python evidence/summary tests. Five additional Python tests cover provenance and
 the fixture oracle. No Rust tests are ignored. These are not a
 claim of complete reference-test parity or production durability acceptance.
+
+The latest full checks ran in an isolated Kubernetes build Pod without S3
+credentials: formatting, all-target/all-feature tests and warning-denying Clippy,
+23 benchmark Python cases, five source/oracle Python cases, and the 336-package
+public-source audit passed. Directory/preload guard mutations and CPU
+system-time/unit/identity mutations failed their expected assertions and were
+restored. A live process/cgroup smoke check also observed positive CPU deltas.
+
+CPU windows retain user/system/total seconds for daemon and client independently,
+plus cgroup usage and throttling counters. Reports distinguish wall time, occupied
+cores and CPU seconds per GiB/operation. Missing historical CPU receipts stay
+missing; successful older data checks cannot retroactively supply those counters.
 
 The storage fake preserves generation conditions, multipart state and byte
 content. One-shot channels synchronize upload, multipart-part and LIST races;

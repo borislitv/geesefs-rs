@@ -24,6 +24,9 @@ by the public allocator/TLS dependencies. Python 3.12+ runs the evidence checks;
 mounted comparison additionally needs Linux FUSE, rsync, Go and the test requirements.
 The initial environment uses Rust 1.99.1.
 
+Install the public Python benchmark dependencies in your selected virtual
+environment before the evidence/CPU tests: `pip install -r requirements-bench.txt`.
+
 Optional BMAD setup uses `uv` (initial version 0.13.5), Node.js and GitHub CLI.
 BMAD skills are project-local; `skills-lock.json` records their source hashes.
 Install the selected official skills:
@@ -48,14 +51,18 @@ foreground binary integrates fuser, SDK-backed S3, bounded payload ownership,
 paged namespace operations and versioned sparse/truncate/fsync writes. Actual
 disposable Rust/Go mounts exercised rsync, HTTP full/Range and writer paths.
 The compatibility runner still fails: actual-service optional paths, hardlink
-emulation and a Go failure-recovery check are unresolved. Earlier attempts exposed
-a severe sequential slowdown. Actual FUSE tracing identified overlapping fills
-evicting each other's cache; the [ownership repair](docs/read-fill-pressure.md)
-now completes all 80 selected sequential/eviction results with correct bytes.
-Mean throughput is higher and sampled RSS/cgroup memory lower than both Go
-baselines in all eight groups, but p95 latency is worse and full-matrix/compatibility
-acceptance remains open. All favorable and unfavorable results are retained
-in [performance](docs/performance.md). Overall acceptance is
+emulation and a Go failure-recovery check are unresolved. Actual FUSE tracing and
+clean-buffer repairs resolved the severe historical sequential slowdown. The
+latest selected local matrix completes all 80 results with correct bytes and
+higher group mean throughput, but some cold tail metrics still regress.
+An independent real-object Kubernetes diagnostic also completed all 18 phases
+correctly; Rust fresh throughput was **198–204 MB/s versus Go 225–262 MB/s**.
+Lower daemon RSS does not establish lower total cgroup memory when file cache
+fills the limit. [Bounded metadata reuse](docs/metadata-page-reuse.md) has library
+regressions; its whole-filesystem speed benefit remains unestablished. New test
+windows include separate daemon/client/cgroup user/system CPU cost, efficiency
+and throttling. All favorable and unfavorable results remain in
+[performance](docs/performance.md). Overall acceptance is
 **UNACCEPTED**. Owned cpu+memory cgroup execution works without changing the
 hosting service's controls.
 

@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "correction": "Earlier toolchain fields used the launcher version, not the Go auto-selected build compiler.",
+  "verification": "Embedded go version -m, VersionHash and SHA-256 on retained executable; original raw measurements remain unchanged.",
+  "records": [
+    {
+      "diagnostic": "paired-smoke-20261026-v1",
+      "source_revision": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "binary_sha256": "028d04fcc5967e9fd9d564925920def0c5de3c0e36b48bc135b815b7444ca094",
+      "original_launcher_field": "go version go1.22.2 linux/amd64",
+      "embedded_toolchain": "go1.25.9",
+      "verified": true
+    },
+    {
+      "diagnostic": "paired-smoke-20261026-v1",
+      "source_revision": "80c214ef14f620d93407454fc76ca01dd71fa25f",
+      "binary_sha256": "23609f83b0c4ad9336b985aaca4c6db6d52c5f1fed25642c55ed8562874e531e",
+      "original_launcher_field": "go version go1.22.2 linux/amd64",
+      "embedded_toolchain": "go1.25.9",
+      "verified": true
+    },
+    {
+      "diagnostic": "paired-full-20261026-v1",
+      "source_revision": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "binary_sha256": "01ac0b9f433747661893ecba83a05c2b5d497cdc0dbf208f66937e2551a21218",
+      "original_launcher_field": "go version go1.22.2 linux/amd64",
+      "embedded_toolchain": "go1.25.9",
+      "verified": true
+    },
+    {
+      "diagnostic": "paired-full-20261026-v1",
+      "source_revision": "80c214ef14f620d93407454fc76ca01dd71fa25f",
+      "binary_sha256": "41fc45dcaf5b672303e4dad4f824f276b9137d1ef9e1676d3a5c1c55c97eb74f",
+      "original_launcher_field": "go version go1.22.2 linux/amd64",
+      "embedded_toolchain": "go1.25.9",
+      "verified": true
+    },
+    {
+      "diagnostic": "paired-sequential-20261027-v1",
+      "source_revision": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "binary_sha256": "7d7c1072ce0dacddba59f384e25f696254e3d10ba822d7b47121964cf4992729",
+      "original_launcher_field": "go version go1.22.2 linux/amd64",
+      "embedded_toolchain": "go1.25.9",
+      "verified": true
+    },
+    {
+      "diagnostic": "paired-sequential-20261027-v1",
+      "source_revision": "80c214ef14f620d93407454fc76ca01dd71fa25f",
+      "binary_sha256": "6b3ae76b4c494e38fa2586d0bdd0e1d53c2a9f4ce5a523264fbee3d6062b6622",
+      "original_launcher_field": "go version go1.22.2 linux/amd64",
+      "embedded_toolchain": "go1.25.9",
+      "verified": true
+    },
+    {
+      "diagnostic": "paired-read-fills-20261027-v1",
+      "source_revision": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "binary_sha256": "0274cc38d0ba1e00971f14764fc155f6f1d14613d86bd297b0f0b3a2cffc455c",
+      "original_launcher_field": "go version go1.22.2 linux/amd64",
+      "embedded_toolchain": "go1.25.9",
+      "verified": true
+    },
+    {
+      "diagnostic": "paired-read-fills-20261027-v1",
+      "source_revision": "80c214ef14f620d93407454fc76ca01dd71fa25f",
+      "binary_sha256": "528026108c93773729ff096eec409569be1e970120393162014fa06edc63239c",
+      "original_launcher_field": "go version go1.22.2 linux/amd64",
+      "embedded_toolchain": "go1.25.9",
+      "verified": true
+    },
+    {
+      "diagnostic": "paired-read-concurrent-20261027-v1",
+      "source_revision": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "binary_sha256": "add54e5847db108e61562b88d42d98808c9ae57bce92de22e18fc4a0758171ca",
+      "original_launcher_field": "go version go1.22.2 linux/amd64",
+      "embedded_toolchain": "go1.25.9",
+      "verified": true
+    },
+    {
+      "diagnostic": "paired-read-concurrent-20261027-v1",
+      "source_revision": "80c214ef14f620d93407454fc76ca01dd71fa25f",
+      "binary_sha256": "e0f716ccfb8a81df289ae5fe72d834f0c5df7419cae519ebcc4351acf2f05587",
+      "original_launcher_field": "go version go1.22.2 linux/amd64",
+      "embedded_toolchain": "go1.25.9",
+      "verified": true
+    },
+    {
+      "diagnostic": "paired-clean-read-20261027-v1",
+      "source_revision": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "binary_sha256": "7ad836e0bdd23ea279bb236627e9b130d11c174ae649c7582213a83e5d11a28b",
+      "original_launcher_field": "go version go1.22.2 linux/amd64",
+      "embedded_toolchain": "go1.25.9",
+      "verified": true
+    },
+    {
+      "diagnostic": "paired-clean-read-20261027-v1",
+      "source_revision": "80c214ef14f620d93407454fc76ca01dd71fa25f",
+      "binary_sha256": "e04492363d29985ab1f74521482a01a3c6f7fdeeed35ad1ba0faa991370f4683",
+      "original_launcher_field": "go version go1.22.2 linux/amd64",
+      "embedded_toolchain": "go1.25.9",
+      "verified": true
+    }
+  ]
+}

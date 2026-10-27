@@ -83,6 +83,14 @@ retain the ordinary HEAD/directory probes; speculative failure is not a negative
 lookup. This follows the public Go reference's batch-lookup approach with a smaller
 scope and preserves the package's public-source/unsafe boundaries.
 
+Benchmark CPU counters use public `psutil` 7.2.2 (BSD-3-Clause,
+https://github.com/giampaolo/psutil) for process identity and user/system time,
+rather than a new `/proc/PID/stat` parser. The existing Linux cgroup adapter reads
+`cpu.stat` for complete owned-workload usage and throttling, which process CPU
+counters cannot provide. Standard monotonic clocks define the measurement window;
+no sampled percent-CPU estimate or sum of parent/child cumulative CPU is substituted
+for counter deltas. This Python dependency is test/benchmark-only.
+
 Cargo.lock is reviewed for public registry origins and CI for public actions.
 `cargo metadata --locked --format-version 1` reported 336 packages (including
 this root package), with no non-public source: every dependency resolves from

@@ -16,6 +16,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: timeout 120s python3 -m pip install -r requirements-bench.txt
       - run: timeout 60s cargo fmt --all -- --check
       - run: timeout 180s python3 scripts/audit_public_sources.py
       - run: timeout 30s python3 -m unittest discover -s tests -p 'test_*.py'

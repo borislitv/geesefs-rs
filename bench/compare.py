@@ -27,6 +27,8 @@ import threading
 import time
 import uuid
 
+from accounting import CpuWindow, cpu_efficiency
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import integration as integration
@@ -34,7 +36,8 @@ import integration as integration
 REVISIONS = [integration.EXPERIMENTAL, integration.UPSTREAM]
 REQUIRED_METRICS = ["rss_peak_bytes", "rss_steady_bytes", "cgroup_peak_bytes", "cgroup_steady_bytes",
                     "file_cache_steady_bytes", "kernel_steady_bytes", "allocator_peak_bytes",
-                    "allocator_steady_bytes", "throughput", "p50_ms", "p95_ms", "p99_ms"]
+                    "allocator_steady_bytes", "throughput", "p50_ms", "p95_ms", "p99_ms",
+                    "daemon_cpu_seconds", "client_cpu_seconds", "cgroup_cpu_seconds"]
 REQUIRED_COMPATIBILITY = ["linux-cli", "iam", "encryption", "signing", "patch", "permissions-specials",
                           "link-emulation", "list-pages", "metadata", "range-eof", "write-truncate",
                           "rename-delete", "fsync-failure", "full-budget", "mounted-rsync-http", "shutdown"]
@@ -125,8 +128,11 @@ def evaluate(config, runs, compatibility, provenance):
                         errors.append(f"non-equivalent data/machine {key}")
                     for metric in REQUIRED_METRICS:
                         left, right = rust.get("metrics", {}).get(metric), go.get("metrics", {}).get(metric)
-                        if isinstance(left, (int, float)) and isinstance(right, (int, float)) and math.isfinite(left) and math.isfinite(right) and left >= 0 and right > 0:
-                            ratios[metric].append(left / right)
+                        if isinstance(left, (int, float)) and isinstance(right, (int, float)) and math.isfinite(left) and math.isfinite(right) and left >= 0 and right >= 0:
+                            if right > 0:
+                                ratios[metric].append(left / right)
+                            elif metric.endswith("_cpu_seconds") and left == 0:
+                                ratios[metric].append(1.0)
                 summaries["/".join(key)] = {metric: {"ratios": values, "mean": statistics.mean(values), "variance": statistics.pvariance(values)} for metric, values in ratios.items() if values}
                 # Require repeatable improvement, not one selected favorable run.
                 for metric in ["rss_peak_bytes", "rss_steady_bytes", "cgroup_peak_bytes", "cgroup_steady_bytes"]:
@@ -137,6 +143,9 @@ def evaluate(config, runs, compatibility, provenance):
                 for metric in ["p50_ms", "p95_ms", "p99_ms"]:
                     if len(ratios[metric]) != config["repetitions"] or statistics.mean(ratios[metric]) > 1:
                         errors.append(f"tail latency non-regression not established: {key} {metric}")
+                for metric in ["daemon_cpu_seconds", "cgroup_cpu_seconds"]:
+                    if len(ratios[metric]) != config["repetitions"] or statistics.mean(ratios[metric]) > 1:
+                        errors.append(f"CPU non-regression not established: {key} {metric}")
     return {"accepted": not errors, "errors": errors, "summaries": summaries}
 
 
@@ -213,6 +222,7 @@ class Sampler:
         self.peaks = {}
         self.failure = None
         self.thread = threading.Thread(target=self.run)
+        self.cpu = CpuWindow({"daemon": pid, "client": client_pid}, group)
 
     def run(self):
         try:
@@ -237,12 +247,16 @@ class Sampler:
             self.failure = str(error)
 
     def __enter__(self):
+        self.cpu.start()
         self.thread.start()
         return self
 
     def __exit__(self, *_):
         self.done.set()
-        self.thread.join(timeout=10)
+        try:
+            self.cpu.finish()
+        finally:
+            self.thread.join(timeout=10)
         if self.thread.is_alive():
             raise RuntimeError("memory sampler did not stop")
         if self.failure:
@@ -258,7 +272,8 @@ class Sampler:
                 "rss_peak_scope": "20ms-sampled-active-workload",
                 "cgroup_peak_bytes": peak, "cgroup_steady_bytes": mean("cgroup_bytes"),
                 "cgroup_peak_scope": "owned-mount-lifetime-including-startup-and-warmup",
-                "file_cache_steady_bytes": mean("file_cache_bytes"), "kernel_steady_bytes": mean("kernel_bytes")}
+                "file_cache_steady_bytes": mean("file_cache_bytes"), "kernel_steady_bytes": mean("kernel_bytes"),
+                **self.cpu.metrics()}
 
 
 def workload(path, name, config, client, bucket, prefix, endpoint, local, expected_sha):
@@ -518,7 +533,8 @@ def main():
                                                             raise RuntimeError(message["error"])
                                                         metrics = message["metrics"]
                                                         finished_ns = time.time_ns()
-                                                    metrics.update(sampler.metrics())
+                                                    metrics.update(cpu_efficiency(sampler.metrics(), transferred=metrics["bytes"], operations=metrics["operations"]))
+                                                    record["cpu_counters"] = {"before": sampler.cpu.before, "after": sampler.cpu.after}
                                                     record["measurement_window_unix_ns"] = [started_ns, finished_ns]
                                                     if implementation == "go":
                                                         # Keep pprof outside the active timing/memory window.
@@ -562,7 +578,7 @@ def main():
     gate["accepted"] = gate["accepted"] and not errors and not args.smoke and not args.diagnostic_workload and not args.allow_incomplete_accounting
     report = {"gate": gate, "provenance": provenance, "limits": config, "runs": runs,
                "diagnostic_workloads": args.diagnostic_workload or [],
-               "accounting_notes": ["RSS includes filesystem and client process", "raw memory traces retain daemon/client PSS separately", "RSS peak is sampled at 20ms; kernel cgroup memory.peak includes startup/warmup", "allocator sampling is restricted to the active workload; Go uses a separate end snapshot without gc=1 and cannot pass peak/steady heap acceptance", "cold means a new mount/process; warmup occurs in the owned client cgroup; never a global cache drop"]}
+               "accounting_notes": ["RSS includes filesystem and client process", "raw memory traces retain daemon/client PSS separately", "RSS peak is sampled at 20ms; kernel cgroup memory.peak includes startup/warmup", "CPU is user/system counter delta over the active workload, with daemon/client separate and the owned cgroup including both; startup, warmup and end pprof are outside the CPU window", "CPU seconds/GiB or operation and average occupied cores are distinct from wall time; cgroup throttling is recorded without treating it as useful CPU work", "allocator sampling is restricted to the active workload; Go uses a separate end snapshot without gc=1 and cannot pass peak/steady heap acceptance", "cold means a new mount/process; warmup occurs in the owned client cgroup; never a global cache drop"]}
     (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps({"accepted": gate["accepted"], "runs": len(runs), "errors": gate["errors"][:10]}, indent=2))
     return 0 if gate["accepted"] else 1

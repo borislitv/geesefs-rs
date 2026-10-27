@@ -1,0 +1,2 @@
+# Public process CPU accounting; cgroup v2 totals are read separately.
+psutil==7.2.2

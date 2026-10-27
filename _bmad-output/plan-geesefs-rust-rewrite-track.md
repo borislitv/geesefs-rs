@@ -404,3 +404,21 @@ Transitive binary notices, full review and parent commit/push/draft PR remain.
 - A same-manifest, same-budget paired measurement is still needed for the new
   metadata changes. Library improvements do not close the k8s throughput/p99,
   historical local tail, full compatibility or complete-matrix acceptance gaps.
+
+## 2026-10-27: operator-requested CPU accounting
+
+- Added pinned public psutil 7.2.2 process user/system accounting plus cgroup v2
+  CPU usage/throttling deltas, normalized CPU/GiB or operation and average cores.
+  Counters cover the active window independently of elapsed throughput; raw
+  boundaries preserve process identity and do not infer missing history.
+- Missing CPU receipts and higher total CPU failed new gate regressions before
+  tooling changes; summary omission also failed. System-time, unit-conversion and
+  identity mutations failed their expected assertions and were restored. All 146
+  Rust tests, 23 benchmark Python tests, five source/oracle tests, formatting,
+  warning-denying Clippy and public Cargo audit pass in Kubernetes. A live
+  process/cgroup smoke check observed positive CPU deltas.
+- The next actual diagnostic was interrupted after ten complete byte-correct
+  phases to add CPU from the first phase. Ordinary unmount completed and private
+  interrupted receipts preserve the unfavorable new-Rust fresh measurement.
+  A full same-manifest comparison with CPU counters is still required; no CPU
+  win or metadata throughput acceptance is claimed.

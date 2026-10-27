@@ -25,3 +25,12 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(group["metrics"]["rss_peak_bytes"]["n"], 1)
         self.assertEqual(group["metrics"]["rss_peak_bytes"]["mean"], 8)
         self.assertEqual(group["metrics"]["allocator_peak_bytes"], {"n": 0, "missing": 3})
+
+    def test_cpu_cost_and_missing_old_cpu_receipts_remain_distinct(self):
+        common = {"baseline": "a" * 40, "state": "cold", "workload": "sequential", "implementation": "rust"}
+        result = summarize({"runs": [dict(common, repetition=0, correctness=True,
+            metrics={"daemon_cpu_seconds": 2, "cgroup_cpu_seconds": 3, "cgroup_cpu_seconds_per_gib": 6}),
+            dict(common, repetition=1, correctness=True, metrics={})]})
+        group, = result["groups"]
+        self.assertEqual(group["metrics"]["cgroup_cpu_seconds"], {"n": 1, "missing": 1, "mean": 3, "stdev": 0, "min": 3, "max": 3})
+        self.assertEqual(group["metrics"]["cgroup_cpu_seconds_per_gib"]["mean"], 6)

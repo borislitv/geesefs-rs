@@ -131,3 +131,17 @@ class GateTests(unittest.TestCase):
     def test_actual_rust_payload_budget_must_match(self):
         self.runs[1]["effective_budgets"]["payload_limit_bytes"] = 33554432
         self.assertFalse(self.gate()["accepted"])
+
+    def test_missing_cpu_counters_cannot_be_reported_as_a_win(self):
+        self.runs[0]["metrics"]["cgroup_cpu_seconds"] = None
+        self.assertFalse(self.gate()["accepted"])
+
+    def test_more_total_cpu_is_not_hidden_by_better_wall_time(self):
+        for run in self.runs:
+            run["metrics"]["cgroup_cpu_seconds"] = 12 if run["implementation"] == "rust" else 10
+        self.assertFalse(self.gate()["accepted"])
+
+    def test_zero_cpu_at_counter_precision_does_not_require_division_by_zero(self):
+        for run in self.runs:
+            run["metrics"]["daemon_cpu_seconds"] = 0
+        self.assertTrue(self.gate()["accepted"])

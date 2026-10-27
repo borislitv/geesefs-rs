@@ -91,12 +91,86 @@ larger filesystem read-inner remains CC 49. Three prior duplication candidates
 remain. Coverage and CRAP have not been measured; a selected mutation score does
 not establish whole-package quality or filesystem acceptance.
 
-## Measurement boundary
+## Matched native comparison
 
-No speed, CPU, RSS or whole-memory improvement follows from the gated tests.
-Freeze and hash the candidate, retain the exact requested-reply prior and both
-public Go executables, then repeat the unchanged sealed native dataset with five
-interleaved orders, full bytes/metadata and native generations/listings before and
-after. Publish CPU with peak/final-fifth RSS, allocator, client/cgroup/backend scope
-and adverse repetitions. Compatibility and overall performance remain
-**UNACCEPTED**.
+Frozen source `20a9dcd2f125e30f251e02510fe3f44501a290f6` completed forty phases
+in 777.999 seconds against exact prior `d17a5a6` and both Go references. All
+120,000 complete file hashes/metadata checks pass. Native conditional hashes for
+3,000 objects and all 97 exact listings remain unchanged before/after. All 280 CPU
+windows and raw memory summaries were recomputed, all 460 indexed artifacts were
+checked after collection, and both Rust compiled-input sets match their commits.
+The candidate differs from its prior in the six intended build/source files.
+
+Same 8,298,727,528 synthetic bytes, 2 CPU/4 GiB filesystem quota, separate
+4 CPU/6 GiB native backend, 512 MiB payload budget, 100,000 entries and four
+128 KiB readers. Default allocator and explicit xattr/forced-stat/full-payload
+work are unchanged. Fresh means a new mount/process; warm revisits the complete
+dataset in that mount. Host/backend caches were not controlled or globally dropped.
+
+Five-phase means, decimal MB; RSS is daemon peak / mean final fifth, **not a
+stationary steady state**. CPU is the whole filesystem cgroup, including client
+and controller work. The [numeric receipt](streamed-read-body-results-20261027.json)
+also retains p50/p95, dispersion, individual CPU roles, allocator, client,
+cgroup/file/kernel and separate native-backend memory/CPU.
+
+| Implementation/state | Read MB/s | Daemon RSS peak / steady MB | Whole cgroup CPU s | Read p99 ms | Listing s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Go experimental fresh | 526.487 | 1250.247 / 1214.540 | 34.561 | 13.189 | 0.489 |
+| Go experimental warm | 523.264 | 1313.059 / 1218.911 | 33.412 | 13.089 | 0.031 |
+| Go packaged fresh | 521.847 | 1271.393 / 1218.118 | 34.596 | 13.214 | 0.481 |
+| Go packaged warm | 498.129 | 1301.252 / 1215.338 | 34.978 | 13.898 | 0.033 |
+| Rust body-prefix fresh | 486.629 | 564.181 / 429.476 | 36.724 | 15.208 | 1.590 |
+| Rust body-prefix warm | 470.705 | 563.541 / 454.082 | 36.732 | 16.269 | 0.021 |
+| Rust prior fresh | 507.835 | 540.324 / 360.174 | 35.152 | 21.337 | 1.571 |
+| Rust prior warm | 498.257 | 645.332 / 357.497 | 34.441 | 20.618 | 0.021 |
+
+The behavior improvement is a measured tradeoff, **not an overall speed fix**.
+Versus the matched prior, p99 improves about 29% fresh and 21% warm, but throughput
+falls about 4%/6%, whole CPU increases and final-fifth RSS rises about 19%/27%.
+P50 also increases, and p95 is 2.370/2.371 ms versus prior 1.529/1.505 ms.
+Warm peak RSS falls, while fresh peak RSS increases. Do not hide those regressions
+behind p99 or lower process RSS than Go. Go still wins throughput, CPU and p99;
+cold listing remains slower. File cache fills most of the cgroup limit, so process
+RSS does not establish a whole-memory win.
+
+The prior premise that publication granularity alone explains the imbalance is
+not sufficient: there are now body production, per-fragment cache/notification
+work and allocator-retention actors to distinguish. Separate owned-PID profiles
+are diagnostic only; their instrumented timings are not additional performance
+samples or evidence of a Rust/SDK/network ceiling. Go heap time series, backend
+request metrics, the full representative matrix and compatibility remain open.
+Overall acceptance remains **UNACCEPTED**.
+
+## Separate owned-profile follow-up
+
+Three additional instrumented mounts use exact Go experimental, prior Rust and
+body-prefix executables on a newly sealed copy of the same manifest. All 9,000
+file hashes/metadata checks pass, followed by native verification of all 3,000
+objects and 97 listings. Only owned daemon PIDs are sampled at 149 Hz; normal
+unmount and daemon cleanup complete. Raw sample/report hashes and narrow leaf
+shares are retained in the [profile receipt](streamed-read-body-profiles-20261027.json).
+These are single diagnostics, **not additional speed-comparison repetitions**.
+
+The body-prefix profile exposes cached-range bookkeeping: BTree range search is
+2.73% of reported leaf samples, Moka bucket lookup 2.46%, policy maintenance 1.03%,
+recency update 1.03% and range covering 0.83%. The prior's bucket lookup is 0.14%;
+the other selected entries are absent at the 0.1% report threshold, not zero.
+Kernel payload copying and anonymous page work remain visible in all profiles.
+These samples identify a concrete next application-level candidate, not a claim
+that the SDK or language imposes a ceiling or that all CPU differences are explained.
+
+Code inspection matches that candidate: a request spanning smaller fragments first
+asks for one whole covering block. That unsuccessful lookup walks older cached
+fragments and records their Moka accesses before the following byte-wise coverage
+loop can compose the actual reply. Isolate this repeated lookup work without
+weakening generation, gap, admission or complete-byte contracts, then measure the
+result against the frozen body-prefix executable.
+
+Failed setup remains explicit. The first diagnostic rejected a stop exit status;
+its extra sample file was not collected before the finite Pod expired, although
+all matched evidence was already preserved. A task-volume-only read-only recovery
+could not mount the expected directory. A fresh attempt exposed dangling uploaded
+tool symlinks and stopped before sampling; corrected upload resolves the public
+tool binaries. The successful repeat records perf's requested SIGINT exit -2 and
+independently validates readable nonempty reports, sample hashes and complete
+client bytes. Neither failed attempt is counted as a performance or profile pass.

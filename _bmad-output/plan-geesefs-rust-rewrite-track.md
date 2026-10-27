@@ -2,10 +2,11 @@
 
 Latest checkpoint: the sealed native, charged-view and requested-reply matched
 comparisons retain equivalent bytes and adverse CPU/throughput/tail results.
-Incremental conditional-GET publication now has real HTTP/filesystem regressions,
+Incremental conditional-GET publication has real HTTP/filesystem regressions,
 178 passing Rust cases, seven assertion-sensitive faults and complete ownership/
-checksum barriers. Its matched native measurement is still required. Stage 10
-and overall compatibility/performance acceptance remain incomplete. See
+checksum barriers. Its forty-phase matched run improves p99 versus prior Rust but
+regresses throughput, CPU, steady RSS and p50/p95. Stage 10 and overall
+compatibility/performance acceptance remain incomplete. See
 `docs/streamed-read-body.md` and the appended ub-mode action log.
 
 Status format: [ ] - incomplete, [X] - completed. Updated: 2026-10-26.
@@ -527,7 +528,9 @@ Transitive binary notices, full review and parent commit/push/draft PR remain.
   Seven independent faults fail actual assertions before and after the scoped
   refactor. One selected cached-fragment completion mutant is killed; unselected
   sites, coverage/CRAP and three earlier duplicate candidates remain open.
-- This is a verified behavior/ownership change, not a measured speed claim or
-  completion of Stage 10. Freeze the native release and repeat the same sealed
-  fixture against the exact prior Rust and both Go references before accepting
-  any performance conclusion. Production resources and credentials are unchanged.
+- Frozen source 20a9dcd completed forty matched phases in 777.999 seconds, with
+  120,000 complete file checks, unchanged native hashes/listings and 280 recomputed
+  CPU windows. All 460 artifact hashes and both compiled-input commits are checked.
+  P99 improves against prior Rust, but throughput/CPU/steady RSS and p50/p95
+  regress. Both Go references still win throughput, CPU and p99. Stage 10 remains
+  incomplete; production resources and credentials are unchanged.

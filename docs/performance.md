@@ -28,8 +28,10 @@ adds forty more correct phases. Its behavior fix lets a requested result precede
 unrelated parallel read-ahead, but it does not resolve throughput, CPU, p99 or
 whole-memory losses. The separate
 [complete-GET buffering follow-up](streamed-read-body.md) has failure-sensitive
-real HTTP and filesystem prefix tests. Comparative measurement remains required
-before attributing a performance improvement to that change.
+real HTTP and filesystem prefix tests. Its forty-phase matched repeat is
+byte-correct and reduces p99 versus the exact prior Rust, but throughput, CPU,
+steady RSS and p50/p95 regress. Both Go references still win throughput, CPU and
+p99. The complete result is retained as a tradeoff, not overall acceptance.
 
 ## Runner and reproduction
 

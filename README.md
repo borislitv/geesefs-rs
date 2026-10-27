@@ -95,7 +95,9 @@ bytes to FUSE before unrelated parallel read-ahead completes, while retaining th
 same bounded request owner, byte charges, deadline and observable tail errors.
 The [incremental conditional-GET follow-up](docs/streamed-read-body.md) separately
 publishes complete body fragments, preserving advertised whole-body checksum
-validation and full admitted ownership. Its gated tests are not a speed claim.
+validation and full admitted ownership. Its forty-phase matched comparison
+improves p99 against prior Rust but loses throughput/CPU/steady RSS and p50/p95;
+the adverse result is retained, not presented as an unconditional speed fix.
 
 Backend IAM/profile authentication, signature discovery/SigV2, encryption and
 request options now have loopback HTTP/TLS coverage. See [backend options](docs/backend-options.md)

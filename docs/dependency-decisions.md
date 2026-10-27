@@ -67,6 +67,22 @@ policy; parser-only support is not backend compatibility.
 
 ## Audit status
 
+Directory-page reuse uses the already selected Moka 0.12.16 synchronous weighted
+cache, not a new cache implementation. Its capacity counts returned names against
+the configured entry limit; pages also check the existing namespace mutation epoch,
+inode retention and stat TTL before reuse. Only bounded returned pages are retained,
+not a full remote tree. This addresses repeated warm READDIR network calls without
+changing freshness, reducing the workload or adding a dependency.
+
+Extended-metadata lookup preloading reuses the existing bounded `Store::list`,
+Moka cache for per-directory attempt timestamps and Tokio's per-inode mutex.
+One first page can install authoritative immediate file metadata into the existing
+entry-limited namespace. No listing graph, negative-range index or second inode
+cache is introduced. Unknown/standard metadata and paths outside the first page
+retain the ordinary HEAD/directory probes; speculative failure is not a negative
+lookup. This follows the public Go reference's batch-lookup approach with a smaller
+scope and preserves the package's public-source/unsafe boundaries.
+
 Cargo.lock is reviewed for public registry origins and CI for public actions.
 `cargo metadata --locked --format-version 1` reported 336 packages (including
 this root package), with no non-public source: every dependency resolves from

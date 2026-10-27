@@ -1,9 +1,56 @@
 import copy
+import io
 import json
 from pathlib import Path
+import subprocess
+import tarfile
+import tempfile
 import unittest
+from unittest import mock
 
 import compare
+
+
+class BaselineBuildTests(unittest.TestCase):
+    def build(self, embedded_version):
+        revision = compare.REVISIONS[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            binary = work / "baseline"
+
+            def command(arguments, **options):
+                arguments = [str(value) for value in arguments]
+                output = ""
+                if arguments[:2] == ["git", "rev-parse"]:
+                    output = revision + "\n"
+                elif arguments[:2] == ["git", "archive"]:
+                    with tarfile.open(fileobj=options["stdout"], mode="w") as archive:
+                        source = b"package main\nfunc main() {}\n"
+                        entry = tarfile.TarInfo("main.go")
+                        entry.size = len(source)
+                        archive.addfile(entry, io.BytesIO(source))
+                elif arguments[:2] == ["go", "build"]:
+                    binary.write_bytes(b"executable fixture\n")
+                elif arguments == ["go", "version"]:
+                    output = "go version go1.22.2 linux/amd64\n"
+                elif arguments == ["go", "version", "-m", str(binary)]:
+                    output = f"{binary}: {embedded_version}\n\tbuild\tGOARCH=amd64\n"
+                else:
+                    self.fail(f"unexpected build command: {arguments}")
+                return subprocess.CompletedProcess(arguments, 0, stdout=output)
+
+            with mock.patch.object(compare.integration, "command", side_effect=command):
+                return compare.build_baseline(work, revision, binary, work)
+
+    def test_auto_selected_toolchain_comes_from_built_binary_not_launcher(self):
+        provenance = self.build("go1.25.9")
+        self.assertEqual(provenance["toolchain"], "go1.25.9")
+        self.assertEqual(provenance["source_revision"], compare.REVISIONS[0])
+        self.assertRegex(provenance["binary_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_missing_embedded_toolchain_is_not_replaced_with_launcher_version(self):
+        with self.assertRaisesRegex(RuntimeError, "embedded Go toolchain"):
+            self.build("")
 
 
 class GateTests(unittest.TestCase):

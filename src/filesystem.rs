@@ -32,7 +32,14 @@ pub struct Filesystem {
     flushers: Arc<Semaphore>,
     upload_admission: write::UploadAdmission,
     metadata_slots: Arc<Semaphore>,
+    directory_pages: moka::sync::Cache<(u64, u64, String, usize), Arc<DirectoryPage>>,
+    preloaded_directories: moka::sync::Cache<u64, std::time::Instant>,
     closing: AtomicBool,
+}
+
+struct DirectoryPage {
+    fetched: std::time::Instant,
+    entries: Vec<DirEntry>,
 }
 
 #[derive(Clone, Debug)]
@@ -165,6 +172,11 @@ impl Filesystem {
             flushers: Arc::new(Semaphore::new(config.max_flushers)),
             upload_admission: write::UploadAdmission::new(&config),
             metadata_slots: Arc::new(Semaphore::new(config.max_requests)),
+            directory_pages: moka::sync::Cache::builder()
+                .max_capacity(config.entry_limit)
+                .weigher(|_, page: &Arc<DirectoryPage>| page.entries.len().max(1) as u32)
+                .build(),
+            preloaded_directories: moka::sync::Cache::new(config.entry_limit),
             closing: AtomicBool::new(false),
             config,
             store,
@@ -200,6 +212,33 @@ impl Filesystem {
     pub async fn lookup(&self, parent: u64, name: &str) -> Result<Arc<Inode>> {
         let started = std::time::Instant::now();
         let key = self.child_key(parent, name)?;
+        if self.config.effective_list_type() == crate::config::ListType::Extended
+            && !self.config.stat_cache_ttl.is_zero()
+        {
+            let preload = {
+                let mut ns = self.namespace.lock().unwrap();
+                let negative = ns
+                    .get(parent)?
+                    .state
+                    .lock()
+                    .unwrap()
+                    .negative_lookups
+                    .get(name)
+                    .is_some_and(|fetched| fetched.elapsed() < self.config.stat_cache_ttl);
+                !ns.is_moving(&key)
+                    && !ns.is_deleting(&key)
+                    && !ns.hidden(&key)
+                    && ns.named(&key).is_none()
+                    && !negative
+            };
+            if preload {
+                // Speculation is optional. An absent/failed/standard-metadata
+                // page never replaces the normal authoritative lookup below.
+                let _ =
+                    tokio::time::timeout(self.config.http_timeout, self.preload_directory(parent))
+                        .await;
+            }
+        }
         let (epoch, observed) = {
             let mut ns = self.namespace.lock().unwrap();
             if ns.is_moving(&key) {
@@ -316,6 +355,82 @@ impl Filesystem {
         ns.install(&key, |ino| {
             Inode::new(ino, key.clone(), directory, head, &self.config)
         })
+    }
+
+    async fn preload_directory(&self, parent: u64) -> Result<()> {
+        let node = self.node(parent)?;
+        let _gate = node.preload.lock().await;
+        let (prefix, epoch) = {
+            let ns = self.namespace.lock().unwrap();
+            if self
+                .preloaded_directories
+                .get(&parent)
+                .is_some_and(|fetched| fetched.elapsed() < self.config.stat_cache_ttl)
+            {
+                return Ok(());
+            }
+            let state = node.state.lock().unwrap();
+            if state.deleted || ns.is_moving(&state.key) || ns.is_deleting(&state.key) {
+                return Err(Error::Fs(libc::EAGAIN));
+            }
+            let prefix = if state.key.is_empty() {
+                String::new()
+            } else {
+                format!("{}/", state.key)
+            };
+            (prefix, ns.epoch)
+        };
+        let fetched = std::time::Instant::now();
+        let page = self.store.list(&prefix, Some("/"), None).await;
+        let mut ns = self.namespace.lock().unwrap();
+        if ns.epoch != epoch {
+            return Err(Error::Fs(libc::EAGAIN));
+        }
+        // This records an attempt, not an authoritative negative listing.
+        self.preloaded_directories.insert(parent, fetched);
+        self.preloaded_directories.run_pending_tasks();
+        ns.hidden("");
+        for object in page?
+            .objects
+            .into_iter()
+            .take(crate::backend::extended_list::MAX_PAGE_ENTRIES)
+        {
+            let Some(name) = object.key.strip_prefix(&prefix) else {
+                return Err(Error::InvalidResponse("preload prefix escape".into()));
+            };
+            if name.is_empty()
+                || name.contains('/')
+                || ns.tombstones.contains_key(&object.key)
+                || ns.is_moving(&object.key)
+                || ns.is_deleting(&object.key)
+                || ns.named(&object.key).is_some()
+            {
+                continue;
+            }
+            child(prefix.trim_end_matches('/'), name)?;
+            let (Some(metadata), Some(etag)) =
+                (object.metadata, object.etag.filter(|etag| !etag.is_empty()))
+            else {
+                continue;
+            };
+            let head = ObjectHead {
+                size: object.size,
+                etag,
+                metadata: crate::backend::metadata::encode_metadata(&metadata)?
+                    .into_iter()
+                    .collect(),
+                last_modified: object
+                    .last_modified
+                    .and_then(|date| SystemTime::try_from(date).ok()),
+                ..Default::default()
+            };
+            ns.install(&object.key, |ino| {
+                let node = Inode::new(ino, object.key.clone(), false, Some(head), &self.config);
+                node.state.lock().unwrap().fetched = fetched;
+                node
+            })?;
+        }
+        Ok(())
     }
 
     pub fn forget(&self, ino: u64, count: u64) {
@@ -1021,6 +1136,7 @@ impl Filesystem {
         limit: usize,
         resolve_types: bool,
     ) -> Result<Vec<DirEntry>> {
+        let fetched = std::time::Instant::now();
         let node = self.node(ino)?;
         let key = {
             let state = node.state.lock().unwrap();
@@ -1034,7 +1150,19 @@ impl Filesystem {
         } else {
             format!("{key}/")
         };
-        let epoch = self.namespace.lock().unwrap().epoch;
+        let epoch = {
+            let ns = self.namespace.lock().unwrap();
+            if resolve_types
+                && let Some(page) = self.directory_pages.get(&(ino, ns.epoch, after.into(), limit))
+                && page.fetched.elapsed() < self.config.stat_cache_ttl
+                // READDIR does not retain lookup references. Namespace pressure
+                // may have evicted an inode represented by this cached page.
+                && page.entries.iter().all(|entry| ns.nodes.contains_key(&entry.ino))
+            {
+                return Ok(page.entries.clone());
+            }
+            ns.epoch
+        };
         let mut selected: BTreeMap<String, (bool, Option<ObjectHead>, bool)> = BTreeMap::new();
         {
             let mut ns = self.namespace.lock().unwrap();
@@ -1212,6 +1340,16 @@ impl Filesystem {
                 name,
                 kind: node.attr().kind,
             });
+        }
+        if resolve_types {
+            self.directory_pages.insert(
+                (ino, epoch, after.into(), limit),
+                Arc::new(DirectoryPage {
+                    fetched,
+                    entries: entries.clone(),
+                }),
+            );
+            self.directory_pages.run_pending_tasks();
         }
         Ok(entries)
     }

@@ -72,6 +72,7 @@ pub struct MemoryStore {
     pub active_heads: AtomicUsize,
     pub peak_heads: AtomicUsize,
     pub list_calls: AtomicUsize,
+    pub fail_list: AtomicBool,
     patch_pause: Mutex<Pause>,
     head_pause: Mutex<Pause>,
     head_response_pause: Mutex<Pause>,
@@ -569,6 +570,9 @@ impl Store for MemoryStore {
         token: Option<&str>,
     ) -> Result<ListPage> {
         self.list_calls.fetch_add(1, Ordering::Relaxed);
+        if self.fail_list.load(Ordering::Relaxed) {
+            return Err(Self::failure("LIST"));
+        }
         let page = {
             let objects = self.objects.lock().unwrap();
             let mut prefixes = BTreeSet::new();

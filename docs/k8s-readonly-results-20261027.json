@@ -1,0 +1,1564 @@
+{
+  "schema": 1,
+  "accepted": false,
+  "kind": "isolated real-object read-only Kubernetes diagnostic",
+  "provenance": {
+    "go-experimental": {
+      "source_revision": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "binary_sha256": "7ad836e0bdd23ea279bb236627e9b130d11c174ae649c7582213a83e5d11a28b",
+      "toolchain": "go1.25.9"
+    },
+    "go-packaged": {
+      "source_revision": "80c214ef14f620d93407454fc76ca01dd71fa25f",
+      "binary_sha256": "e04492363d29985ab1f74521482a01a3c6f7fdeeed35ad1ba0faa991370f4683",
+      "toolchain": "go1.25.9"
+    },
+    "rust": {
+      "source_revision": "ba405d3485e66b00ad3bacc716177f0f9a145eb6",
+      "binary_sha256": "f9db60de2a7ce9134d12988c4c1751075bd6d609e8f87ae1d254e493cbc4a3ef",
+      "toolchain": "rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+    }
+  },
+  "go_provenance_correction": [
+    {
+      "source_revision": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "binary_sha256": "7ad836e0bdd23ea279bb236627e9b130d11c174ae649c7582213a83e5d11a28b",
+      "recorded_launcher_version": "go version go1.22.2 linux/amd64",
+      "embedded_toolchain": "go1.25.9",
+      "verification": "go version -m on the exact SHA-256-bound executable"
+    },
+    {
+      "source_revision": "80c214ef14f620d93407454fc76ca01dd71fa25f",
+      "binary_sha256": "e04492363d29985ab1f74521482a01a3c6f7fdeeed35ad1ba0faa991370f4683",
+      "recorded_launcher_version": "go version go1.22.2 linux/amd64",
+      "embedded_toolchain": "go1.25.9",
+      "verification": "go version -m on the exact SHA-256-bound executable"
+    }
+  ],
+  "conditions": {
+    "cpu_limit": 2,
+    "cgroup_memory_max_bytes": 4294967296,
+    "memory_limit_mb": 512,
+    "entry_limit": 100000,
+    "concurrency": 4,
+    "read_bytes": 131072,
+    "kernel": "6.8.0-142-generic",
+    "kubernetes": "1.36.4",
+    "platform": "linux/amd64",
+    "files": 3000,
+    "dataset_bytes": 8298727528,
+    "listing_directories": 96,
+    "manifest_sha256": "fbe40c762900d10b0307eff02ef2db3567df00ec3a3894fd6e580fbe23f7252d",
+    "correctness": "Every file fully hashed against an independent native GET with If-Match; directory names compared with a native listing oracle",
+    "go_gc_interval": 0,
+    "s3_mutations": false,
+    "multipart_expiration": false
+  },
+  "limitations": [
+    "Three repetitions; diagnostic is not the five-repetition complete acceptance matrix.",
+    "Fresh means new FUSE process/mount; host and remote caches were not controlled.",
+    "Warm-revisit repeats the complete dataset, larger than the user-space cache.",
+    "All processes and file cache share one owned cgroup; cached pages from earlier mounts may remain.",
+    "Per-phase cgroup peaks are sampled at 50 ms; memory.max pressure keeps total cgroup consumption near its limit.",
+    "Daemon RSS excludes controller/client RSS; total cgroup memory includes them.",
+    "No forced GC or global cache drop. No Go allocator series; full compatibility and writer acceptance remain incomplete.",
+    "Native generation/hash oracle was taken before the mounts; no post-run native generation inventory.",
+    "Original private receipts retain the incorrect Go launcher field; the hash-bound correction above supersedes that field only."
+  ],
+  "runs": [
+    {
+      "label": "0-go-experimental-fresh",
+      "implementation": "go-experimental",
+      "repetition": 0,
+      "state": "fresh",
+      "correct_files": 3000,
+      "files": 3000,
+      "bytes": 8298727528,
+      "elapsed_seconds": 34.579352374887094,
+      "throughput_bytes_second": 239990831.4658567,
+      "listing_seconds": 9.964324209140614,
+      "listings": 96,
+      "read_syscall_ms": {
+        "0.5": 0.3120419569313526,
+        "0.95": 6.871066987514496,
+        "0.99": 25.933827040717006
+      },
+      "file_total_ms": {
+        "0.5": 9.987388039007783,
+        "0.95": 186.49545684456825,
+        "0.99": 601.006074808538
+      },
+      "listing_ms": {
+        "0.5": 89.05684016644955,
+        "0.95": 235.76420405879617,
+        "0.99": 345.73559695854783
+      },
+      "file_bins_ms": {
+        "0": {
+          "n": 1500,
+          "0.5": 7.598381955176592,
+          "0.95": 65.4614579398185,
+          "0.99": 185.7583220116794
+        },
+        "1": {
+          "n": 900,
+          "0.5": 10.564493015408516,
+          "0.95": 63.365363981574774,
+          "0.99": 130.44346286915243
+        },
+        "2": {
+          "n": 400,
+          "0.5": 49.628900131210685,
+          "0.95": 169.2314688116312,
+          "0.99": 420.59727013111115
+        },
+        "3": {
+          "n": 160,
+          "0.5": 168.10121107846498,
+          "0.95": 519.3903159815818,
+          "0.99": 963.0769940558821
+        },
+        "4": {
+          "n": 40,
+          "0.5": 695.7109340000898,
+          "0.95": 1274.5218959171325,
+          "0.99": 1475.2631410956383
+        }
+      },
+      "memory": {
+        "samples": 882,
+        "interval_seconds": 0.05,
+        "peak": {
+          "rss": 1134526464,
+          "hwm": 1134526464,
+          "cgroup_current": 4299763712,
+          "file": 3039952896,
+          "kernel": 47316992
+        },
+        "steady": {
+          "rss": 1105003147.6363637,
+          "cgroup_current": 4293907176.7272725,
+          "file": 3013495179.6363635,
+          "kernel": 43990597.81818182
+        },
+        "limitations": [
+          "cgroup contains client/controller as required",
+          "cgroup sampled peak, not reset kernel high watermark",
+          "kernel cache from earlier mounts may remain; no global cache drop",
+          "Go heap series unavailable"
+        ]
+      }
+    },
+    {
+      "label": "0-go-experimental-warm-revisit",
+      "implementation": "go-experimental",
+      "repetition": 0,
+      "state": "warm-revisit",
+      "correct_files": 3000,
+      "files": 3000,
+      "bytes": 8298727528,
+      "elapsed_seconds": 28.248066328000277,
+      "throughput_bytes_second": 293780375.3233923,
+      "listing_seconds": 0.038969847140833735,
+      "listings": 96,
+      "read_syscall_ms": {
+        "0.5": 0.3231621813029051,
+        "0.95": 6.863686954602599,
+        "0.99": 22.558245109394193
+      },
+      "file_total_ms": {
+        "0.5": 8.414728101342916,
+        "0.95": 132.84801016561687,
+        "0.99": 567.4032249953598
+      },
+      "listing_ms": {
+        "0.5": 0.2055009827017784,
+        "0.95": 0.7783349137753248,
+        "0.99": 6.233231863006949
+      },
+      "file_bins_ms": {
+        "0": {
+          "n": 1500,
+          "0.5": 7.205968955531716,
+          "0.95": 23.558031069114804,
+          "0.99": 81.66777016595006
+        },
+        "1": {
+          "n": 900,
+          "0.5": 9.266583016142249,
+          "0.95": 31.81668813340366,
+          "0.99": 114.6555149462074
+        },
+        "2": {
+          "n": 400,
+          "0.5": 46.42785806208849,
+          "0.95": 141.72982005402446,
+          "0.99": 212.43082405999303
+        },
+        "3": {
+          "n": 160,
+          "0.5": 127.92553612962365,
+          "0.95": 409.93309603072703,
+          "0.99": 851.4600289054215
+        },
+        "4": {
+          "n": 40,
+          "0.5": 886.2899779342115,
+          "0.95": 1290.128892986104,
+          "0.99": 1572.4277051631361
+        }
+      },
+      "memory": {
+        "samples": 558,
+        "interval_seconds": 0.05,
+        "peak": {
+          "rss": 1221660672,
+          "hwm": 1221660672,
+          "cgroup_current": 4300894208,
+          "file": 3021000704,
+          "kernel": 47595520
+        },
+        "steady": {
+          "rss": 1134004869.7657657,
+          "cgroup_current": 4293708311.063063,
+          "file": 2980936178.1621623,
+          "kernel": 47564855.35135135
+        },
+        "limitations": [
+          "cgroup contains client/controller as required",
+          "cgroup sampled peak, not reset kernel high watermark",
+          "kernel cache from earlier mounts may remain; no global cache drop",
+          "Go heap series unavailable"
+        ]
+      }
+    },
+    {
+      "label": "0-rust-fresh",
+      "implementation": "rust",
+      "repetition": 0,
+      "state": "fresh",
+      "correct_files": 3000,
+      "files": 3000,
+      "bytes": 8298727528,
+      "elapsed_seconds": 41.56083820411004,
+      "throughput_bytes_second": 199676615.9345487,
+      "listing_seconds": 8.426097727846354,
+      "listings": 96,
+      "read_syscall_ms": {
+        "0.5": 0.07628113962709904,
+        "0.95": 6.264471914619207,
+        "0.99": 37.64058789238334
+      },
+      "file_total_ms": {
+        "0.5": 23.315180093050003,
+        "0.95": 169.36100902967155,
+        "0.99": 562.0616578962654
+      },
+      "listing_ms": {
+        "0.5": 66.22621393762529,
+        "0.95": 202.9134191107005,
+        "0.99": 504.3375629466027
+      },
+      "file_bins_ms": {
+        "0": {
+          "n": 1500,
+          "0.5": 13.919176068156958,
+          "0.95": 78.10528506524861,
+          "0.99": 139.5960059016943
+        },
+        "1": {
+          "n": 900,
+          "0.5": 18.372815800830722,
+          "0.95": 73.53002298623323,
+          "0.99": 122.60732892900705
+        },
+        "2": {
+          "n": 400,
+          "0.5": 70.71501389145851,
+          "0.95": 162.3502119909972,
+          "0.99": 217.80978119932115
+        },
+        "3": {
+          "n": 160,
+          "0.5": 176.88535107299685,
+          "0.95": 478.40054612606764,
+          "0.99": 616.2101079244167
+        },
+        "4": {
+          "n": 40,
+          "0.5": 711.2765500787646,
+          "0.95": 1412.469319999218,
+          "0.99": 2498.891568975523
+        }
+      },
+      "memory": {
+        "samples": 989,
+        "interval_seconds": 0.05,
+        "peak": {
+          "rss": 543715328,
+          "hwm": 544563200,
+          "cgroup_current": 4295401472,
+          "file": 3819286528,
+          "kernel": 43016192
+        },
+        "steady": {
+          "rss": 331882995.00507617,
+          "cgroup_current": 4213430199.2284265,
+          "file": 3693433455.7563453,
+          "kernel": 40363002.80203046
+        },
+        "limitations": [
+          "cgroup contains client/controller as required",
+          "cgroup sampled peak, not reset kernel high watermark",
+          "kernel cache from earlier mounts may remain; no global cache drop",
+          "Go heap series unavailable"
+        ]
+      }
+    },
+    {
+      "label": "0-rust-warm-revisit",
+      "implementation": "rust",
+      "repetition": 0,
+      "state": "warm-revisit",
+      "correct_files": 3000,
+      "files": 3000,
+      "bytes": 8298727528,
+      "elapsed_seconds": 33.58768348488957,
+      "throughput_bytes_second": 247076507.426701,
+      "listing_seconds": 3.5750948369968683,
+      "listings": 96,
+      "read_syscall_ms": {
+        "0.5": 0.07757102139294147,
+        "0.95": 6.213492015376687,
+        "0.99": 36.25023807398975
+      },
+      "file_total_ms": {
+        "0.5": 8.402628125622869,
+        "0.95": 165.29479110613465,
+        "0.99": 661.359507823363
+      },
+      "listing_ms": {
+        "0.5": 25.73757595382631,
+        "0.95": 47.4372950848192,
+        "0.99": 551.7049869522452
+      },
+      "file_bins_ms": {
+        "1": {
+          "n": 900,
+          "0.5": 9.555126074701548,
+          "0.95": 49.2954570800066,
+          "0.99": 137.60611205361784
+        },
+        "0": {
+          "n": 1500,
+          "0.5": 6.982448045164347,
+          "0.95": 53.17842401564121,
+          "0.99": 223.9178130403161
+        },
+        "2": {
+          "n": 400,
+          "0.5": 59.66261890716851,
+          "0.95": 140.03510912880301,
+          "0.99": 193.950898014009
+        },
+        "3": {
+          "n": 160,
+          "0.5": 161.95630910806358,
+          "0.95": 499.14862820878625,
+          "0.99": 660.8148638624698
+        },
+        "4": {
+          "n": 40,
+          "0.5": 608.1406841985881,
+          "0.95": 1305.6799890473485,
+          "0.99": 1826.2729730922729
+        }
+      },
+      "memory": {
+        "samples": 736,
+        "interval_seconds": 0.05,
+        "peak": {
+          "rss": 734617600,
+          "hwm": 734617600,
+          "cgroup_current": 4295598080,
+          "file": 3803303936,
+          "kernel": 43085824
+        },
+        "steady": {
+          "rss": 358685271.07482994,
+          "cgroup_current": 4200273042.285714,
+          "file": 3650863104,
+          "kernel": 43028284.952380955
+        },
+        "limitations": [
+          "cgroup contains client/controller as required",
+          "cgroup sampled peak, not reset kernel high watermark",
+          "kernel cache from earlier mounts may remain; no global cache drop",
+          "Go heap series unavailable"
+        ]
+      }
+    },
+    {
+      "label": "0-go-packaged-fresh",
+      "implementation": "go-packaged",
+      "repetition": 0,
+      "state": "fresh",
+      "correct_files": 3000,
+      "files": 3000,
+      "bytes": 8298727528,
+      "elapsed_seconds": 36.41110044508241,
+      "throughput_bytes_second": 227917514.89402744,
+      "listing_seconds": 10.743109221104532,
+      "listings": 96,
+      "read_syscall_ms": {
+        "0.5": 0.3246620763093233,
+        "0.95": 7.2716891299933195,
+        "0.99": 25.577374966815114
+      },
+      "file_total_ms": {
+        "0.5": 9.903526864945889,
+        "0.95": 180.71732693351805,
+        "0.99": 680.0367760006338
+      },
+      "listing_ms": {
+        "0.5": 94.580507138744,
+        "0.95": 266.7260658927262,
+        "0.99": 365.6619139946997
+      },
+      "file_bins_ms": {
+        "0": {
+          "n": 1500,
+          "0.5": 7.910784101113677,
+          "0.95": 95.9487569052726,
+          "0.99": 187.08615098148584
+        },
+        "1": {
+          "n": 900,
+          "0.5": 10.374960955232382,
+          "0.95": 76.85254607349634,
+          "0.99": 157.36135700717568
+        },
+        "2": {
+          "n": 400,
+          "0.5": 56.54054810293019,
+          "0.95": 172.84734407439828,
+          "0.99": 302.21379012800753
+        },
+        "3": {
+          "n": 160,
+          "0.5": 152.61464519426227,
+          "0.95": 459.9498389288783,
+          "0.99": 741.7319379746914
+        },
+        "4": {
+          "n": 40,
+          "0.5": 834.2771320603788,
+          "0.95": 1264.4341771956533,
+          "0.99": 2177.487428067252
+        }
+      },
+      "memory": {
+        "samples": 934,
+        "interval_seconds": 0.05,
+        "peak": {
+          "rss": 1263607808,
+          "hwm": 1263607808,
+          "cgroup_current": 4296880128,
+          "file": 2947477504,
+          "kernel": 47730688
+        },
+        "steady": {
+          "rss": 1242449545.6344087,
+          "cgroup_current": 4293253560.4301076,
+          "file": 2874792332.387097,
+          "kernel": 44197755.87096774
+        },
+        "limitations": [
+          "cgroup contains client/controller as required",
+          "cgroup sampled peak, not reset kernel high watermark",
+          "kernel cache from earlier mounts may remain; no global cache drop",
+          "Go heap series unavailable"
+        ]
+      }
+    },
+    {
+      "label": "0-go-packaged-warm-revisit",
+      "implementation": "go-packaged",
+      "repetition": 0,
+      "state": "warm-revisit",
+      "correct_files": 3000,
+      "files": 3000,
+      "bytes": 8298727528,
+      "elapsed_seconds": 29.79174280585721,
+      "throughput_bytes_second": 278557974.3380581,
+      "listing_seconds": 0.5203947930131108,
+      "listings": 96,
+      "read_syscall_ms": {
+        "0.5": 0.3441721200942993,
+        "0.95": 7.33044114895165,
+        "0.99": 24.150864919647574
+      },
+      "file_total_ms": {
+        "0.5": 8.78268014639616,
+        "0.95": 153.88756291940808,
+        "0.99": 618.9956779126078
+      },
+      "listing_ms": {
+        "0.5": 0.24411198683083057,
+        "0.95": 68.22203705087304,
+        "0.99": 92.98325586132705
+      },
+      "file_bins_ms": {
+        "0": {
+          "n": 1500,
+          "0.5": 7.37819098867476,
+          "0.95": 24.865410989150405,
+          "0.99": 110.45027594082057
+        },
+        "1": {
+          "n": 900,
+          "0.5": 9.735957020893693,
+          "0.95": 29.829033883288503,
+          "0.99": 101.79556719958782
+        },
+        "2": {
+          "n": 400,
+          "0.5": 52.166447043418884,
+          "0.95": 153.88756291940808,
+          "0.99": 217.12055709213018
+        },
+        "3": {
+          "n": 160,
+          "0.5": 164.75975792855024,
+          "0.95": 426.4656100422144,
+          "0.99": 600.9215640369803
+        },
+        "4": {
+          "n": 40,
+          "0.5": 871.7917890753597,
+          "0.95": 1274.2149441037327,
+          "0.99": 1456.9723547901958
+        }
+      },
+      "memory": {
+        "samples": 599,
+        "interval_seconds": 0.05,
+        "peak": {
+          "rss": 1377402880,
+          "hwm": 1377402880,
+          "cgroup_current": 4316848128,
+          "file": 2906206208,
+          "kernel": 48005120
+        },
+        "steady": {
+          "rss": 1248897006.789916,
+          "cgroup_current": 4293072259.2268906,
+          "file": 2864012451.495798,
+          "kernel": 47976413.579831935
+        },
+        "limitations": [
+          "cgroup contains client/controller as required",
+          "cgroup sampled peak, not reset kernel high watermark",
+          "kernel cache from earlier mounts may remain; no global cache drop",
+          "Go heap series unavailable"
+        ]
+      }
+    },
+    {
+      "label": "1-go-packaged-fresh",
+      "implementation": "go-packaged",
+      "repetition": 1,
+      "state": "fresh",
+      "correct_files": 3000,
+      "files": 3000,
+      "bytes": 8298727528,
+      "elapsed_seconds": 36.861865141196176,
+      "throughput_bytes_second": 225130429.40753117,
+      "listing_seconds": 10.41077405703254,
+      "listings": 96,
+      "read_syscall_ms": {
+        "0.5": 0.3215721808373928,
+        "0.95": 7.101567927747965,
+        "0.99": 25.073152035474777
+      },
+      "file_total_ms": {
+        "0.5": 9.885626845061779,
+        "0.95": 207.07962685264647,
+        "0.99": 649.1385251283646
+      },
+      "listing_ms": {
+        "0.5": 94.98193999752402,
+        "0.95": 248.3594201039523,
+        "0.99": 305.41785107925534
+      },
+      "file_bins_ms": {
+        "0": {
+          "n": 1500,
+          "0.5": 7.746753050014377,
+          "0.95": 95.68177512846887,
+          "0.99": 231.1796930152923
+        },
+        "1": {
+          "n": 900,
+          "0.5": 10.193339781835675,
+          "0.95": 78.3824969548732,
+          "0.99": 143.21825979277492
+        },
+        "2": {
+          "n": 400,
+          "0.5": 50.56916596367955,
+          "0.95": 192.63605889864266,
+          "0.99": 311.6062539629638
+        },
+        "3": {
+          "n": 160,
+          "0.5": 172.78344300575554,
+          "0.95": 442.3291590064764,
+          "0.99": 540.9753539133817
+        },
+        "4": {
+          "n": 40,
+          "0.5": 831.5718530211598,
+          "0.95": 1554.7665951307863,
+          "0.99": 1984.1839149594307
+        }
+      },
+      "memory": {
+        "samples": 937,
+        "interval_seconds": 0.05,
+        "peak": {
+          "rss": 1234026496,
+          "hwm": 1234026496,
+          "cgroup_current": 4296953856,
+          "file": 2963615744,
+          "kernel": 47656960
+        },
+        "steady": {
+          "rss": 1209167762.4812834,
+          "cgroup_current": 4293295711.828877,
+          "file": 2907375758.3743315,
+          "kernel": 44172271.57219251
+        },
+        "limitations": [
+          "cgroup contains client/controller as required",
+          "cgroup sampled peak, not reset kernel high watermark",
+          "kernel cache from earlier mounts may remain; no global cache drop",
+          "Go heap series unavailable"
+        ]
+      }
+    },
+    {
+      "label": "1-go-packaged-warm-revisit",
+      "implementation": "go-packaged",
+      "repetition": 1,
+      "state": "warm-revisit",
+      "correct_files": 3000,
+      "files": 3000,
+      "bytes": 8298727528,
+      "elapsed_seconds": 30.671847951132804,
+      "throughput_bytes_second": 270564966.97628886,
+      "listing_seconds": 0.49142464506439865,
+      "listings": 96,
+      "read_syscall_ms": {
+        "0.5": 0.35140314139425755,
+        "0.95": 7.134529063478112,
+        "0.99": 22.955217864364386
+      },
+      "file_total_ms": {
+        "0.5": 8.659780025482178,
+        "0.95": 140.21071000024676,
+        "0.99": 768.7224829569459
+      },
+      "listing_ms": {
+        "0.5": 0.2720619086176157,
+        "0.95": 68.8569510821253,
+        "0.99": 86.86867402866483
+      },
+      "file_bins_ms": {
+        "0": {
+          "n": 1500,
+          "0.5": 7.340929936617613,
+          "0.95": 21.821578964591026,
+          "0.99": 76.57211413607001
+        },
+        "1": {
+          "n": 900,
+          "0.5": 9.907907107844949,
+          "0.95": 29.632203048095107,
+          "0.99": 113.61902789212763
+        },
+        "2": {
+          "n": 400,
+          "0.5": 46.74369003623724,
+          "0.95": 140.21071000024676,
+          "0.99": 281.8648798856884
+        },
+        "3": {
+          "n": 160,
+          "0.5": 136.2157219555229,
+          "0.95": 487.20569582656026,
+          "0.99": 916.607866063714
+        },
+        "4": {
+          "n": 40,
+          "0.5": 895.4957309179008,
+          "0.95": 1515.0975019205362,
+          "0.99": 2127.0265930797905
+        }
+      },
+      "memory": {
+        "samples": 616,
+        "interval_seconds": 0.05,
+        "peak": {
+          "rss": 1383047168,
+          "hwm": 1383047168,
+          "cgroup_current": 4302594048,
+          "file": 2895687680,
+          "kernel": 48005120
+        },
+        "steady": {
+          "rss": 1239991670.6341465,
+          "cgroup_current": 4293954118.764228,
+          "file": 2873348429.00813,
+          "kernel": 47977247.219512194
+        },
+        "limitations": [
+          "cgroup contains client/controller as required",
+          "cgroup sampled peak, not reset kernel high watermark",
+          "kernel cache from earlier mounts may remain; no global cache drop",
+          "Go heap series unavailable"
+        ]
+      }
+    },
+    {
+      "label": "1-rust-fresh",
+      "implementation": "rust",
+      "repetition": 1,
+      "state": "fresh",
+      "correct_files": 3000,
+      "files": 3000,
+      "bytes": 8298727528,
+      "elapsed_seconds": 41.82013542810455,
+      "throughput_bytes_second": 198438561.7848328,
+      "listing_seconds": 8.33080416615121,
+      "listings": 96,
+      "read_syscall_ms": {
+        "0.5": 0.07676985114812851,
+        "0.95": 6.224412936717272,
+        "0.99": 39.30389997549355
+      },
+      "file_total_ms": {
+        "0.5": 23.582400986924767,
+        "0.95": 172.9972141329199,
+        "0.99": 634.1767918784171
+      },
+      "listing_ms": {
+        "0.5": 65.51303807646036,
+        "0.95": 168.12248108908534,
+        "0.99": 566.4839390665293
+      },
+      "file_bins_ms": {
+        "0": {
+          "n": 1500,
+          "0.5": 13.790983939543366,
+          "0.95": 79.91645694710314,
+          "0.99": 135.1428960915655
+        },
+        "1": {
+          "n": 900,
+          "0.5": 18.40093615464866,
+          "0.95": 70.86022500880063,
+          "0.99": 134.4842710532248
+        },
+        "2": {
+          "n": 400,
+          "0.5": 74.56562109291553,
+          "0.95": 171.03055119514465,
+          "0.99": 204.10147798247635
+        },
+        "3": {
+          "n": 160,
+          "0.5": 182.95374303124845,
+          "0.95": 478.8213181309402,
+          "0.99": 692.7560530602932
+        },
+        "4": {
+          "n": 40,
+          "0.5": 676.8395639955997,
+          "0.95": 1163.6733368504792,
+          "0.99": 1294.5998939685524
+        }
+      },
+      "memory": {
+        "samples": 992,
+        "interval_seconds": 0.05,
+        "peak": {
+          "rss": 543834112,
+          "hwm": 547307520,
+          "cgroup_current": 4294893568,
+          "file": 3864145920,
+          "kernel": 42921984
+        },
+        "steady": {
+          "rss": 381582698.02020204,
+          "cgroup_current": 4237094622.383838,
+          "file": 3667269404.4444447,
+          "kernel": 40387904.646464646
+        },
+        "limitations": [
+          "cgroup contains client/controller as required",
+          "cgroup sampled peak, not reset kernel high watermark",
+          "kernel cache from earlier mounts may remain; no global cache drop",
+          "Go heap series unavailable"
+        ]
+      }
+    },
+    {
+      "label": "1-rust-warm-revisit",
+      "implementation": "rust",
+      "repetition": 1,
+      "state": "warm-revisit",
+      "correct_files": 3000,
+      "files": 3000,
+      "bytes": 8298727528,
+      "elapsed_seconds": 30.932039903942496,
+      "throughput_bytes_second": 268289047.65968156,
+      "listing_seconds": 3.8702600970864296,
+      "listings": 96,
+      "read_syscall_ms": {
+        "0.5": 0.07624109275639057,
+        "0.95": 6.135622970759869,
+        "0.99": 34.283505054190755
+      },
+      "file_total_ms": {
+        "0.5": 8.392648072913289,
+        "0.95": 148.774178000167,
+        "0.99": 487.21442511305213
+      },
+      "listing_ms": {
+        "0.5": 27.80840010382235,
+        "0.95": 54.72549400292337,
+        "0.99": 550.0660261604935
+      },
+      "file_bins_ms": {
+        "0": {
+          "n": 1500,
+          "0.5": 6.994127994403243,
+          "0.95": 42.32657980173826,
+          "0.99": 102.89855394512415
+        },
+        "1": {
+          "n": 900,
+          "0.5": 9.614796144887805,
+          "0.95": 46.7548999004066,
+          "0.99": 119.19000605121255
+        },
+        "2": {
+          "n": 400,
+          "0.5": 60.115372063592076,
+          "0.95": 139.56912606954575,
+          "0.99": 219.8707559145987
+        },
+        "3": {
+          "n": 160,
+          "0.5": 164.60469691082835,
+          "0.95": 402.78694801963866,
+          "0.99": 862.0180119760334
+        },
+        "4": {
+          "n": 40,
+          "0.5": 739.0515001025051,
+          "0.95": 1723.0612460989505,
+          "0.99": 4401.2767928652465
+        }
+      },
+      "memory": {
+        "samples": 690,
+        "interval_seconds": 0.05,
+        "peak": {
+          "rss": 628113408,
+          "hwm": 628113408,
+          "cgroup_current": 4298891264,
+          "file": 3804213248,
+          "kernel": 43167744
+        },
+        "steady": {
+          "rss": 346634744.5797101,
+          "cgroup_current": 4230909773.9130435,
+          "file": 3693674792.811594,
+          "kernel": 43102208
+        },
+        "limitations": [
+          "cgroup contains client/controller as required",
+          "cgroup sampled peak, not reset kernel high watermark",
+          "kernel cache from earlier mounts may remain; no global cache drop",
+          "Go heap series unavailable"
+        ]
+      }
+    },
+    {
+      "label": "1-go-experimental-fresh",
+      "implementation": "go-experimental",
+      "repetition": 1,
+      "state": "fresh",
+      "correct_files": 3000,
+      "files": 3000,
+      "bytes": 8298727528,
+      "elapsed_seconds": 32.40997419110499,
+      "throughput_bytes_second": 256054740.40388495,
+      "listing_seconds": 9.881693115923554,
+      "listings": 96,
+      "read_syscall_ms": {
+        "0.5": 0.32279198057949543,
+        "0.95": 7.008587941527367,
+        "0.99": 23.291339864954352
+      },
+      "file_total_ms": {
+        "0.5": 9.514485951513052,
+        "0.95": 164.34974502772093,
+        "0.99": 628.5128141753376
+      },
+      "listing_ms": {
+        "0.5": 84.22429603524506,
+        "0.95": 248.9715050905943,
+        "0.99": 325.97653195261955
+      },
+      "file_bins_ms": {
+        "0": {
+          "n": 1500,
+          "0.5": 7.69658200442791,
+          "0.95": 65.80090103670955,
+          "0.99": 161.4854158833623
+        },
+        "1": {
+          "n": 900,
+          "0.5": 10.007039178162813,
+          "0.95": 52.93583311140537,
+          "0.99": 148.6483479384333
+        },
+        "2": {
+          "n": 400,
+          "0.5": 49.2249068338424,
+          "0.95": 155.18722194246948,
+          "0.99": 234.4782049767673
+        },
+        "3": {
+          "n": 160,
+          "0.5": 143.57756287790835,
+          "0.95": 446.96900015696883,
+          "0.99": 621.3638738263398
+        },
+        "4": {
+          "n": 40,
+          "0.5": 788.0411460064352,
+          "0.95": 1235.506888013333,
+          "0.99": 2610.631733201444
+        }
+      },
+      "memory": {
+        "samples": 838,
+        "interval_seconds": 0.05,
+        "peak": {
+          "rss": 1124253696,
+          "hwm": 1124253696,
+          "cgroup_current": 4296744960,
+          "file": 3040210944,
+          "kernel": 47472640
+        },
+        "steady": {
+          "rss": 1111203423.0419161,
+          "cgroup_current": 4293657924.982036,
+          "file": 3007277975.760479,
+          "kernel": 43951870.46706587
+        },
+        "limitations": [
+          "cgroup contains client/controller as required",
+          "cgroup sampled peak, not reset kernel high watermark",
+          "kernel cache from earlier mounts may remain; no global cache drop",
+          "Go heap series unavailable"
+        ]
+      }
+    },
+    {
+      "label": "1-go-experimental-warm-revisit",
+      "implementation": "go-experimental",
+      "repetition": 1,
+      "state": "warm-revisit",
+      "correct_files": 3000,
+      "files": 3000,
+      "bytes": 8298727528,
+      "elapsed_seconds": 27.426073729991913,
+      "throughput_bytes_second": 302585328.4615394,
+      "listing_seconds": 0.05246973899193108,
+      "listings": 96,
+      "read_syscall_ms": {
+        "0.5": 0.32275309786200523,
+        "0.95": 7.023778045549989,
+        "0.99": 22.26368198171258
+      },
+      "file_total_ms": {
+        "0.5": 8.539708098396659,
+        "0.95": 133.99858796037734,
+        "0.99": 521.594300866127
+      },
+      "listing_ms": {
+        "0.5": 0.2870319876819849,
+        "0.95": 1.1535580269992352,
+        "0.99": 7.780582876875997
+      },
+      "file_bins_ms": {
+        "1": {
+          "n": 900,
+          "0.5": 9.571364847943187,
+          "0.95": 27.88965101353824,
+          "0.99": 114.64661499485373
+        },
+        "0": {
+          "n": 1500,
+          "0.5": 7.369369966909289,
+          "0.95": 18.91613914631307,
+          "0.99": 52.43487888947129
+        },
+        "2": {
+          "n": 400,
+          "0.5": 44.355313992127776,
+          "0.95": 145.11824399232864,
+          "0.99": 253.34732490591705
+        },
+        "3": {
+          "n": 160,
+          "0.5": 137.70182291045785,
+          "0.95": 388.7825319543481,
+          "0.99": 640.4865251388401
+        },
+        "4": {
+          "n": 40,
+          "0.5": 748.9493079483509,
+          "0.95": 1399.969254853204,
+          "0.99": 1725.6252451334149
+        }
+      },
+      "memory": {
+        "samples": 545,
+        "interval_seconds": 0.05,
+        "peak": {
+          "rss": 1218265088,
+          "hwm": 1218265088,
+          "cgroup_current": 4301885440,
+          "file": 3030507520,
+          "kernel": 47755264
+        },
+        "steady": {
+          "rss": 1126199333.5779817,
+          "cgroup_current": 4293194254.091743,
+          "file": 2988382189.211009,
+          "kernel": 47710020.110091746
+        },
+        "limitations": [
+          "cgroup contains client/controller as required",
+          "cgroup sampled peak, not reset kernel high watermark",
+          "kernel cache from earlier mounts may remain; no global cache drop",
+          "Go heap series unavailable"
+        ]
+      }
+    },
+    {
+      "label": "2-rust-fresh",
+      "implementation": "rust",
+      "repetition": 2,
+      "state": "fresh",
+      "correct_files": 3000,
+      "files": 3000,
+      "bytes": 8298727528,
+      "elapsed_seconds": 40.5973797661718,
+      "throughput_bytes_second": 204415348.37465063,
+      "listing_seconds": 8.685518174199387,
+      "listings": 96,
+      "read_syscall_ms": {
+        "0.5": 0.07543107494711876,
+        "0.95": 6.2291130889207125,
+        "0.99": 37.29879483580589
+      },
+      "file_total_ms": {
+        "0.5": 22.815695963799953,
+        "0.95": 166.26996803097427,
+        "0.99": 578.2664690632373
+      },
+      "listing_ms": {
+        "0.5": 64.25471999682486,
+        "0.95": 241.82187602855265,
+        "0.99": 573.6265769228339
+      },
+      "file_bins_ms": {
+        "0": {
+          "n": 1500,
+          "0.5": 13.65811307914555,
+          "0.95": 74.28776891902089,
+          "0.99": 112.04390693455935
+        },
+        "1": {
+          "n": 900,
+          "0.5": 18.35655584000051,
+          "0.95": 73.21910094469786,
+          "0.99": 125.75772101990879
+        },
+        "2": {
+          "n": 400,
+          "0.5": 71.86796190217137,
+          "0.95": 156.95325401611626,
+          "0.99": 210.01607808284461
+        },
+        "3": {
+          "n": 160,
+          "0.5": 176.33103812113404,
+          "0.95": 496.131676947698,
+          "0.99": 702.45873904787
+        },
+        "4": {
+          "n": 40,
+          "0.5": 601.7079090233892,
+          "0.95": 1483.6471180897206,
+          "0.99": 1698.872301960364
+        }
+      },
+      "memory": {
+        "samples": 976,
+        "interval_seconds": 0.05,
+        "peak": {
+          "rss": 543526912,
+          "hwm": 546398208,
+          "cgroup_current": 4295016448,
+          "file": 3851968512,
+          "kernel": 42938368
+        },
+        "steady": {
+          "rss": 340979522.95384616,
+          "cgroup_current": 4195992665.271795,
+          "file": 3666717165.620513,
+          "kernel": 40475369.68205128
+        },
+        "limitations": [
+          "cgroup contains client/controller as required",
+          "cgroup sampled peak, not reset kernel high watermark",
+          "kernel cache from earlier mounts may remain; no global cache drop",
+          "Go heap series unavailable"
+        ]
+      }
+    },
+    {
+      "label": "2-rust-warm-revisit",
+      "implementation": "rust",
+      "repetition": 2,
+      "state": "warm-revisit",
+      "correct_files": 3000,
+      "files": 3000,
+      "bytes": 8298727528,
+      "elapsed_seconds": 29.5432530248072,
+      "throughput_bytes_second": 280900939.41353154,
+      "listing_seconds": 3.963936699088663,
+      "listings": 96,
+      "read_syscall_ms": {
+        "0.5": 0.07493002340197563,
+        "0.95": 6.2750529032200575,
+        "0.99": 34.00859306566417
+      },
+      "file_total_ms": {
+        "0.5": 8.16266587935388,
+        "0.95": 140.509732067585,
+        "0.99": 518.5363299679011
+      },
+      "listing_ms": {
+        "0.5": 25.767566869035363,
+        "0.95": 59.550548205152154,
+        "0.99": 697.7168461307883
+      },
+      "file_bins_ms": {
+        "0": {
+          "n": 1500,
+          "0.5": 7.118819048628211,
+          "0.95": 39.19005789794028,
+          "0.99": 109.03919581323862
+        },
+        "1": {
+          "n": 900,
+          "0.5": 9.177793050184846,
+          "0.95": 36.45807900466025,
+          "0.99": 111.38613196089864
+        },
+        "2": {
+          "n": 400,
+          "0.5": 59.95234986767173,
+          "0.95": 161.61959688179195,
+          "0.99": 208.98313098587096
+        },
+        "3": {
+          "n": 160,
+          "0.5": 140.509732067585,
+          "0.95": 436.57619901932776,
+          "0.99": 825.5447428673506
+        },
+        "4": {
+          "n": 40,
+          "0.5": 662.3479349073023,
+          "0.95": 2139.2859457992017,
+          "0.99": 2224.5789400767535
+        }
+      },
+      "memory": {
+        "samples": 664,
+        "interval_seconds": 0.05,
+        "peak": {
+          "rss": 639594496,
+          "hwm": 639594496,
+          "cgroup_current": 4296179712,
+          "file": 3809566720,
+          "kernel": 43151360
+        },
+        "steady": {
+          "rss": 338467684.8484849,
+          "cgroup_current": 4227322135.2727275,
+          "file": 3697898433.939394,
+          "kernel": 43072512
+        },
+        "limitations": [
+          "cgroup contains client/controller as required",
+          "cgroup sampled peak, not reset kernel high watermark",
+          "kernel cache from earlier mounts may remain; no global cache drop",
+          "Go heap series unavailable"
+        ]
+      }
+    },
+    {
+      "label": "2-go-experimental-fresh",
+      "implementation": "go-experimental",
+      "repetition": 2,
+      "state": "fresh",
+      "correct_files": 3000,
+      "files": 3000,
+      "bytes": 8298727528,
+      "elapsed_seconds": 31.690014803083614,
+      "throughput_bytes_second": 261871999.10024932,
+      "listing_seconds": 9.72974318289198,
+      "listings": 96,
+      "read_syscall_ms": {
+        "0.5": 0.3150720149278641,
+        "0.95": 6.984798004850745,
+        "0.99": 22.919676965102553
+      },
+      "file_total_ms": {
+        "0.5": 9.563305880874395,
+        "0.95": 157.88619103841484,
+        "0.99": 561.0514108557254
+      },
+      "listing_ms": {
+        "0.5": 75.55816695094109,
+        "0.95": 246.4754180982709,
+        "0.99": 844.2843100056052
+      },
+      "file_bins_ms": {
+        "0": {
+          "n": 1500,
+          "0.5": 7.718533044680953,
+          "0.95": 70.78025490045547,
+          "0.99": 155.38138383999467
+        },
+        "1": {
+          "n": 900,
+          "0.5": 9.970227954909205,
+          "0.95": 64.06208802945912,
+          "0.99": 128.44476918689907
+        },
+        "2": {
+          "n": 400,
+          "0.5": 47.77507693506777,
+          "0.95": 149.72593495622277,
+          "0.99": 260.1232810411602
+        },
+        "3": {
+          "n": 160,
+          "0.5": 151.0168940294534,
+          "0.95": 426.73059180378914,
+          "0.99": 544.6680991444737
+        },
+        "4": {
+          "n": 40,
+          "0.5": 766.5985089261085,
+          "0.95": 1119.186762953177,
+          "0.99": 1305.109685054049
+        }
+      },
+      "memory": {
+        "samples": 821,
+        "interval_seconds": 0.05,
+        "peak": {
+          "rss": 1173032960,
+          "hwm": 1173032960,
+          "cgroup_current": 4294959104,
+          "file": 3032080384,
+          "kernel": 47640576
+        },
+        "steady": {
+          "rss": 1114772130.3414633,
+          "cgroup_current": 4293580999.804878,
+          "file": 3003138847.219512,
+          "kernel": 44226934.63414634
+        },
+        "limitations": [
+          "cgroup contains client/controller as required",
+          "cgroup sampled peak, not reset kernel high watermark",
+          "kernel cache from earlier mounts may remain; no global cache drop",
+          "Go heap series unavailable"
+        ]
+      }
+    },
+    {
+      "label": "2-go-experimental-warm-revisit",
+      "implementation": "go-experimental",
+      "repetition": 2,
+      "state": "warm-revisit",
+      "correct_files": 3000,
+      "files": 3000,
+      "bytes": 8298727528,
+      "elapsed_seconds": 27.257714928127825,
+      "throughput_bytes_second": 304454263.67844075,
+      "listing_seconds": 0.03563839406706393,
+      "listings": 96,
+      "read_syscall_ms": {
+        "0.5": 0.32490212470293045,
+        "0.95": 6.925286957994103,
+        "0.99": 21.41764690168202
+      },
+      "file_total_ms": {
+        "0.5": 8.597719017416239,
+        "0.95": 134.78582305833697,
+        "0.99": 505.6744918692857
+      },
+      "listing_ms": {
+        "0.5": 0.2030010800808668,
+        "0.95": 0.7197549566626549,
+        "0.99": 5.999580956995487
+      },
+      "file_bins_ms": {
+        "0": {
+          "n": 1500,
+          "0.5": 7.224968867376447,
+          "0.95": 21.04090410284698,
+          "0.99": 48.940184991806746
+        },
+        "1": {
+          "n": 900,
+          "0.5": 9.697045898064971,
+          "0.95": 32.352221896871924,
+          "0.99": 111.20831198059022
+        },
+        "2": {
+          "n": 400,
+          "0.5": 45.2635099645704,
+          "0.95": 128.1234468333423,
+          "0.99": 219.24060117453337
+        },
+        "3": {
+          "n": 160,
+          "0.5": 140.3312210459262,
+          "0.95": 374.0448111202568,
+          "0.99": 413.62889180891216
+        },
+        "4": {
+          "n": 40,
+          "0.5": 754.84827789478,
+          "0.95": 1232.0748749189079,
+          "0.99": 1773.705862928182
+        }
+      },
+      "memory": {
+        "samples": 541,
+        "interval_seconds": 0.05,
+        "peak": {
+          "rss": 1226715136,
+          "hwm": 1226715136,
+          "cgroup_current": 4300685312,
+          "file": 3017105408,
+          "kernel": 47792128
+        },
+        "steady": {
+          "rss": 1131503426.3703704,
+          "cgroup_current": 4293392459.851852,
+          "file": 2983021605.9259257,
+          "kernel": 47763721.481481485
+        },
+        "limitations": [
+          "cgroup contains client/controller as required",
+          "cgroup sampled peak, not reset kernel high watermark",
+          "kernel cache from earlier mounts may remain; no global cache drop",
+          "Go heap series unavailable"
+        ]
+      }
+    },
+    {
+      "label": "2-go-packaged-fresh",
+      "implementation": "go-packaged",
+      "repetition": 2,
+      "state": "fresh",
+      "correct_files": 3000,
+      "files": 3000,
+      "bytes": 8298727528,
+      "elapsed_seconds": 36.2229011671152,
+      "throughput_bytes_second": 229101680.44557303,
+      "listing_seconds": 9.918649537023157,
+      "listings": 96,
+      "read_syscall_ms": {
+        "0.5": 0.3267719876021147,
+        "0.95": 7.217640057206154,
+        "0.99": 26.074647903442383
+      },
+      "file_total_ms": {
+        "0.5": 9.933287976309657,
+        "0.95": 179.93237101472914,
+        "0.99": 632.5073400512338
+      },
+      "listing_ms": {
+        "0.5": 92.26041194051504,
+        "0.95": 243.08657413348556,
+        "0.99": 340.3778700158
+      },
+      "file_bins_ms": {
+        "1": {
+          "n": 900,
+          "0.5": 10.320450877770782,
+          "0.95": 77.80317217111588,
+          "0.99": 156.72021312639117
+        },
+        "0": {
+          "n": 1500,
+          "0.5": 7.829364156350493,
+          "0.95": 101.50935500860214,
+          "0.99": 191.82465318590403
+        },
+        "2": {
+          "n": 400,
+          "0.5": 55.24760787375271,
+          "0.95": 179.0498758200556,
+          "0.99": 243.77243896014988
+        },
+        "3": {
+          "n": 160,
+          "0.5": 154.9528099130839,
+          "0.95": 455.5496689863503,
+          "0.99": 704.1771309450269
+        },
+        "4": {
+          "n": 40,
+          "0.5": 801.1888659093529,
+          "0.95": 1538.7096439953893,
+          "0.99": 2121.5141150169075
+        }
+      },
+      "memory": {
+        "samples": 914,
+        "interval_seconds": 0.05,
+        "peak": {
+          "rss": 1255288832,
+          "hwm": 1255288832,
+          "cgroup_current": 4303130624,
+          "file": 2974687232,
+          "kernel": 47865856
+        },
+        "steady": {
+          "rss": 1222455498.5494506,
+          "cgroup_current": 4293791518.945055,
+          "file": 2894522795.6043954,
+          "kernel": 44380114.98901099
+        },
+        "limitations": [
+          "cgroup contains client/controller as required",
+          "cgroup sampled peak, not reset kernel high watermark",
+          "kernel cache from earlier mounts may remain; no global cache drop",
+          "Go heap series unavailable"
+        ]
+      }
+    },
+    {
+      "label": "2-go-packaged-warm-revisit",
+      "implementation": "go-packaged",
+      "repetition": 2,
+      "state": "warm-revisit",
+      "correct_files": 3000,
+      "files": 3000,
+      "bytes": 8298727528,
+      "elapsed_seconds": 28.114684875821695,
+      "throughput_bytes_second": 295174125.7159461,
+      "listing_seconds": 0.5667779999785125,
+      "listings": 96,
+      "read_syscall_ms": {
+        "0.5": 0.3249119035899639,
+        "0.95": 7.195189129561186,
+        "0.99": 23.611611919477582
+      },
+      "file_total_ms": {
+        "0.5": 8.608409203588963,
+        "0.95": 145.43533604592085,
+        "0.99": 607.7559310942888
+      },
+      "listing_ms": {
+        "0.5": 0.26227114722132683,
+        "0.95": 68.11170605942607,
+        "0.99": 124.1150489076972
+      },
+      "file_bins_ms": {
+        "1": {
+          "n": 900,
+          "0.5": 9.654466062784195,
+          "0.95": 24.687768891453743,
+          "0.99": 67.80393398366868
+        },
+        "0": {
+          "n": 1500,
+          "0.5": 7.227100199088454,
+          "0.95": 22.559023927897215,
+          "0.99": 57.61048407293856
+        },
+        "2": {
+          "n": 400,
+          "0.5": 44.05304207466543,
+          "0.95": 151.08114411123097,
+          "0.99": 269.15587298572063
+        },
+        "3": {
+          "n": 160,
+          "0.5": 146.6346641536802,
+          "0.95": 433.05868515744805,
+          "0.99": 553.3924188930541
+        },
+        "4": {
+          "n": 40,
+          "0.5": 834.5309640280902,
+          "0.95": 1176.3533039484173,
+          "0.99": 1585.2230929303914
+        }
+      },
+      "memory": {
+        "samples": 567,
+        "interval_seconds": 0.05,
+        "peak": {
+          "rss": 1370570752,
+          "hwm": 1370570752,
+          "cgroup_current": 4295917568,
+          "file": 2903154688,
+          "kernel": 48119808
+        },
+        "steady": {
+          "rss": 1253838268.0353982,
+          "cgroup_current": 4293460765.4513273,
+          "file": 2858751655.6460176,
+          "kernel": 48089069.876106195
+        },
+        "limitations": [
+          "cgroup contains client/controller as required",
+          "cgroup sampled peak, not reset kernel high watermark",
+          "kernel cache from earlier mounts may remain; no global cache drop",
+          "Go heap series unavailable"
+        ]
+      }
+    }
+  ]
+}

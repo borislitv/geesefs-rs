@@ -47,6 +47,7 @@ pub struct Inode {
     pub state: Mutex<State>,
     /// Serialize commits/rename/delete for this object only, never the namespace.
     pub flush: std::sync::Arc<tokio::sync::Mutex<()>>,
+    pub(crate) preload: tokio::sync::Mutex<()>,
     pub pattern: Mutex<crate::read::Pattern>,
     pub(crate) read_fills: Mutex<BTreeMap<(u64, u64), crate::read::Fill>>,
 }
@@ -173,6 +174,7 @@ impl Inode {
                 negative_lookups: std::collections::BTreeMap::new(),
             }),
             flush: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            preload: tokio::sync::Mutex::new(()),
             pattern: Mutex::new(crate::read::Pattern::default()),
             read_fills: Mutex::new(BTreeMap::new()),
         }

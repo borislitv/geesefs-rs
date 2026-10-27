@@ -153,8 +153,15 @@ def build_baseline(reference, revision, binary, work):
         with tarfile.open(fileobj=archive, mode="r|") as stream:
             stream.extractall(source, filter="data")
     integration.command(["go", "build", "-ldflags=-X github.com/yandex-cloud/geesefs/core/cfg.VersionHash=" + revision, "-o", binary, "."], cwd=source, timeout=600)
+    # GOTOOLCHAIN=auto may build with a different compiler than the launcher.
+    # Read the executable's embedded build information, not ambient `go version`.
+    build_info = integration.command(["go", "version", "-m", binary], capture_output=True, text=True).stdout
+    first_line = build_info.splitlines()[0] if build_info else ""
+    toolchain = first_line.rpartition(": ")[2].strip()
+    if not re.fullmatch(r"go\d+\.\d+(?:\.\d+)?(?:(?:beta|rc)\d+)?", toolchain):
+        raise RuntimeError("built baseline has no verified embedded Go toolchain")
     return {"source_revision": revision, "binary_sha256": integration.sha_file(binary),
-            "toolchain": integration.command(["go", "version"], capture_output=True, text=True).stdout.strip()}
+             "toolchain": toolchain}
 
 
 def cgroup_preflight(root):

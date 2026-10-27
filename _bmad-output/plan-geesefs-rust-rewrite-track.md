@@ -378,3 +378,29 @@ Transitive binary notices, full review and parent commit/push/draft PR remain.
   and pre-admission cache-pin mutations all failed, then were restored. All 132
   Rust tests, formatting and warning-denying Clippy pass. Details are in
   docs/clean-read-windows.md; frozen-source paired measurements are next.
+
+## 2026-10-27: real-object diagnostic and bounded metadata reuse
+
+- The frozen ba405d3 read-only Kubernetes diagnostic completed all 18 phases,
+  three order permutations and 3,000 full-byte hashes per phase without errors.
+  Rust fresh throughput remained 198–204 MB/s versus Go 225–262 MB/s. Daemon RSS
+  was lower, but file cache filled the shared 4 GiB cgroup; no total-memory or
+  overall speed acceptance follows. Public whitelisted raw phase summaries are
+  in docs/k8s-readonly-results-20261027.json; private paths/logs stay uncommitted.
+- Summed stat time and repeated listing costs identify metadata paths to test.
+  Added weighted Moka page reuse with mutation-epoch/TTL/inode-retention guards,
+  and one-page extended metadata preloading into the existing bounded namespace.
+  Unknown metadata, speculative errors and names beyond the first page retain
+  HEAD/directory probes. No entry/payload budgets or correctness checks changed.
+- Directory and lookup regressions failed before implementation. Six independent
+  guard/serialization mutations failed their expected public-interface tests and
+  were restored. All 146 Rust tests, 14 benchmark Python tests, five source/oracle
+  Python tests, formatting, warning-denying Clippy and the 336-package public
+  audit passed in the isolated Kubernetes build Pod without S3 credentials.
+- Corrected benchmark provenance to read embedded Go build information rather
+  than the auto-toolchain launcher. Two tests failed before the fix and passed
+  afterward. Exact hashes establish go1.25.9 for the latest two Go binaries;
+  original private launcher fields are retained with a correction receipt.
+- A same-manifest, same-budget paired measurement is still needed for the new
+  metadata changes. Library improvements do not close the k8s throughput/p99,
+  historical local tail, full compatibility or complete-matrix acceptance gaps.

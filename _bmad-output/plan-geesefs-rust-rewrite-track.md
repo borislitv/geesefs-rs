@@ -255,3 +255,47 @@ Transitive binary notices, full review and parent commit/push/draft PR remain.
   FUSE/main/tooling/CI edits, VCS, SSH, production or mounted/benchmark runs.
   Fresh paired measurements are still required; detailed handoff is in
   docs/bounded-metadata-pressure.md. Overall acceptance remains UNACCEPTED.
+
+## 2026-10-27: bounded sequential-read window correction
+
+- Confirmed two adaptive-read regressions against public Go getReadAhead/trackRead:
+  cache-hit requests did not advance the contiguous run, and history sampled
+  individual requests rather than completed contiguous runs. Window selection
+  now precedes tracking each nonempty caller request, including cache hits;
+  completed history retains at most small_read_count minus one runs.
+- Public Filesystem regression: 256 consecutive 128 KiB reads of a nonconstant
+  32 MiB object under unchanged 64 MiB memory returned exact bytes and EOF.
+  Original code performed 139 backend ranges; tracking hits alone still took
+  121; the corrected code takes exactly four 5 MiB ranges and one 12 MiB range.
+  These are fixture request counts, not a mounted performance measurement.
+- Added promoted-window cancellation/owner-release/retry coverage and real-seek,
+  zero-length and count-one history cases. Original-code failures and a deliberate
+  full-history-condition mutation established failure sensitivity; restored code
+  passed. Existing FIFO admission and cache/budget policies remain intact.
+- Final format check, warning-denying all-target/all-feature Clippy and all 126
+  Rust tests passed, none ignored. No FUSE/main/tooling/CI edits, dependencies,
+  VCS actions, production operations or benchmark-setting/receipt changes.
+- Details and fuser 0.18 negotiation handoff: docs/sequential-read-window.md.
+  Parent must rebuild and obtain fresh equivalent paired mounted measurements;
+  no post-fix speed or memory improvement is claimed. The failed/incomplete
+   preceding matrix remains evidence; overall acceptance remains UNACCEPTED.
+
+## 2026-10-27: retained full-attempt evidence and bounded diagnostic follow-up
+
+- Summarized all 42 completed results from the 5,400-second full-matrix attempt
+  at source 830d7a41d4dc17d0f66ee50bf7ed0b827806512e. All completed checks passed,
+  but the matrix stopped at 42/280 with 243 acceptance errors. Published all
+  completed group means/dispersion, including the unfinished eviction pair and
+  severe sequential/metadata regressions, in docs/performance.md. Original
+  private records remain unchanged; no overall improvement is claimed.
+- Added repeatable diagnostic workload selection without modifying workload
+  limits or the full-matrix gate. Explicit diagnostic/incomplete-accounting modes
+  cannot pass acceptance. Fresh paired sequential measurements remain pending.
+- Added a read-only all-run summarizer with explicit missing accounting and
+  provenance-field selection. Its test detects incorrectly treating failed runs
+  as correct: the deliberate mutation failed 3 versus 1, then was restored.
+- Parent verification passed: formatting, all 126 Rust tests, warning-denying
+  all-target/all-feature Clippy, 12 benchmark Python cases and 5 public-source
+  Python cases. Audit reports 336 public Cargo packages and zero origin errors.
+  The source-origin/license-metadata audit is not a complete redistributed-binary
+  license-notice audit. Full compatibility and comparative acceptance stay open.

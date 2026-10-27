@@ -6,6 +6,150 @@ use support::MemoryStore;
 const MIB: usize = 1024 * 1024;
 
 #[tokio::test]
+async fn sequential_128_kib_reads_track_cache_hits_and_keep_adaptive_windows() {
+    const STEP: usize = 128 * 1024;
+    let size = 32 * MIB;
+    let expected: Vec<u8> = (0..size)
+        .map(|offset| ((offset / (64 * 1024)) % 251) as u8)
+        .collect();
+    let store = MemoryStore::new();
+    store.seed("file", &expected);
+    let fs = store.filesystem(64);
+    let node = fs.lookup(1, "file").await.unwrap();
+    for offset in (0..size).step_by(STEP) {
+        let block = fs.read(node.ino, offset as u64, STEP).await.unwrap();
+        assert_eq!(
+            block.as_slice(),
+            &expected[offset..offset + STEP],
+            "sequential bytes at {offset}"
+        );
+        let budgets = fs.effective_budgets();
+        assert!(budgets.data_used_bytes <= budgets.data_shared_bytes);
+        assert_eq!(budgets.read_cache_policy_bytes, budgets.data_shared_bytes);
+        assert_eq!(budgets.payload_limit_bytes, 64 * MIB);
+    }
+    assert!(
+        fs.read(node.ino, size as u64, STEP)
+            .await
+            .unwrap()
+            .as_slice()
+            .is_empty()
+    );
+    // Public Go defaults: 5 MiB until 20 MiB of contiguous reads, then the
+    // configured large window (bounded here by EOF at 32 MiB). Cache-served
+    // kernel-sized requests must not turn one sequential run into small seeks.
+    assert_eq!(
+        store.read_calls.load(Ordering::Relaxed),
+        5,
+        "one contiguous run should retain normal windows then promote"
+    );
+    assert_eq!(
+        *store.read_ranges.lock().unwrap(),
+        [
+            (0, 5 * MIB),
+            (5 * MIB as u64, 5 * MIB),
+            (10 * MIB as u64, 5 * MIB),
+            (15 * MIB as u64, 5 * MIB),
+            (20 * MIB as u64, 12 * MIB)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn sequential_small_read_promotion_cancels_without_leaking_owners_and_retries_bytes() {
+    use std::{sync::Arc, time::Duration};
+    const STEP: usize = 128 * 1024;
+    let store = MemoryStore::new();
+    store.seed("file", &vec![b'x'; 32 * MIB]);
+    let fs = store.filesystem(64);
+    let node = fs.lookup(1, "file").await.unwrap();
+    for offset in (0..20 * MIB).step_by(STEP) {
+        let block = fs.read(node.ino, offset as u64, STEP).await.unwrap();
+        assert!(block.as_slice().iter().all(|b| *b == b'x'));
+    }
+    assert_eq!(
+        store.read_calls.load(Ordering::Relaxed),
+        4,
+        "contiguous small reads must retain the initial windows"
+    );
+    let before = fs.effective_budgets().data_used_bytes;
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *store.read_gate.lock().unwrap() = Some(gate.clone());
+    let read = tokio::spawn({
+        let fs = fs.clone();
+        let ino = node.ino;
+        async move { fs.read(ino, (20 * MIB) as u64, STEP).await }
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while store.read_calls.load(Ordering::Relaxed) < 5 {
+            store.read_started.notified().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        store.read_ranges.lock().unwrap().last(),
+        Some(&((20 * MIB) as u64, 12 * MIB))
+    );
+    read.abort();
+    match read.await {
+        Err(e) => assert!(e.is_cancelled()),
+        Ok(_) => panic!("promoted read was not cancelled"),
+    };
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while fs.effective_budgets().data_used_bytes != before {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled adaptive-window scratch and reply owners must be released");
+    gate.add_permits(1);
+    let block = tokio::time::timeout(
+        Duration::from_secs(3),
+        fs.read(node.ino, (20 * MIB) as u64, STEP),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(block.as_slice().iter().all(|b| *b == b'x'));
+    assert!(fs.effective_budgets().data_used_bytes <= fs.effective_budgets().data_shared_bytes);
+}
+
+#[tokio::test]
+async fn real_small_seeks_still_reduce_windows_but_one_sample_configuration_disables_history() {
+    for count in [4, 1] {
+        let store = MemoryStore::new();
+        store.seed("file", &vec![b's'; 32 * MIB]);
+        let mut config = MemoryStore::config(64);
+        config.small_read_count = count;
+        let fs = Filesystem::new(config, store.clone()).unwrap();
+        let node = fs.lookup(1, "file").await.unwrap();
+        for offset in [0, 8 * MIB, 16 * MIB, 24 * MIB] {
+            let block = fs.read(node.ino, offset as u64, 64 * 1024).await.unwrap();
+            assert!(block.as_slice().iter().all(|b| *b == b's'));
+            drop(block);
+            assert!(
+                fs.read(node.ino, (7 * MIB) as u64, 0)
+                    .await
+                    .unwrap()
+                    .as_slice()
+                    .is_empty()
+            );
+        }
+        let tail = if count == 1 { 5 * MIB } else { 128 * 1024 };
+        assert_eq!(
+            *store.read_ranges.lock().unwrap(),
+            [
+                (0, 5 * MIB),
+                ((8 * MIB) as u64, 5 * MIB),
+                ((16 * MIB) as u64, tail),
+                ((24 * MIB) as u64, tail)
+            ]
+        );
+    }
+}
+
+#[tokio::test]
 async fn requested_hundred_mib_window_is_fetched_in_configured_chunks_and_hits_far_offsets() {
     let store = MemoryStore::new();
     store.seed("file", &vec![b'x'; 104 * MIB]);

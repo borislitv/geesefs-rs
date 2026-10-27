@@ -11,7 +11,8 @@ use std::{collections::HashMap, sync::Arc};
 pub struct Pattern {
     end: u64,
     sequential: u64,
-    recent: std::collections::VecDeque<usize>,
+    /// Completed contiguous runs, not individual kernel/FUSE read sizes.
+    recent: std::collections::VecDeque<u64>,
 }
 impl Pattern {
     pub fn prefetch(
@@ -20,26 +21,32 @@ impl Pattern {
         length: usize,
         config: &crate::config::Config,
     ) -> usize {
-        self.sequential = if offset == self.end {
-            self.sequential.saturating_add(length as u64)
-        } else {
-            length as u64
-        };
-        self.end = offset.saturating_add(length as u64);
-        self.recent.push_back(length);
-        while self.recent.len() > config.small_read_count {
-            self.recent.pop_front();
-        }
-        let average = self.recent.iter().sum::<usize>() / self.recent.len().max(1);
+        // Public Go getReadAhead/trackRead chooses from the preceding history,
+        // then tracks this nonempty request regardless of cache hit or miss.
+        let average = (u128::from(self.sequential)
+            + self.recent.iter().copied().map(u128::from).sum::<u128>())
+            / (1 + self.recent.len() as u128);
         let kb = if self.sequential >= config.large_read_cutoff * 1024 {
             config.read_ahead_large
-        } else if self.recent.len() == config.small_read_count
-            && average <= config.small_read_cutoff * 1024
-        {
+        } else if !self.recent.is_empty() && average <= config.small_read_cutoff as u128 * 1024 {
             config.read_ahead_small
         } else {
             config.read_ahead
         };
+        if length > 0 {
+            if offset == self.end {
+                self.sequential = self.sequential.saturating_add(length as u64);
+            } else {
+                if config.small_read_count > 1 {
+                    self.recent.push_back(self.sequential);
+                    while self.recent.len() >= config.small_read_count {
+                        self.recent.pop_front();
+                    }
+                }
+                self.sequential = length as u64;
+            }
+            self.end = offset.saturating_add(length as u64);
+        }
         length.max(kb.saturating_mul(1024))
     }
 }

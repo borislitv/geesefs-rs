@@ -661,6 +661,17 @@ impl Filesystem {
             )
         };
         let length = length.min(size.saturating_sub(offset) as usize);
+        // Track every nonempty caller read, including cache hits. Backend misses
+        // are not the access stream: skipping hits turns contiguous kernel reads
+        // into apparent seeks at the next read-ahead boundary.
+        let window = if length > 0 {
+            node.pattern
+                .lock()
+                .unwrap()
+                .prefetch(offset, length, &self.config)
+        } else {
+            0
+        };
         // Never pin a cache allocation across output admission. An older large
         // FIFO waiter may need those exact permits before this small reply can
         // be admitted. Reclaim policy entries before borrowing a cache block.
@@ -690,10 +701,7 @@ impl Filesystem {
         }
         let relative = (offset - start) as usize;
         let prefetch = if clean {
-            node.pattern
-                .lock()
-                .unwrap()
-                .prefetch(offset, length, &self.config)
+            window
                 .max(relative + length)
                 .min(budgets.max_effective_window_bytes)
                 .min(size.saturating_sub(start) as usize)

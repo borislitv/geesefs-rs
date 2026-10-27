@@ -48,11 +48,13 @@ foreground binary integrates fuser, SDK-backed S3, bounded payload ownership,
 paged namespace operations and versioned sparse/truncate/fsync writes. Actual
 disposable Rust/Go mounts exercised rsync, HTTP full/Range and writer paths.
 The compatibility runner still fails: actual-service optional paths, hardlink
-emulation and a Go failure-recovery check are unresolved. An initial diagnostic
-pair measured lower memory but substantially slower cold standard-LIST traversal
-for Rust; it is not acceptance. Bounded metadata concurrency was subsequently
-implemented and requires fresh measurement. Owned cpu+memory cgroup execution
-has now been verified without changing the hosting service's controls.
+emulation and a Go failure-recovery check are unresolved. The full-matrix attempt
+hit its 90-minute deadline at 42/280 results: Rust used less sampled RSS in those
+groups, but metadata and sequential reads were substantially slower. A subsequent
+adaptive-read fix passes deterministic regressions; post-fix mounted results are
+tracked separately in [performance](docs/performance.md). Overall acceptance is
+**UNACCEPTED**. Owned cpu+memory cgroup execution works without changing the
+hosting service's controls.
 
 Backend IAM/profile authentication, signature discovery/SigV2, encryption and
 request options now have loopback HTTP/TLS coverage. See [backend options](docs/backend-options.md)

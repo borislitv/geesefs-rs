@@ -421,6 +421,8 @@ def main():
     parser.add_argument("--cgroup-root", default=os.environ.get("GEESEFS_BENCH_CGROUP_ROOT"))
     parser.add_argument("--allow-incomplete-accounting", action="store_true", help="diagnostic only; missing accounting cannot pass")
     parser.add_argument("--smoke", action="store_true", help="one pair only, always unaccepted")
+    parser.add_argument("--diagnostic-workload", action="append", choices=["metadata", "sequential", "random", "concurrent", "eviction", "writer_fsync", "writer_failure"],
+                        help="run only selected workloads without changing limits or full-matrix acceptance; repeatable, always unaccepted")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--timeout", type=int, default=7200, help="overall operation deadline in seconds")
     args = parser.parse_args()
@@ -479,6 +481,8 @@ def main():
                 for revision in REVISIONS:
                     for state in config["states"]:
                         for name in config["workloads"]:
+                            if args.diagnostic_workload and name not in args.diagnostic_workload:
+                                continue
                             for repetition in range(config["repetitions"]):
                                 order = ["go", "rust"] if repetition % 2 == 0 else ["rust", "go"]
                                 for implementation in order:
@@ -548,8 +552,9 @@ def main():
         os.sched_setaffinity(0, affinity)
     gate = evaluate(config, runs, compatibility, provenance)
     gate["errors"] = errors + gate["errors"]
-    gate["accepted"] = gate["accepted"] and not errors and not args.smoke
+    gate["accepted"] = gate["accepted"] and not errors and not args.smoke and not args.diagnostic_workload and not args.allow_incomplete_accounting
     report = {"gate": gate, "provenance": provenance, "limits": config, "runs": runs,
+               "diagnostic_workloads": args.diagnostic_workload or [],
                "accounting_notes": ["RSS includes filesystem and client process", "raw memory traces retain daemon/client PSS separately", "RSS peak is sampled at 20ms; kernel cgroup memory.peak includes startup/warmup", "allocator sampling is restricted to the active workload; Go uses a separate end snapshot without gc=1 and cannot pass peak/steady heap acceptance", "cold means a new mount/process; warmup occurs in the owned client cgroup; never a global cache drop"]}
     (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps({"accepted": gate["accepted"], "runs": len(runs), "errors": gate["errors"][:10]}, indent=2))

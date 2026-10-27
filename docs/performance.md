@@ -1,8 +1,8 @@
 # Performance acceptance: UNACCEPTED
 
-No reproducible overall memory reduction or speedup is claimed. One initial
-diagnostic pair has measurements; passing owner-budget tests does not establish
-bounded RSS or comparative performance acceptance.
+No reproducible overall memory reduction or speedup is claimed. An initial
+diagnostic pair and an incomplete full-matrix attempt have measurements; passing
+owner-budget tests does not establish bounded RSS or comparative acceptance.
 
 ## Runner and reproduction
 
@@ -63,6 +63,64 @@ tests. Both Go source revisions were built and hashed; only the experimental
 baseline participated in this initial pair. Raw original receipts are retained
 under ignored `benchmark-results/private/paired-smoke-20261026-v1/`.
 
+## Full-matrix attempt before the sequential-read fix
+
+The subsequent attempt at source
+`830d7a41d4dc17d0f66ee50bf7ed0b827806512e` exhausted its explicit **5,400-second
+deadline** after **42 of 280 results**. All 42 completed runs passed their byte or
+metadata checks; the gate still failed with 243 errors, including the deadline,
+incomplete matrix, missing compatibility receipts, missing Go peak/steady heap
+series and measured regressions. No warm-state, writer or packaged-baseline
+comparison completed. The unfinished eviction group is retained, not discarded.
+
+These are all completed groups, with five repetitions per row except eviction
+(one). Throughput is operations/s for metadata and bytes/s for other workloads;
+dispersion is population standard deviation, not a confidence interval. RSS is
+combined daemon/client sampled peak, averaged across repetitions.
+
+| Cold workload | Implementation | Runs | Mean throughput ± SD | Mean seconds | Mean peak RSS, bytes |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Metadata | Experimental Go | 5 | 6,081.78 ± 373.76 | 0.169 | 102,862,848 |
+| Metadata | Rust | 5 | 751.83 ± 5.17 | 1.362 | 76,526,387 |
+| Sequential | Experimental Go | 5 | 79,069,139 ± 15,091,192 | 3.547 | 223,090,278 |
+| Sequential | Rust | 5 | 635,102 ± 2,452 | 422.671 | 142,893,875 |
+| Random | Experimental Go | 5 | 38,667 ± 103 | 54.237 | 167,475,610 |
+| Random | Rust | 5 | 42,546 ± 98 | 49.291 | 125,701,325 |
+| Concurrent | Experimental Go | 5 | 38,862 ± 1,828 | 216.371 | 181,689,549 |
+| Concurrent | Rust | 5 | 42,923 ± 95 | 195.435 | 128,105,677 |
+| Eviction | Experimental Go | 1 | 74,564,228 | 3.600 | 223,219,712 |
+| Eviction | Rust | 1 | 636,321 | 421.855 | 135,131,136 |
+
+Metadata remained substantially slower despite bounded concurrency. Sequential
+and eviction reads exposed a severe adaptive-read regression. Faster random and
+concurrent groups and lower sampled RSS do not establish overall acceptance.
+The [sequential-read follow-up](sequential-read-window.md) fixes cache-hit tracking
+and contiguous-run history; deterministic requests fall from 139 to 5 for its
+32 MiB fixture. That request count is not a post-fix mounted speed measurement.
+
+The attempted comparison used the unchanged `bench/workloads.json`: 256 MiB
+payload, 64 MiB configured payload budget, 100,000 entries, one CPU quota and
+1 GiB cgroup memory maximum. The disposable backend was the local standard-listing
+fixture, not an actual cloud-service validation. Provenance:
+
+| Executable | Source revision | SHA-256 |
+| --- | --- | --- |
+| Experimental Go | `5c0884c9e8799bbab93e2d4102fdc15e9c079e0d` | `01ac0b9f433747661893ecba83a05c2b5d497cdc0dbf208f66937e2551a21218` |
+| Packaged Go, built but not reached | `80c214ef14f620d93407454fc76ca01dd71fa25f` | `41fc45dcaf5b672303e4dad4f824f276b9137d1ef9e1676d3a5c1c55c97eb74f` |
+| Rust | `830d7a41d4dc17d0f66ee50bf7ed0b827806512e` | `b170731dcf63a1c9ff43ef655195ab3ebec342624c83b3c4df4debc0418947ee` |
+
+Toolchains: Go 1.22.2 linux/amd64 and rustc 1.99.1. Original per-run records,
+memory/allocator traces and errors remain in the ignored
+`benchmark-results/private/paired-full-20261026-v1/`. The dedicated unit stopped
+and no owned FUSE mounts remained after the deadline.
+
+`bench/summarize.py REPORT` includes every recorded run, explicit missing metrics,
+counts, mean/min/max/dispersion and a whitelist of executable provenance.
+`--table` gives a compact view. A targeted repeat can use
+`--diagnostic-workload sequential` with the same full workload configuration and
+unchanged limits: both baselines, states and all five repetitions still run for
+that workload. Diagnostic selection never passes the full acceptance gate.
+
 ## Accounting and acceptance boundaries
 
 - RSS includes daemon and fresh client, with separate PSS traces. Its peak is
@@ -81,7 +139,7 @@ under ignored `benchmark-results/private/paired-smoke-20261026-v1/`.
   parity, imported multipart layouts and mounted failure cases remain unresolved.
   The gate requires these receipts, complete paired results and unchanged effective
   budgets. Eleven Python cases exercise evidence rejection, not real performance.
-- `--smoke` and `--allow-incomplete-accounting` cannot pass acceptance. Preserve
+- `--smoke`, diagnostic selection and `--allow-incomplete-accounting` cannot pass acceptance. Preserve
   unfavorable samples/errors; do not lower caches, change durability, omit metadata,
   force GC or invent a percentage threshold. Private receipts/credentials are not
   shared source artifacts.

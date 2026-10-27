@@ -91,6 +91,7 @@ pub struct MemoryStore {
     pub page_size: AtomicUsize,
     pub copied_parts: AtomicUsize,
     pub read_calls: AtomicUsize,
+    pub read_ranges: Mutex<Vec<(u64, usize)>>,
     pub copy_calls: AtomicUsize,
     pub fail_copy_after: AtomicUsize,
     pause: Mutex<Pause>,
@@ -300,6 +301,7 @@ impl Store for MemoryStore {
         budget: &Budget,
     ) -> Result<Block> {
         self.read_calls.fetch_add(1, Ordering::Relaxed);
+        self.read_ranges.lock().unwrap().push((offset, length));
         self.read_started.notify_one();
         let gate = self.read_gate.lock().unwrap().clone();
         if let Some(gate) = gate {

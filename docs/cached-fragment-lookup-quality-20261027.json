@@ -1,0 +1,64 @@
+{
+  "schema": "cached-fragment-lookup-quality-v1",
+  "accepted": false,
+  "scope": "First-byte cache coverage before immutable-view reuse or same-generation fragment composition; not whole-filesystem acceptance",
+  "source_base": "20a9dcd2f125e30f251e02510fe3f44501a290f6",
+  "verification": {
+    "environment": "isolated secret-free Kubernetes build Pod",
+    "unchanged_source_baseline_passed": true,
+    "rust_tests_passed": 178,
+    "rust_tests_failed": 0,
+    "rust_tests_ignored": 0,
+    "affected_tests_passed": 56,
+    "source_oracle_python_cases_passed": 14,
+    "benchmark_python_cases_passed": 23,
+    "format_check_passed": true,
+    "all_target_all_feature_warning_denying_clippy_passed": true,
+    "public_cargo_packages_audited": 336,
+    "audit_errors": [],
+    "explicit_package_clean_after_mutations": true,
+    "regression_scope": "Existing matched performance failure and separately validated cache profiles; existing public behavioral tests retained without artificial timing assertions"
+  },
+  "source_hashes": {
+    "src/budget.rs": "3e0ade5c7129539763859d5eed9e3e56fdf2035f2ead5dfc45edf917ec64cd8c",
+    "src/cache.rs": "4bc96fccfb0f62ccdd757f54f84251fe8fca13443b0abd8d8bc1c1cdf87df773",
+    "src/backend/mod.rs": "f5881062acd2379472355ea3b17ce502196ed44da30c66891fffcf2bb0de9eac",
+    "src/backend/s3.rs": "c91e0f454b43f6c424c91a06c8fcfc8924cd206a389b8f33df837a733cf49309",
+    "src/filesystem.rs": "2a9ad5027895491d5f19489ecc983dce164604c10267be030ecf4060498803d2",
+    "tests/backend_contract.rs": "e56724cec6ec1db2712f9e71df99c0f8ba2d8785adf7d4bd540e05a53b55552c"
+  },
+  "independent_faults": [
+    {"fault": "defer-body-prefix", "exitcode": 101, "assertion_failure": true, "log_sha256": "0760abc747c3881d00c2191ae5432826ff7a047d38ab74c11764763bf5465334"},
+    {"fault": "omit-complete-get-charge", "exitcode": 101, "assertion_failure": true, "log_sha256": "84dcb5bf1e9b6ff5ae7796df3a3a0ed70fe8e6ec4f2087f52d1e0e5f511564af"},
+    {"fault": "skip-cached-fragment-span", "exitcode": 101, "assertion_failure": true, "log_sha256": "51890982933cb4761b69cdab42db7972149eda9b4c5f31b9c28ba349ac715996"},
+    {"fault": "publish-before-checksum", "exitcode": 101, "assertion_failure": true, "log_sha256": "bec7ab1f864b47e1155c2c178303e8b9debdd04010a489e45fd6d9054f2338fc"},
+    {"fault": "ignore-short-read", "exitcode": 101, "assertion_failure": true, "log_sha256": "5d33e0838289c068e0203912c8eeac1b02a8e96d4749ae29889a9bd8b55e9d23"},
+    {"fault": "hide-late-body-error", "exitcode": 101, "assertion_failure": true, "log_sha256": "32db543c1abdf6c4cc98d21cdfa2c074f5f0d34bb37ec48b5fcf6808f67bf210"},
+    {"fault": "lose-fragment-offset", "exitcode": 101, "assertion_failure": true, "log_sha256": "eeda624ced6e575a86a2cb9c43697ce094b63761c1b0509cfaeb0de729e0620a"}
+  ],
+  "companion_tools": {
+    "crapper_revision": "6fd92c4c9bcc56efb64a2f8743d5a2993bcfd42d",
+    "dryer_revision": "66ff6d21a42c04afcad89c78a80066176d1294b0",
+    "mutator_revision": "a5a0cb803b66e0cdb8bf471b3b08af701d424a41",
+    "reported_complexity": {"cached_fragment_read": 6, "filesystem_read_inner": 49},
+    "coverage": null,
+    "CRAP": null,
+    "remaining_duplicate_candidates_at_0_8": 3,
+    "cache_mutation_sites_scanned": 27,
+    "selected_mutations_executed": 1,
+    "selected_mutations_killed": 1,
+    "selected_mutations_survived": 0,
+    "unselected_mutation_sites": 26,
+    "selected_line": 122,
+    "selected_mutation": "src/cache.rs:122 == -> !=",
+    "complexity_log_sha256": "68b853db263666d419e4df22254d6c7b8c4314c2a0f09df35b991ea12acbf4b8",
+    "duplicate_log_sha256": "49a46aaecc603c8e3ae0fca38382b2281aac7871ece6379d5b50a0f321f97577",
+    "mutation_log_sha256": "e9f2d4adb5711061816991e04cd7cc49f85200d6018dd68ce119cad4a411e0dd"
+  },
+  "remaining": [
+    "Matched performance measurement of this candidate, including all adverse metrics",
+    "Go heap time series, backend request metrics and representative writer/random/HTTP workloads",
+    "Complete compatibility, historical EAGAIN attribution and binary-distribution notices",
+    "Whole-package coverage/CRAP, existing complexity and duplication findings and unselected mutation sites"
+  ]
+}

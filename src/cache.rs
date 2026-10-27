@@ -108,10 +108,10 @@ impl ReadCache {
         length: usize,
         reply: Reservation,
     ) -> Option<Block> {
-        if let Some((block, relative)) = self.covering(inode, generation, offset, length) {
+        let (mut block, mut relative) = self.covering(inode, generation, offset, 1)?;
+        if block.as_slice().len() - relative >= length {
             return Some(block.slice(relative..relative + length));
         }
-        let (mut block, mut relative) = self.covering(inode, generation, offset, 1)?;
         let mut result = reply.zeroed();
         let mut filled = 0;
         loop {

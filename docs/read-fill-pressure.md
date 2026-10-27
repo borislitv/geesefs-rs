@@ -63,6 +63,11 @@ Four new `Filesystem::read` tests reproduce the actual ownership/admission paths
 
 All faults were restored. Formatting, warning-denying all-target/all-feature
 Clippy, all 130 Rust tests and the 336-package public-origin audit passed.
-Fresh committed-source paired mounted measurements are still required before
-claiming a comparative speed or memory improvement. Whole-project compatibility
-and performance acceptance remain **UNACCEPTED**.
+Fresh committed-source paired mounted verification subsequently completed all 80
+selected sequential/eviction results against both Go baselines, cold/warm and
+five repetitions. Mean Rust time is now 3.087–3.375 seconds for 256 MiB rather
+than the previous roughly 404 seconds; all group mean throughputs and RSS/cgroup
+totals favor Rust. An additional concurrent smoke pair also passed. The complete
+reviewed metric summaries are linked from [performance](performance.md), including
+the unfavorable p95 and mixed p99 results. Whole-project compatibility, full-matrix
+and tail-latency acceptance remain **UNACCEPTED**.

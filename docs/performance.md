@@ -1,8 +1,10 @@
 # Performance acceptance: UNACCEPTED
 
-No reproducible overall memory reduction or speedup is claimed. An initial
-diagnostic pair and an incomplete full-matrix attempt have measurements; passing
-owner-budget tests does not establish bounded RSS or comparative acceptance.
+No overall memory/speed acceptance is claimed. After diagnosing actual FUSE
+overlap and repairing fill ownership, all 80 selected sequential/eviction results
+complete correctly, with higher mean throughput and lower mean RSS/cgroup memory
+than both Go baselines. However p95 latency regresses, the full matrix is incomplete
+and compatibility remains open. Earlier unfavorable attempts are retained below.
 
 ## Runner and reproduction
 
@@ -121,7 +123,7 @@ counts, mean/min/max/dispersion and a whitelist of executable provenance.
 unchanged limits: both baselines, states and all five repetitions still run for
 that workload. Diagnostic selection never passes the full acceptance gate.
 
-## Post-fix bounded sequential diagnostic
+## After the adaptive-history fix only
 
 The repeat at committed source `980949072c02e786c213c227a4ff22122984cec7`
 also exhausted its deadline, this time **1,200 seconds**. It recorded only five
@@ -138,8 +140,9 @@ and correctness oracle. All five completed checks passed. The full gate remains
 
 These are **all completed results**, including the unmatched third Go run, not
 a five-repetition paired comparison or a before/after causal estimate. The severe
-mounted throughput regression remains. Correcting the deterministic adaptive
-history defect did not resolve it; its remaining cause is not yet established.
+mounted throughput regression remained at that source. Correcting the deterministic
+adaptive history did not resolve it; its cause was not yet established at that
+point. The subsequent actual FUSE diagnosis and measured repair follow below.
 No warm, packaged-baseline or writer result was obtained in this diagnostic.
 The owned unit is inactive and owned FUSE mounts were removed.
 
@@ -155,6 +158,95 @@ Original records and partial-run traces remain in the ignored
 `benchmark-results/private/paired-sequential-20261027-v1/`. Preserve them alongside
 the earlier attempt. Further performance work must explain the mounted behavior
 before repeating a long matrix; library request counts cannot substitute for it.
+
+## After the overlapping-fill ownership repair
+
+An actual mounted trace identified simultaneous neighboring FUSE reads repeatedly
+evicting the active fill's cache policy and publishing into an orphaned clone.
+[The repair and failure-sensitive regressions](read-fill-pressure.md) coalesce
+overlapping, generation-scoped fills before large admission, retain independent
+window concurrency and publish into the current cache. Budgets, workload data,
+CPU quota, cache state definitions and integrity checks are unchanged.
+
+At committed source `572195abfd37db14dc13b23b33708ddfdf4d662c`, the selected
+sequential/eviction experiment completed **all 80 results**: two public baselines,
+cold/warm states and five alternating repetitions per implementation/workload.
+All 80 passed the full-byte checksum. It completed inside its 1,200-second
+deadline (owned-unit lifetime about 537 seconds). All eight group mean throughputs
+favor Rust, and all group mean peak/steady RSS and cgroup values are lower.
+These are means, not a claim that every individual repetition wins.
+
+Throughput is decimal MB/s; `±` is the population standard deviation of the five
+run throughputs. Elapsed is the mean run time for the unchanged 256 MiB payload.
+
+| Baseline | State | Workload | Go MB/s ± SD | Rust MB/s ± SD | Go seconds | Rust seconds |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| Experimental | Cold | Sequential | 81.27 ± 12.14 | 86.99 ± 1.55 | 3.390 | 3.087 |
+| Experimental | Cold | Eviction | 72.69 ± 6.00 | 80.96 ± 9.77 | 3.718 | 3.375 |
+| Experimental | Warm | Sequential | 70.75 ± 11.05 | 85.63 ± 8.06 | 3.877 | 3.164 |
+| Experimental | Warm | Eviction | 77.13 ± 11.32 | 80.73 ± 7.13 | 3.568 | 3.353 |
+| Packaged | Cold | Sequential | 71.25 ± 8.24 | 83.39 ± 4.05 | 3.817 | 3.227 |
+| Packaged | Cold | Eviction | 69.46 ± 12.84 | 85.82 ± 3.26 | 4.013 | 3.133 |
+| Packaged | Warm | Sequential | 74.27 ± 12.00 | 81.44 ± 5.27 | 3.717 | 3.310 |
+| Packaged | Warm | Eviction | 65.16 ± 8.67 | 87.27 ± 8.13 | 4.190 | 3.105 |
+
+Memory values below are means of per-run combined daemon/client sampled RSS peak
+and kernel cgroup lifetime peak, in bytes. Latency values are means of per-run
+percentiles, not percentiles pooled across the whole experiment.
+
+| Baseline/state/workload | Go peak RSS | Rust peak RSS | Go cgroup peak | Rust cgroup peak | Go p95 ms | Rust p95 ms | Go p99 ms | Rust p99 ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Experimental/cold/sequential | 222,817,485 | 125,027,942 | 433,440,358 | 355,783,475 | 26.258 | 110.147 | 239.757 | 244.180 |
+| Experimental/cold/eviction | 229,411,226 | 129,785,856 | 421,291,622 | 354,363,802 | 20.480 | 111.671 | 235.741 | 244.513 |
+| Experimental/warm/sequential | 233,300,787 | 126,402,560 | 422,105,907 | 356,714,906 | 26.787 | 69.265 | 263.235 | 244.781 |
+| Experimental/warm/eviction | 241,272,422 | 125,749,658 | 427,796,890 | 353,671,578 | 24.452 | 111.277 | 227.398 | 244.967 |
+| Packaged/cold/sequential | 233,218,867 | 133,813,043 | 433,697,587 | 352,287,949 | 26.364 | 111.658 | 255.056 | 245.136 |
+| Packaged/cold/eviction | 233,999,565 | 127,257,805 | 432,548,250 | 353,558,528 | 23.393 | 110.321 | 421.805 | 244.378 |
+| Packaged/warm/sequential | 227,966,976 | 128,143,360 | 426,196,992 | 351,041,946 | 27.978 | 113.082 | 229.040 | 244.357 |
+| Packaged/warm/eviction | 223,955,354 | 131,012,198 | 435,766,067 | 356,604,314 | 25.769 | 47.070 | 311.806 | 244.879 |
+
+**Tail non-regression does not pass.** Mean p50 improves (about 0.42 versus
+4.3–4.8 ms), but Rust p95 is 47–113 ms versus Go 20–28 ms; p99 is mixed. The
+current miss path still waits for a whole prefetched window. Do not describe
+better total time as an across-the-board latency win. Rust steady file cache is
+also higher in these groups (about 178–202 million bytes versus 165–173 million
+for Go), despite lower cgroup totals. Kernel overhead and allocator counters are
+reported separately, not excluded from memory accounting.
+
+The reviewed [80-result summary](read-fill-results-20261027.json) includes every
+group, counts, missing metrics, mean/min/max/standard deviation for RSS, cgroup,
+file/kernel cache, allocator and latency, plus exact limits and executable
+provenance. No mount arguments, credentials or private host/bucket identifiers
+are included. Original per-run latencies, logs and traces remain in ignored
+`benchmark-results/private/paired-read-fills-20261027-v1/`. The gate is correctly
+**UNACCEPTED** with 261 errors: selection is not the full 280-result matrix, peak/
+steady Go heap and compatibility receipts are absent, and measured tail/repeated
+improvement requirements are not all met.
+
+A separate unchanged-workload concurrent smoke pair also passed byte checks:
+Go 211.299 seconds and 39,700 bytes/s versus Rust 196.377 seconds and 42,717
+bytes/s, peak RSS 179,347,456 versus 127,680,512 bytes. This is one pair, not a
+repeated concurrent acceptance result. Its [complete metric summary](read-fill-concurrent-20261027.json)
+and original ignored `paired-read-concurrent-20261027-v1/` receipts are retained;
+its gate remains false with 229 errors. Both owned units stopped and no owned
+FUSE mounts remained.
+
+Reproduction with the dedicated-unit wrapper above, using a fresh output path:
+
+```bash
+python3 bench/compare.py --go-reference "$GEESEFS_GO_REFERENCE" \
+  --workloads bench/workloads.json --output benchmark-results/private/read-fills-new \
+  --diagnostic-workload sequential --diagnostic-workload eviction --timeout 1200
+python3 bench/summarize.py benchmark-results/private/read-fills-new/report.json --table
+python3 bench/summarize.py benchmark-results/private/read-fills-new/report.json \
+  --table --metrics rss_steady_bytes cgroup_peak_bytes cgroup_steady_bytes p95_ms p99_ms
+```
+
+The exporter accepts `--output NEW.json` for a new JSON summary; existing output
+is rejected. Review exported data before publication: run error text is retained,
+whereas limits and provenance use explicit field lists. The published successful
+groups have empty error lists. Whitelist failure sensitivity and no-overwrite
+behavior were verified; no raw private receipts were committed.
 
 ## Accounting and acceptance boundaries
 

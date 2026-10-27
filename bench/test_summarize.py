@@ -10,12 +10,14 @@ class SummaryTests(unittest.TestCase):
                 dict(common, repetition=1, correctness=False, error="checksum mismatch", metrics={"throughput": 20}),
                 dict(common, repetition=2, correctness=False, metrics={"throughput": float("nan"), "rss_peak_bytes": True})]
         report = {"runs": runs, "gate": {"accepted": False, "errors": ["incomplete"]},
+                  "limits": {"memory_limit_mb": 64, "private_path": "private"},
                   "provenance": {"rust": {"source_revision": "b" * 40, "binary_sha256": "c" * 64, "private_path": "private"}}}
         result = summarize(report)
         self.assertFalse(result["accepted"])
         self.assertEqual(result["runs"], 3)
         self.assertEqual(result["gate_error_count"], 1)
         self.assertNotIn("private_path", result["provenance"]["rust"])
+        self.assertEqual(result["limits"], {"memory_limit_mb": 64})
         group, = result["groups"]
         self.assertEqual(group["correct"], 1)
         self.assertEqual(group["errors"], [{"repetition": 1, "error": "checksum mismatch"}])

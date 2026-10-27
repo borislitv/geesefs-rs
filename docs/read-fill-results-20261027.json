@@ -1,0 +1,1876 @@
+{
+  "accepted": false,
+  "runs": 80,
+  "gate_error_count": 261,
+  "limits": {
+    "schema": 1,
+    "repetitions": 5,
+    "memory_limit_mb": 64,
+    "entry_limit": 100000,
+    "dataset_bytes": 268435456,
+    "metadata_entries": 1024,
+    "concurrency": 4,
+    "random_operations": 512,
+    "random_block_bytes": 4096,
+    "writer_bytes": 16777216,
+    "cpu_quota_us": 100000,
+    "cpu_period_us": 100000,
+    "cgroup_memory_max_mb": 1024,
+    "states": [
+      "cold",
+      "warm"
+    ],
+    "workloads": [
+      "metadata",
+      "sequential",
+      "random",
+      "concurrent",
+      "eviction",
+      "writer_fsync",
+      "writer_failure"
+    ]
+  },
+  "provenance": {
+    "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d": {
+      "source_revision": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "binary_sha256": "0274cc38d0ba1e00971f14764fc155f6f1d14613d86bd297b0f0b3a2cffc455c",
+      "toolchain": "go version go1.22.2 linux/amd64"
+    },
+    "80c214ef14f620d93407454fc76ca01dd71fa25f": {
+      "source_revision": "80c214ef14f620d93407454fc76ca01dd71fa25f",
+      "binary_sha256": "528026108c93773729ff096eec409569be1e970120393162014fa06edc63239c",
+      "toolchain": "go version go1.22.2 linux/amd64"
+    },
+    "rust": {
+      "source_revision": "572195abfd37db14dc13b23b33708ddfdf4d662c",
+      "binary_sha256": "1722f8b4af40cd4d8783f61a93f5802afedbbd97a26f1a58abd0735d405f5a5f",
+      "toolchain": "rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+    }
+  },
+  "groups": [
+    {
+      "baseline": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "state": "cold",
+      "workload": "eviction",
+      "implementation": "go",
+      "runs": 5,
+      "correct": 5,
+      "errors": [],
+      "throughput_units": [
+        "bytes/s"
+      ],
+      "metrics": {
+        "throughput": {
+          "n": 5,
+          "missing": 0,
+          "mean": 72693808.1178953,
+          "stdev": 6003180.243376858,
+          "min": 64763858.68031517,
+          "max": 81045676.31262112
+        },
+        "elapsed_seconds": {
+          "n": 5,
+          "missing": 0,
+          "mean": 3.7182706494349986,
+          "stdev": 0.3103300634250452,
+          "min": 3.3121502369176596,
+          "max": 4.144834194099531
+        },
+        "rss_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 229411225.6,
+          "stdev": 11350560.5731212,
+          "min": 213528576,
+          "max": 245018624
+        },
+        "rss_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 208597924.7414673,
+          "stdev": 4574148.086231592,
+          "min": 202871733.07317072,
+          "max": 214046347.63636363
+        },
+        "cgroup_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 421291622.4,
+          "stdev": 12408798.733053278,
+          "min": 405561344,
+          "max": 437846016
+        },
+        "cgroup_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 334239105.7814355,
+          "stdev": 4726614.098903649,
+          "min": 327883103.0857143,
+          "max": 340241832.58536583
+        },
+        "file_cache_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 172142059.25352696,
+          "stdev": 8649105.853572547,
+          "min": 163982657.82857144,
+          "max": 184077137.1707317
+        },
+        "kernel_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 1400889.306008463,
+          "stdev": 17297.47754554166,
+          "min": 1373622.857142857,
+          "max": 1417567.0857142857
+        },
+        "allocator_peak_bytes": {
+          "n": 0,
+          "missing": 5
+        },
+        "allocator_steady_bytes": {
+          "n": 0,
+          "missing": 5
+        },
+        "p50_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 4.3162012,
+          "stdev": 0.46163915682636797,
+          "min": 3.539773,
+          "max": 4.81169
+        },
+        "p95_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 20.479683,
+          "stdev": 3.065879983503659,
+          "min": 15.610151,
+          "max": 24.061013
+        },
+        "p99_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 235.741379,
+          "stdev": 32.60961051716828,
+          "min": 216.238413,
+          "max": 300.674444
+        }
+      }
+    },
+    {
+      "baseline": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "state": "cold",
+      "workload": "eviction",
+      "implementation": "rust",
+      "runs": 5,
+      "correct": 5,
+      "errors": [],
+      "throughput_units": [
+        "bytes/s"
+      ],
+      "metrics": {
+        "throughput": {
+          "n": 5,
+          "missing": 0,
+          "mean": 80958144.00965402,
+          "stdev": 9774093.350214243,
+          "min": 61893177.63382623,
+          "max": 87949104.03608413
+        },
+        "elapsed_seconds": {
+          "n": 5,
+          "missing": 0,
+          "mean": 3.3745338593609633,
+          "stdev": 0.4878808012429997,
+          "min": 3.0521681709215045,
+          "max": 4.3370766579173505
+        },
+        "rss_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 129785856,
+          "stdev": 6251656.51506965,
+          "min": 118337536,
+          "max": 136769536
+        },
+        "rss_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 98730996.38615519,
+          "stdev": 2108646.866078936,
+          "min": 95584798.11764705,
+          "max": 101771684.8219178
+        },
+        "cgroup_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 354363801.6,
+          "stdev": 6473208.612584569,
+          "min": 348491776,
+          "max": 366260224
+        },
+        "cgroup_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 253919334.75587577,
+          "stdev": 9302349.747239305,
+          "min": 239974505.5670103,
+          "max": 269109724.9315069
+        },
+        "file_cache_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 182343106.70407557,
+          "stdev": 8519305.988067709,
+          "min": 167757127.25773194,
+          "max": 194511465.20547944
+        },
+        "kernel_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 970992.9291234452,
+          "stdev": 21797.71549327406,
+          "min": 936632.7422680412,
+          "max": 1002566.1369863014
+        },
+        "allocator_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 70257408,
+          "stdev": 135115.82136818767,
+          "min": 70086016,
+          "max": 70386928
+        },
+        "allocator_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 60506571.49965787,
+          "stdev": 2936617.395177542,
+          "min": 54912273.81818182,
+          "max": 63342375.25
+        },
+        "p50_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 0.4182856,
+          "stdev": 0.008892688156007713,
+          "min": 0.409801,
+          "max": 0.435494
+        },
+        "p95_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 111.6711636,
+          "stdev": 1.9185451087064522,
+          "min": 109.883725,
+          "max": 114.491668
+        },
+        "p99_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 244.5129094,
+          "stdev": 1.2820288325913156,
+          "min": 242.447914,
+          "max": 246.201983
+        }
+      }
+    },
+    {
+      "baseline": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "state": "cold",
+      "workload": "sequential",
+      "implementation": "go",
+      "runs": 5,
+      "correct": 5,
+      "errors": [],
+      "throughput_units": [
+        "bytes/s"
+      ],
+      "metrics": {
+        "throughput": {
+          "n": 5,
+          "missing": 0,
+          "mean": 81272951.24579416,
+          "stdev": 12137101.003475,
+          "min": 59604834.14523903,
+          "max": 92819991.34189491
+        },
+        "elapsed_seconds": {
+          "n": 5,
+          "missing": 0,
+          "mean": 3.390352849662304,
+          "stdev": 0.5904792218381612,
+          "min": 2.8920004421379417,
+          "max": 4.503585319034755
+        },
+        "rss_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 222817484.8,
+          "stdev": 15268575.509602439,
+          "min": 206241792,
+          "max": 245035008
+        },
+        "rss_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 205854998.54674822,
+          "stdev": 7636173.369976665,
+          "min": 197744388.49122807,
+          "max": 215355008
+        },
+        "cgroup_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 433440358.4,
+          "stdev": 17053868.15705586,
+          "min": 419786752,
+          "max": 466808832
+        },
+        "cgroup_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 331326040.2298478,
+          "stdev": 5930375.289064632,
+          "min": 319881998.3820225,
+          "max": 336934732.35087717
+        },
+        "file_cache_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 172288000.83392382,
+          "stdev": 9736712.839604808,
+          "min": 163174400,
+          "max": 186600034.80701753
+        },
+        "kernel_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 1387598.4807270565,
+          "stdev": 13011.88467228445,
+          "min": 1364612.3146067415,
+          "max": 1403993.8245614036
+        },
+        "allocator_peak_bytes": {
+          "n": 0,
+          "missing": 5
+        },
+        "allocator_steady_bytes": {
+          "n": 0,
+          "missing": 5
+        },
+        "p50_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 4.5752238,
+          "stdev": 0.27494863784743523,
+          "min": 4.282496,
+          "max": 5.077009
+        },
+        "p95_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 26.2581718,
+          "stdev": 5.021702928789294,
+          "min": 19.688812,
+          "max": 33.547826
+        },
+        "p99_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 239.7565116,
+          "stdev": 115.5123161058733,
+          "min": 129.1997,
+          "max": 450.44545
+        }
+      }
+    },
+    {
+      "baseline": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "state": "cold",
+      "workload": "sequential",
+      "implementation": "rust",
+      "runs": 5,
+      "correct": 5,
+      "errors": [],
+      "throughput_units": [
+        "bytes/s"
+      ],
+      "metrics": {
+        "throughput": {
+          "n": 5,
+          "missing": 0,
+          "mean": 86990664.19216137,
+          "stdev": 1551298.507171787,
+          "min": 84934774.357809,
+          "max": 88345245.67621097
+        },
+        "elapsed_seconds": {
+          "n": 5,
+          "missing": 0,
+          "mean": 3.0867851624265312,
+          "stdev": 0.05546051431145808,
+          "min": 3.038482194999233,
+          "max": 3.1604894229676574
+        },
+        "rss_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 125027942.4,
+          "stdev": 5047688.511838646,
+          "min": 118382592,
+          "max": 130363392
+        },
+        "rss_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 96930787.52871054,
+          "stdev": 1870564.3766115594,
+          "min": 93342186.36619718,
+          "max": 98842768.22535211
+        },
+        "cgroup_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 355783475.2,
+          "stdev": 6507961.872821764,
+          "min": 350461952,
+          "max": 366120960
+        },
+        "cgroup_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 254135867.43978003,
+          "stdev": 3739783.364733335,
+          "min": 249163141.4084507,
+          "max": 260724649.46478873
+        },
+        "file_cache_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 184405407.89525834,
+          "stdev": 2393304.8636108967,
+          "min": 182708016.23188406,
+          "max": 189151953.12676057
+        },
+        "kernel_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 971508.2228257868,
+          "stdev": 18088.57074314071,
+          "min": 951829.6338028169,
+          "max": 996020.2816901408
+        },
+        "allocator_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 70274099.2,
+          "stdev": 144264.003735374,
+          "min": 69986264,
+          "max": 70363104
+        },
+        "allocator_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 62225252.243548386,
+          "stdev": 1589692.2857207272,
+          "min": 60418665.29032258,
+          "max": 64373412.25
+        },
+        "p50_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 0.4132484,
+          "stdev": 0.001985814049703555,
+          "min": 0.410622,
+          "max": 0.415981
+        },
+        "p95_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 110.1473388,
+          "stdev": 0.26683753286477596,
+          "min": 109.77969,
+          "max": 110.497995
+        },
+        "p99_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 244.1800588,
+          "stdev": 0.430099634201847,
+          "min": 243.71622,
+          "max": 244.957087
+        }
+      }
+    },
+    {
+      "baseline": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "state": "warm",
+      "workload": "eviction",
+      "implementation": "go",
+      "runs": 5,
+      "correct": 5,
+      "errors": [],
+      "throughput_units": [
+        "bytes/s"
+      ],
+      "metrics": {
+        "throughput": {
+          "n": 5,
+          "missing": 0,
+          "mean": 77128384.14822097,
+          "stdev": 11318325.810285289,
+          "min": 57046504.05653654,
+          "max": 92067606.42478733
+        },
+        "elapsed_seconds": {
+          "n": 5,
+          "missing": 0,
+          "mean": 3.567638716753572,
+          "stdev": 0.6014407224910066,
+          "min": 2.915634134784341,
+          "max": 4.705554887885228
+        },
+        "rss_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 241272422.4,
+          "stdev": 24599136.915670466,
+          "min": 205246464,
+          "max": 281350144
+        },
+        "rss_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 218227587.15242404,
+          "stdev": 14208591.913240785,
+          "min": 198145243.42857143,
+          "max": 242463845.2747253
+        },
+        "cgroup_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 427796889.6,
+          "stdev": 13679115.71254355,
+          "min": 414318592,
+          "max": 452083712
+        },
+        "cgroup_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 336028678.6275372,
+          "stdev": 3515520.35507154,
+          "min": 330707529.14285713,
+          "max": 340825729.4065934
+        },
+        "file_cache_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 164564928.1903038,
+          "stdev": 11060580.820688546,
+          "min": 145351421.18681318,
+          "max": 179326976
+        },
+        "kernel_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 1419757.854945055,
+          "stdev": 9489.42248073692,
+          "min": 1402880,
+          "max": 1431990.857142857
+        },
+        "allocator_peak_bytes": {
+          "n": 0,
+          "missing": 5
+        },
+        "allocator_steady_bytes": {
+          "n": 0,
+          "missing": 5
+        },
+        "p50_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 4.8417568,
+          "stdev": 0.31241217611700123,
+          "min": 4.470514,
+          "max": 5.339947
+        },
+        "p95_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 24.4518418,
+          "stdev": 3.801467396031296,
+          "min": 19.679856,
+          "max": 29.975415
+        },
+        "p99_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 227.3983606,
+          "stdev": 64.67231324542445,
+          "min": 125.879986,
+          "max": 329.524601
+        }
+      }
+    },
+    {
+      "baseline": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "state": "warm",
+      "workload": "eviction",
+      "implementation": "rust",
+      "runs": 5,
+      "correct": 5,
+      "errors": [],
+      "throughput_units": [
+        "bytes/s"
+      ],
+      "metrics": {
+        "throughput": {
+          "n": 5,
+          "missing": 0,
+          "mean": 80728380.13425143,
+          "stdev": 7130002.102324775,
+          "min": 68125647.8412425,
+          "max": 87779294.56828186
+        },
+        "elapsed_seconds": {
+          "n": 5,
+          "missing": 0,
+          "mean": 3.3533620121888816,
+          "stdev": 0.3201436334038885,
+          "min": 3.058072604937479,
+          "max": 3.940299498150125
+        },
+        "rss_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 125749657.6,
+          "stdev": 8621113.289806081,
+          "min": 114249728,
+          "max": 139214848
+        },
+        "rss_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 98909335.05974352,
+          "stdev": 3871952.286076563,
+          "min": 94669281.88235295,
+          "max": 104421347.94520548
+        },
+        "cgroup_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 353671577.6,
+          "stdev": 4406743.690597564,
+          "min": 349949952,
+          "max": 361275392
+        },
+        "cgroup_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 274193961.24712145,
+          "stdev": 11665372.40637519,
+          "min": 258069546.0821918,
+          "max": 288569290.1052632
+        },
+        "file_cache_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 202295942.91985375,
+          "stdev": 13191510.605697561,
+          "min": 180619179.83561644,
+          "max": 219532934.7368421
+        },
+        "kernel_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 1030296.5608147705,
+          "stdev": 26104.215517146848,
+          "min": 991624.7671232877,
+          "max": 1065768.4210526317
+        },
+        "allocator_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 70224576,
+          "stdev": 193951.76914686806,
+          "min": 69837336,
+          "max": 70341984
+        },
+        "allocator_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 58323414.70559025,
+          "stdev": 3580475.9900220917,
+          "min": 53385450.6,
+          "max": 61641169.29032258
+        },
+        "p50_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 0.41852,
+          "stdev": 0.006913658684083262,
+          "min": 0.412127,
+          "max": 0.430679
+        },
+        "p95_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 111.2765904,
+          "stdev": 3.290177147599478,
+          "min": 106.243181,
+          "max": 114.55334
+        },
+        "p99_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 244.9674904,
+          "stdev": 0.8219313349845276,
+          "min": 244.224811,
+          "max": 246.001661
+        }
+      }
+    },
+    {
+      "baseline": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "state": "warm",
+      "workload": "sequential",
+      "implementation": "go",
+      "runs": 5,
+      "correct": 5,
+      "errors": [],
+      "throughput_units": [
+        "bytes/s"
+      ],
+      "metrics": {
+        "throughput": {
+          "n": 5,
+          "missing": 0,
+          "mean": 70748968.36810645,
+          "stdev": 11054098.855296927,
+          "min": 60353334.90647169,
+          "max": 90955212.20465346
+        },
+        "elapsed_seconds": {
+          "n": 5,
+          "missing": 0,
+          "mean": 3.8774620549287646,
+          "stdev": 0.5363866769248392,
+          "min": 2.951292724115774,
+          "max": 4.447731950785965
+        },
+        "rss_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 233300787.2,
+          "stdev": 23985345.510431442,
+          "min": 205090816,
+          "max": 270475264
+        },
+        "rss_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 213814935.57324582,
+          "stdev": 14955897.083274793,
+          "min": 196279966.89655173,
+          "max": 239127708.6117647
+        },
+        "cgroup_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 422105907.2,
+          "stdev": 7170026.367565196,
+          "min": 417005568,
+          "max": 436121600
+        },
+        "cgroup_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 339613227.93921053,
+          "stdev": 4763627.854641338,
+          "min": 333155629.1764706,
+          "max": 344701002.02409637
+        },
+        "file_cache_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 172552753.05328193,
+          "stdev": 16710697.339144891,
+          "min": 141347514.72941175,
+          "max": 186709053.68674698
+        },
+        "kernel_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 1417531.228042202,
+          "stdev": 10600.47613200339,
+          "min": 1400832,
+          "max": 1431379.2771084337
+        },
+        "allocator_peak_bytes": {
+          "n": 0,
+          "missing": 5
+        },
+        "allocator_steady_bytes": {
+          "n": 0,
+          "missing": 5
+        },
+        "p50_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 4.476167,
+          "stdev": 0.07293261288888506,
+          "min": 4.339273,
+          "max": 4.545374
+        },
+        "p95_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 26.786582199999998,
+          "stdev": 5.752806014953967,
+          "min": 20.499576,
+          "max": 34.000806
+        },
+        "p99_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 263.2352254,
+          "stdev": 95.80539796780984,
+          "min": 127.983893,
+          "max": 419.384682
+        }
+      }
+    },
+    {
+      "baseline": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "state": "warm",
+      "workload": "sequential",
+      "implementation": "rust",
+      "runs": 5,
+      "correct": 5,
+      "errors": [],
+      "throughput_units": [
+        "bytes/s"
+      ],
+      "metrics": {
+        "throughput": {
+          "n": 5,
+          "missing": 0,
+          "mean": 85633833.40424553,
+          "stdev": 8064549.19813648,
+          "min": 74232325.60933058,
+          "max": 94085766.10560785
+        },
+        "elapsed_seconds": {
+          "n": 5,
+          "missing": 0,
+          "mean": 3.163503549899906,
+          "stdev": 0.3064426125756075,
+          "min": 2.853093162877485,
+          "max": 3.6161531219258904
+        },
+        "rss_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 126402560,
+          "stdev": 7171062.217671466,
+          "min": 113483776,
+          "max": 134488064
+        },
+        "rss_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 96215078.99362318,
+          "stdev": 4539015.153816358,
+          "min": 90029605.10144928,
+          "max": 102270020.26666667
+        },
+        "cgroup_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 356714905.6,
+          "stdev": 4267129.054889509,
+          "min": 349954048,
+          "max": 361562112
+        },
+        "cgroup_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 257429007.40452173,
+          "stdev": 7877104.259049388,
+          "min": 244773101.44927537,
+          "max": 269479007.5733333
+        },
+        "file_cache_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 188466789.3017971,
+          "stdev": 4298749.806066012,
+          "min": 181918438.0289855,
+          "max": 194607022.08
+        },
+        "kernel_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 985465.039768116,
+          "stdev": 14124.065372092735,
+          "min": 960482.3188405797,
+          "max": 1003028.48
+        },
+        "allocator_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 70336329.6,
+          "stdev": 8791.739250000537,
+          "min": 70323336,
+          "max": 70345920
+        },
+        "allocator_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 60744666.10459704,
+          "stdev": 2697220.7767076474,
+          "min": 56260231.54285714,
+          "max": 64177596.96551724
+        },
+        "p50_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 0.41722940000000003,
+          "stdev": 0.005612576043137412,
+          "min": 0.411495,
+          "max": 0.426661
+        },
+        "p95_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 69.2645878,
+          "stdev": 54.5607507041042,
+          "min": 2.36748,
+          "max": 114.096956
+        },
+        "p99_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 244.7811126,
+          "stdev": 0.4592510456273719,
+          "min": 243.937157,
+          "max": 245.327935
+        }
+      }
+    },
+    {
+      "baseline": "80c214ef14f620d93407454fc76ca01dd71fa25f",
+      "state": "cold",
+      "workload": "eviction",
+      "implementation": "go",
+      "runs": 5,
+      "correct": 5,
+      "errors": [],
+      "throughput_units": [
+        "bytes/s"
+      ],
+      "metrics": {
+        "throughput": {
+          "n": 5,
+          "missing": 0,
+          "mean": 69457863.03487785,
+          "stdev": 12842822.966399007,
+          "min": 53287721.16279777,
+          "max": 81307695.31212105
+        },
+        "elapsed_seconds": {
+          "n": 5,
+          "missing": 0,
+          "mean": 4.012535887397826,
+          "stdev": 0.799848251626445,
+          "min": 3.3014766310807317,
+          "max": 5.037472988944501
+        },
+        "rss_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 233999564.8,
+          "stdev": 10673186.815746726,
+          "min": 215752704,
+          "max": 245731328
+        },
+        "rss_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 212424650.90540364,
+          "stdev": 9687063.681126973,
+          "min": 196486682.39175257,
+          "max": 222663462.78787878
+        },
+        "cgroup_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 432548249.6,
+          "stdev": 12328791.967599122,
+          "min": 413192192,
+          "max": 451747840
+        },
+        "cgroup_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 332742780.8376259,
+          "stdev": 8373876.522065663,
+          "min": 322645467.0515464,
+          "max": 345434608.4848485
+        },
+        "file_cache_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 167017932.197058,
+          "stdev": 3738564.2031997805,
+          "min": 161349928.8115942,
+          "max": 172424582.59793815
+        },
+        "kernel_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 1396808.008917503,
+          "stdev": 10434.296115953792,
+          "min": 1385160.347826087,
+          "max": 1413057.9393939395
+        },
+        "allocator_peak_bytes": {
+          "n": 0,
+          "missing": 5
+        },
+        "allocator_steady_bytes": {
+          "n": 0,
+          "missing": 5
+        },
+        "p50_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 4.5651418,
+          "stdev": 0.3373116256913775,
+          "min": 4.314395,
+          "max": 5.232309
+        },
+        "p95_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 23.3932672,
+          "stdev": 4.23875210689398,
+          "min": 18.337351,
+          "max": 30.323842
+        },
+        "p99_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 421.80539500000003,
+          "stdev": 222.029367800152,
+          "min": 214.42461,
+          "max": 712.676363
+        }
+      }
+    },
+    {
+      "baseline": "80c214ef14f620d93407454fc76ca01dd71fa25f",
+      "state": "cold",
+      "workload": "eviction",
+      "implementation": "rust",
+      "runs": 5,
+      "correct": 5,
+      "errors": [],
+      "throughput_units": [
+        "bytes/s"
+      ],
+      "metrics": {
+        "throughput": {
+          "n": 5,
+          "missing": 0,
+          "mean": 85816750.05327769,
+          "stdev": 3258525.826940325,
+          "min": 79673765.60727596,
+          "max": 88275296.9190541
+        },
+        "elapsed_seconds": {
+          "n": 5,
+          "missing": 0,
+          "mean": 3.1327319813892247,
+          "stdev": 0.12445117780680315,
+          "min": 3.0408898680470884,
+          "max": 3.3691824900452048
+        },
+        "rss_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 127257804.8,
+          "stdev": 2641244.1052932916,
+          "min": 123146240,
+          "max": 130789376
+        },
+        "rss_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 96748265.32042198,
+          "stdev": 2460608.760023785,
+          "min": 92105367.43661971,
+          "max": 98738055.52941176
+        },
+        "cgroup_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 353558528,
+          "stdev": 4073646.112317171,
+          "min": 350519296,
+          "max": 360837120
+        },
+        "cgroup_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 254601792.9692792,
+          "stdev": 6449087.623221173,
+          "min": 247870132.28169015,
+          "max": 266714316.8
+        },
+        "file_cache_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 184828814.37078378,
+          "stdev": 5195023.052855046,
+          "min": 181172585.4117647,
+          "max": 195069706.24
+        },
+        "kernel_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 969637.921935377,
+          "stdev": 13807.443476392311,
+          "min": 949175.8873239437,
+          "max": 991395.84
+        },
+        "allocator_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 70042907.2,
+          "stdev": 152290.2543728915,
+          "min": 69958984,
+          "max": 70347192
+        },
+        "allocator_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 61869101.2183112,
+          "stdev": 1648229.1526836257,
+          "min": 60302080.47058824,
+          "max": 65036317.75
+        },
+        "p50_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 0.4145194,
+          "stdev": 0.002475692598042,
+          "min": 0.411179,
+          "max": 0.417896
+        },
+        "p95_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 110.3207682,
+          "stdev": 0.1448875967988994,
+          "min": 110.083792,
+          "max": 110.490311
+        },
+        "p99_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 244.377536,
+          "stdev": 0.5369376377729598,
+          "min": 243.574944,
+          "max": 245.17714
+        }
+      }
+    },
+    {
+      "baseline": "80c214ef14f620d93407454fc76ca01dd71fa25f",
+      "state": "cold",
+      "workload": "sequential",
+      "implementation": "go",
+      "runs": 5,
+      "correct": 5,
+      "errors": [],
+      "throughput_units": [
+        "bytes/s"
+      ],
+      "metrics": {
+        "throughput": {
+          "n": 5,
+          "missing": 0,
+          "mean": 71251517.57420123,
+          "stdev": 8240068.336373905,
+          "min": 61791065.26455765,
+          "max": 81188097.57441518
+        },
+        "elapsed_seconds": {
+          "n": 5,
+          "missing": 0,
+          "mean": 3.8169268240220844,
+          "stdev": 0.42852133005228116,
+          "min": 3.3063400180544704,
+          "max": 4.344243861967698
+        },
+        "rss_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 233218867.2,
+          "stdev": 13736487.278658666,
+          "min": 216698880,
+          "max": 249786368
+        },
+        "rss_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 210600235.37069392,
+          "stdev": 7156925.763493072,
+          "min": 200274273.97530866,
+          "max": 220347659.81538463
+        },
+        "cgroup_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 433697587.2,
+          "stdev": 20862398.567385547,
+          "min": 413155328,
+          "max": 469835776
+        },
+        "cgroup_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 335120963.023595,
+          "stdev": 10894055.095056139,
+          "min": 316053782.1234568,
+          "max": 348539421.42528737
+        },
+        "file_cache_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 171037807.47874907,
+          "stdev": 9679092.75646337,
+          "min": 162583539.3580247,
+          "max": 189861134.71264368
+        },
+        "kernel_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 1404442.884485051,
+          "stdev": 26911.460332179737,
+          "min": 1364473.6790123456,
+          "max": 1449230.712643678
+        },
+        "allocator_peak_bytes": {
+          "n": 0,
+          "missing": 5
+        },
+        "allocator_steady_bytes": {
+          "n": 0,
+          "missing": 5
+        },
+        "p50_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 4.5472084,
+          "stdev": 0.21431573754682604,
+          "min": 4.416696,
+          "max": 4.973542
+        },
+        "p95_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 26.364387400000002,
+          "stdev": 2.1898331385604344,
+          "min": 24.110408,
+          "max": 30.346174
+        },
+        "p99_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 255.0564508,
+          "stdev": 37.70410231530023,
+          "min": 212.538752,
+          "max": 307.541561
+        }
+      }
+    },
+    {
+      "baseline": "80c214ef14f620d93407454fc76ca01dd71fa25f",
+      "state": "cold",
+      "workload": "sequential",
+      "implementation": "rust",
+      "runs": 5,
+      "correct": 5,
+      "errors": [],
+      "throughput_units": [
+        "bytes/s"
+      ],
+      "metrics": {
+        "throughput": {
+          "n": 5,
+          "missing": 0,
+          "mean": 83390554.37368199,
+          "stdev": 4045545.162415464,
+          "min": 79206540.71923365,
+          "max": 88294773.34481248
+        },
+        "elapsed_seconds": {
+          "n": 5,
+          "missing": 0,
+          "mean": 3.2265025434084236,
+          "stdev": 0.15436114974542964,
+          "min": 3.0402190960012376,
+          "max": 3.3890566809568554
+        },
+        "rss_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 133813043.2,
+          "stdev": 4081746.021935534,
+          "min": 128430080,
+          "max": 138596352
+        },
+        "rss_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 100915210.17083292,
+          "stdev": 4149419.8645090475,
+          "min": 95565522.8235294,
+          "max": 105364903.25333333
+        },
+        "cgroup_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 352287948.8,
+          "stdev": 2385305.0285222977,
+          "min": 349962240,
+          "max": 355287040
+        },
+        "cgroup_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 261337249.16966996,
+          "stdev": 10395570.973020973,
+          "min": 251726727.52941176,
+          "max": 274384141.4736842
+        },
+        "file_cache_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 187511113.15934753,
+          "stdev": 7789920.908368688,
+          "min": 177602840.5479452,
+          "max": 197974986.10526314
+        },
+        "kernel_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 989306.7574737973,
+          "stdev": 21911.08026092004,
+          "min": 965150.1176470588,
+          "max": 1016736.4266666666
+        },
+        "allocator_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 70198627.2,
+          "stdev": 201967.12297044785,
+          "min": 69921064,
+          "max": 70405464
+        },
+        "allocator_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 60919493.57203151,
+          "stdev": 652708.7856019554,
+          "min": 59970655.52941176,
+          "max": 61638546.838709675
+        },
+        "p50_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 0.417014,
+          "stdev": 0.004126806174270849,
+          "min": 0.413109,
+          "max": 0.425002
+        },
+        "p95_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 111.6578432,
+          "stdev": 1.6097866046174412,
+          "min": 109.970639,
+          "max": 114.345773
+        },
+        "p99_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 245.13628799999998,
+          "stdev": 0.775063107481707,
+          "min": 244.341143,
+          "max": 246.427171
+        }
+      }
+    },
+    {
+      "baseline": "80c214ef14f620d93407454fc76ca01dd71fa25f",
+      "state": "warm",
+      "workload": "eviction",
+      "implementation": "go",
+      "runs": 5,
+      "correct": 5,
+      "errors": [],
+      "throughput_units": [
+        "bytes/s"
+      ],
+      "metrics": {
+        "throughput": {
+          "n": 5,
+          "missing": 0,
+          "mean": 65159698.7008702,
+          "stdev": 8674904.706282197,
+          "min": 53989358.20174615,
+          "max": 80163242.12165782
+        },
+        "elapsed_seconds": {
+          "n": 5,
+          "missing": 0,
+          "mean": 4.18985945917666,
+          "stdev": 0.5323492019686761,
+          "min": 3.3486102719325572,
+          "max": 4.972006798023358
+        },
+        "rss_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 223955353.6,
+          "stdev": 8960003.735551221,
+          "min": 217624576,
+          "max": 241266688
+        },
+        "rss_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 208024554.28719684,
+          "stdev": 5420385.813238825,
+          "min": 201290486.5185185,
+          "max": 215407488
+        },
+        "cgroup_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 435766067.2,
+          "stdev": 13325298.274788905,
+          "min": 416694272,
+          "max": 453599232
+        },
+        "cgroup_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 328491613.78776777,
+          "stdev": 5406830.82208168,
+          "min": 321896245.72839504,
+          "max": 335088387.3246753
+        },
+        "file_cache_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 166930245.25098816,
+          "stdev": 3665012.908146089,
+          "min": 162137146.8505747,
+          "max": 173286386.7012987
+        },
+        "kernel_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 1408046.2423564156,
+          "stdev": 14771.715965303896,
+          "min": 1394146.5747126436,
+          "max": 1435461.8181818181
+        },
+        "allocator_peak_bytes": {
+          "n": 0,
+          "missing": 5
+        },
+        "allocator_steady_bytes": {
+          "n": 0,
+          "missing": 5
+        },
+        "p50_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 4.6643042,
+          "stdev": 0.37312208835736344,
+          "min": 4.021812,
+          "max": 4.97916
+        },
+        "p95_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 25.7692666,
+          "stdev": 5.227198563345747,
+          "min": 18.313962,
+          "max": 33.364094
+        },
+        "p99_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 311.8063846,
+          "stdev": 129.66525881383322,
+          "min": 226.853925,
+          "max": 568.148404
+        }
+      }
+    },
+    {
+      "baseline": "80c214ef14f620d93407454fc76ca01dd71fa25f",
+      "state": "warm",
+      "workload": "eviction",
+      "implementation": "rust",
+      "runs": 5,
+      "correct": 5,
+      "errors": [],
+      "throughput_units": [
+        "bytes/s"
+      ],
+      "metrics": {
+        "throughput": {
+          "n": 5,
+          "missing": 0,
+          "mean": 87266032.31906828,
+          "stdev": 8133456.589685535,
+          "min": 73985956.40357366,
+          "max": 94252174.49374194
+        },
+        "elapsed_seconds": {
+          "n": 5,
+          "missing": 0,
+          "mean": 3.1048353692051025,
+          "stdev": 0.3092111777781563,
+          "min": 2.8480558400042355,
+          "max": 3.628194714896381
+        },
+        "rss_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 131012198.4,
+          "stdev": 4679152.22259732,
+          "min": 125018112,
+          "max": 137793536
+        },
+        "rss_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 95932135.25303361,
+          "stdev": 5286347.784077736,
+          "min": 90113920,
+          "max": 103349823.12328768
+        },
+        "cgroup_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 356604313.6,
+          "stdev": 1205807.303089113,
+          "min": 355221504,
+          "max": 358830080
+        },
+        "cgroup_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 256164462.49332866,
+          "stdev": 3797384.504482153,
+          "min": 252501120,
+          "max": 261734904.98630136
+        },
+        "file_cache_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 187388962.3554338,
+          "stdev": 3990325.528041875,
+          "min": 180401493.33333334,
+          "max": 191245516.8
+        },
+        "kernel_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 989270.3473889345,
+          "stdev": 10576.911498980367,
+          "min": 978432,
+          "max": 1007559.8904109589
+        },
+        "allocator_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 70312841.6,
+          "stdev": 7817.663528190504,
+          "min": 70302536,
+          "max": 70323640
+        },
+        "allocator_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 61700249.38956762,
+          "stdev": 2131274.624418385,
+          "min": 58025359.783783786,
+          "max": 64122088.827586204
+        },
+        "p50_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 0.41968880000000003,
+          "stdev": 0.0063324363526213266,
+          "min": 0.412906,
+          "max": 0.430393
+        },
+        "p95_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 47.0700554,
+          "stdev": 54.59238862996643,
+          "min": 2.493255,
+          "max": 114.71752
+        },
+        "p99_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 244.8791364,
+          "stdev": 0.5122947289377894,
+          "min": 244.232641,
+          "max": 245.756098
+        }
+      }
+    },
+    {
+      "baseline": "80c214ef14f620d93407454fc76ca01dd71fa25f",
+      "state": "warm",
+      "workload": "sequential",
+      "implementation": "go",
+      "runs": 5,
+      "correct": 5,
+      "errors": [],
+      "throughput_units": [
+        "bytes/s"
+      ],
+      "metrics": {
+        "throughput": {
+          "n": 5,
+          "missing": 0,
+          "mean": 74271359.0116707,
+          "stdev": 11998597.36019268,
+          "min": 56213256.02532551,
+          "max": 90491914.17399985
+        },
+        "elapsed_seconds": {
+          "n": 5,
+          "missing": 0,
+          "mean": 3.716947369230911,
+          "stdev": 0.6415151789327832,
+          "min": 2.9664026719983667,
+          "max": 4.775305239018053
+        },
+        "rss_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 227966976,
+          "stdev": 13480618.15156394,
+          "min": 205783040,
+          "max": 245366784
+        },
+        "rss_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 208713265.99321857,
+          "stdev": 6989215.699750694,
+          "min": 197277157.0526316,
+          "max": 217977462.15384614
+        },
+        "cgroup_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 426196992,
+          "stdev": 4711830.889450257,
+          "min": 420913152,
+          "max": 433303552
+        },
+        "cgroup_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 333410577.7549953,
+          "stdev": 3554064.155621644,
+          "min": 327783412.9892473,
+          "max": 338951309.7846154
+        },
+        "file_cache_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 171243632.7807591,
+          "stdev": 6039285.8446764685,
+          "min": 165777912.12307692,
+          "max": 182079200.5614035
+        },
+        "kernel_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 1412448.9402568014,
+          "stdev": 7812.221086163499,
+          "min": 1401272.430107527,
+          "max": 1421671.298245614
+        },
+        "allocator_peak_bytes": {
+          "n": 0,
+          "missing": 5
+        },
+        "allocator_steady_bytes": {
+          "n": 0,
+          "missing": 5
+        },
+        "p50_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 4.677971,
+          "stdev": 0.4510557922093453,
+          "min": 4.180034,
+          "max": 5.230672
+        },
+        "p95_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 27.978469399999998,
+          "stdev": 14.643052368891748,
+          "min": 15.369733,
+          "max": 56.427893
+        },
+        "p99_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 229.03977079999999,
+          "stdev": 58.23673590225615,
+          "min": 127.671909,
+          "max": 309.436987
+        }
+      }
+    },
+    {
+      "baseline": "80c214ef14f620d93407454fc76ca01dd71fa25f",
+      "state": "warm",
+      "workload": "sequential",
+      "implementation": "rust",
+      "runs": 5,
+      "correct": 5,
+      "errors": [],
+      "throughput_units": [
+        "bytes/s"
+      ],
+      "metrics": {
+        "throughput": {
+          "n": 5,
+          "missing": 0,
+          "mean": 81438250.64957969,
+          "stdev": 5274908.646359452,
+          "min": 74389610.20253077,
+          "max": 87548015.48946193
+        },
+        "elapsed_seconds": {
+          "n": 5,
+          "missing": 0,
+          "mean": 3.310158391809091,
+          "stdev": 0.2159142715075475,
+          "min": 3.066151237115264,
+          "max": 3.608507361030206
+        },
+        "rss_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 128143360,
+          "stdev": 5613954.349638123,
+          "min": 120356864,
+          "max": 135004160
+        },
+        "rss_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 92811646.20186871,
+          "stdev": 3312995.178229032,
+          "min": 88908449.3150685,
+          "max": 98707215.05882353
+        },
+        "cgroup_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 351041945.6,
+          "stdev": 3620202.834115547,
+          "min": 345309184,
+          "max": 354983936
+        },
+        "cgroup_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 243401682.58959228,
+          "stdev": 6150907.360100943,
+          "min": 234238344.76712328,
+          "max": 252170661.6470588
+        },
+        "file_cache_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 177836308.58183178,
+          "stdev": 3488595.073782687,
+          "min": 172464885.47945204,
+          "max": 182257990.49275362
+        },
+        "kernel_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 963407.4286076698,
+          "stdev": 16019.946425046946,
+          "min": 947751.3846153846,
+          "max": 990268.2352941176
+        },
+        "allocator_peak_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 70299806.4,
+          "stdev": 30725.382195181886,
+          "min": 70247688,
+          "max": 70341480
+        },
+        "allocator_steady_bytes": {
+          "n": 5,
+          "missing": 0,
+          "mean": 62668302.369199835,
+          "stdev": 1713593.8457956759,
+          "min": 60476502.451612905,
+          "max": 65338266.057142854
+        },
+        "p50_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 0.417338,
+          "stdev": 0.002478870226534664,
+          "min": 0.414791,
+          "max": 0.421897
+        },
+        "p95_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 113.0819858,
+          "stdev": 0.9833535470320705,
+          "min": 111.462591,
+          "max": 114.44993
+        },
+        "p99_ms": {
+          "n": 5,
+          "missing": 0,
+          "mean": 244.356749,
+          "stdev": 0.7017833907857925,
+          "min": 243.510923,
+          "max": 245.17005
+        }
+      }
+    }
+  ]
+}

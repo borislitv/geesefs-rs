@@ -1,0 +1,280 @@
+{
+  "accepted": false,
+  "runs": 2,
+  "gate_error_count": 229,
+  "limits": {
+    "schema": 1,
+    "repetitions": 5,
+    "memory_limit_mb": 64,
+    "entry_limit": 100000,
+    "dataset_bytes": 268435456,
+    "metadata_entries": 1024,
+    "concurrency": 4,
+    "random_operations": 512,
+    "random_block_bytes": 4096,
+    "writer_bytes": 16777216,
+    "cpu_quota_us": 100000,
+    "cpu_period_us": 100000,
+    "cgroup_memory_max_mb": 1024,
+    "states": [
+      "cold",
+      "warm"
+    ],
+    "workloads": [
+      "metadata",
+      "sequential",
+      "random",
+      "concurrent",
+      "eviction",
+      "writer_fsync",
+      "writer_failure"
+    ]
+  },
+  "provenance": {
+    "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d": {
+      "source_revision": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "binary_sha256": "add54e5847db108e61562b88d42d98808c9ae57bce92de22e18fc4a0758171ca",
+      "toolchain": "go version go1.22.2 linux/amd64"
+    },
+    "80c214ef14f620d93407454fc76ca01dd71fa25f": {
+      "source_revision": "80c214ef14f620d93407454fc76ca01dd71fa25f",
+      "binary_sha256": "e0f716ccfb8a81df289ae5fe72d834f0c5df7419cae519ebcc4351acf2f05587",
+      "toolchain": "go version go1.22.2 linux/amd64"
+    },
+    "rust": {
+      "source_revision": "572195abfd37db14dc13b23b33708ddfdf4d662c",
+      "binary_sha256": "1722f8b4af40cd4d8783f61a93f5802afedbbd97a26f1a58abd0735d405f5a5f",
+      "toolchain": "rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+    }
+  },
+  "groups": [
+    {
+      "baseline": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "state": "cold",
+      "workload": "concurrent",
+      "implementation": "go",
+      "runs": 1,
+      "correct": 1,
+      "errors": [],
+      "throughput_units": [
+        "bytes/s"
+      ],
+      "metrics": {
+        "throughput": {
+          "n": 1,
+          "missing": 0,
+          "mean": 39700.25016934208,
+          "stdev": 0.0,
+          "min": 39700.25016934208,
+          "max": 39700.25016934208
+        },
+        "elapsed_seconds": {
+          "n": 1,
+          "missing": 0,
+          "mean": 211.29861812503077,
+          "stdev": 0.0,
+          "min": 211.29861812503077,
+          "max": 211.29861812503077
+        },
+        "rss_peak_bytes": {
+          "n": 1,
+          "missing": 0,
+          "mean": 179347456,
+          "stdev": 0.0,
+          "min": 179347456,
+          "max": 179347456
+        },
+        "rss_steady_bytes": {
+          "n": 1,
+          "missing": 0,
+          "mean": 173585039.36,
+          "stdev": 0.0,
+          "min": 173585039.36,
+          "max": 173585039.36
+        },
+        "cgroup_peak_bytes": {
+          "n": 1,
+          "missing": 0,
+          "mean": 148791296,
+          "stdev": 0.0,
+          "min": 148791296,
+          "max": 148791296
+        },
+        "cgroup_steady_bytes": {
+          "n": 1,
+          "missing": 0,
+          "mean": 142980988.928,
+          "stdev": 0.0,
+          "min": 142980988.928,
+          "max": 142980988.928
+        },
+        "file_cache_steady_bytes": {
+          "n": 1,
+          "missing": 0,
+          "mean": 16184098.816,
+          "stdev": 0.0,
+          "min": 16184098.816,
+          "max": 16184098.816
+        },
+        "kernel_steady_bytes": {
+          "n": 1,
+          "missing": 0,
+          "mean": 1746485.248,
+          "stdev": 0.0,
+          "min": 1746485.248,
+          "max": 1746485.248
+        },
+        "allocator_peak_bytes": {
+          "n": 0,
+          "missing": 1
+        },
+        "allocator_steady_bytes": {
+          "n": 0,
+          "missing": 1
+        },
+        "p50_ms": {
+          "n": 1,
+          "missing": 0,
+          "mean": 439.386726,
+          "stdev": 0.0,
+          "min": 439.386726,
+          "max": 439.386726
+        },
+        "p95_ms": {
+          "n": 1,
+          "missing": 0,
+          "mean": 675.457437,
+          "stdev": 0.0,
+          "min": 675.457437,
+          "max": 675.457437
+        },
+        "p99_ms": {
+          "n": 1,
+          "missing": 0,
+          "mean": 874.390818,
+          "stdev": 0.0,
+          "min": 874.390818,
+          "max": 874.390818
+        }
+      }
+    },
+    {
+      "baseline": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "state": "cold",
+      "workload": "concurrent",
+      "implementation": "rust",
+      "runs": 1,
+      "correct": 1,
+      "errors": [],
+      "throughput_units": [
+        "bytes/s"
+      ],
+      "metrics": {
+        "throughput": {
+          "n": 1,
+          "missing": 0,
+          "mean": 42716.89554738175,
+          "stdev": 0.0,
+          "min": 42716.89554738175,
+          "max": 42716.89554738175
+        },
+        "elapsed_seconds": {
+          "n": 1,
+          "missing": 0,
+          "mean": 196.3768174748402,
+          "stdev": 0.0,
+          "min": 196.3768174748402,
+          "max": 196.3768174748402
+        },
+        "rss_peak_bytes": {
+          "n": 1,
+          "missing": 0,
+          "mean": 127680512,
+          "stdev": 0.0,
+          "min": 127680512,
+          "max": 127680512
+        },
+        "rss_steady_bytes": {
+          "n": 1,
+          "missing": 0,
+          "mean": 107469979.648,
+          "stdev": 0.0,
+          "min": 107469979.648,
+          "max": 107469979.648
+        },
+        "cgroup_peak_bytes": {
+          "n": 1,
+          "missing": 0,
+          "mean": 118288384,
+          "stdev": 0.0,
+          "min": 118288384,
+          "max": 118288384
+        },
+        "cgroup_steady_bytes": {
+          "n": 1,
+          "missing": 0,
+          "mean": 100401143.808,
+          "stdev": 0.0,
+          "min": 100401143.808,
+          "max": 100401143.808
+        },
+        "file_cache_steady_bytes": {
+          "n": 1,
+          "missing": 0,
+          "mean": 19775782.912,
+          "stdev": 0.0,
+          "min": 19775782.912,
+          "max": 19775782.912
+        },
+        "kernel_steady_bytes": {
+          "n": 1,
+          "missing": 0,
+          "mean": 1524506.624,
+          "stdev": 0.0,
+          "min": 1524506.624,
+          "max": 1524506.624
+        },
+        "allocator_peak_bytes": {
+          "n": 1,
+          "missing": 0,
+          "mean": 71042656,
+          "stdev": 0.0,
+          "min": 71042656,
+          "max": 71042656
+        },
+        "allocator_steady_bytes": {
+          "n": 1,
+          "missing": 0,
+          "mean": 45990068.13034623,
+          "stdev": 0.0,
+          "min": 45990068.13034623,
+          "max": 45990068.13034623
+        },
+        "p50_ms": {
+          "n": 1,
+          "missing": 0,
+          "mean": 428.682586,
+          "stdev": 0.0,
+          "min": 428.682586,
+          "max": 428.682586
+        },
+        "p95_ms": {
+          "n": 1,
+          "missing": 0,
+          "mean": 434.69559,
+          "stdev": 0.0,
+          "min": 434.69559,
+          "max": 434.69559
+        },
+        "p99_ms": {
+          "n": 1,
+          "missing": 0,
+          "mean": 446.837941,
+          "stdev": 0.0,
+          "min": 446.837941,
+          "max": 446.837941
+        }
+      }
+    }
+  ]
+}

@@ -5,8 +5,10 @@
 The bounded core fix and regression checks are complete. Whole-filesystem
 compatibility and performance remain **UNACCEPTED**. A subsequent bounded mounted
 diagnostic still averaged about 404 seconds for Rust versus 3.5 for Go on 256 MiB;
-it timed out with only five completed runs. The deterministic fix did not resolve
-the measured throughput regression. See [all results and provenance](performance.md).
+it timed out with only five completed runs. This deterministic fix alone did not
+resolve the regression. The later [overlapping-fill ownership repair](read-fill-pressure.md)
+then completed all 80 selected measurements with 3.1–3.4-second Rust mean times,
+while p95/full acceptance remain open. See [all results and provenance](performance.md).
 Existing unfavorable receipts are unchanged. No cache budgets, FUSE negotiation,
 dependencies or production mounts were changed.
 
@@ -101,6 +103,7 @@ For the existing public fuser 0.18 API:
 Pattern ownership remains per inode, whereas Go tracks per open file handle;
 interleaved independent readers can affect this heuristic. This bounded fix does
 not claim full per-handle parity. The subsequent release/mounted diagnostic
-confirmed that an additional bottleneck remains, without establishing its cause.
-Preserve both incomplete attempts. Diagnose actual mounted behavior before
-repeating a long matrix or revisiting acceptance.
+confirmed an additional bottleneck at that stage. Actual FUSE tracing subsequently
+identified and repaired overlapping-fill pressure and detached cache publication;
+see the follow-up above. Preserve both earlier incomplete attempts alongside the
+successful selected read measurements and their remaining tail-latency regression.

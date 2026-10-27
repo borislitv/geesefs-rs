@@ -48,11 +48,13 @@ foreground binary integrates fuser, SDK-backed S3, bounded payload ownership,
 paged namespace operations and versioned sparse/truncate/fsync writes. Actual
 disposable Rust/Go mounts exercised rsync, HTTP full/Range and writer paths.
 The compatibility runner still fails: actual-service optional paths, hardlink
-emulation and a Go failure-recovery check are unresolved. The full-matrix attempt
-hit its 90-minute deadline at 42/280 results: Rust used less sampled RSS in those
-groups, but metadata and sequential reads were substantially slower. A subsequent
-adaptive-read fix passes deterministic regressions, but the bounded mounted repeat
-still showed a severe sequential slowdown and timed out. All results are retained
+emulation and a Go failure-recovery check are unresolved. Earlier attempts exposed
+a severe sequential slowdown. Actual FUSE tracing identified overlapping fills
+evicting each other's cache; the [ownership repair](docs/read-fill-pressure.md)
+now completes all 80 selected sequential/eviction results with correct bytes.
+Mean throughput is higher and sampled RSS/cgroup memory lower than both Go
+baselines in all eight groups, but p95 latency is worse and full-matrix/compatibility
+acceptance remains open. All favorable and unfavorable results are retained
 in [performance](docs/performance.md). Overall acceptance is
 **UNACCEPTED**. Owned cpu+memory cgroup execution works without changing the
 hosting service's controls.

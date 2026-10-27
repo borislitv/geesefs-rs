@@ -336,3 +336,25 @@ Transitive binary notices, full review and parent commit/push/draft PR remain.
 - Diagnosis and invariants: docs/read-fill-pressure.md. Temporary trace code is
   removed. Fresh committed-source paired measurement is the next verification;
   short uncontrolled scratch timings are not comparative acceptance evidence.
+
+## 2026-10-27: measured overlap repair and publication
+
+- Frozen implementation source 572195abfd37db14dc13b23b33708ddfdf4d662c completed
+  all 80 selected sequential/eviction results: two Go baselines, cold/warm, five
+  alternating repetitions. All full-byte checks passed within the 1,200-second
+  deadline. Mean Rust 256 MiB time is 3.087–3.375 seconds; all eight group mean
+  throughputs and peak/steady RSS/cgroup memory favor Rust. This resolves the
+  previous roughly 404-second throughput collapse without changed budgets.
+- A separate concurrent smoke pair passed: Go 211.299 seconds, Rust 196.377;
+  this is not repeated concurrent acceptance. Both owned units stopped; no owned
+  FUSE mounts remain. Original raw evidence is preserved in private ignored output.
+- P95 is still worse (Rust 47–113 ms versus Go 20–28 ms), p99 is mixed, Go heap
+  series/full compatibility are missing and the full 280-result matrix is not
+  complete. The two diagnostic gates remain false (261 and 229 errors). No
+  overall or production acceptance is claimed.
+- Added reviewed public group-summary JSON with all accounting/latency metrics,
+  counts, dispersion, missing values, exact public limits and executable hashes.
+  No mount arguments/private identifiers are exported. The summary keeps run
+  errors for diagnosis, so publication requires review; these groups have none.
+  A deliberate removal of the limits whitelist failed its Python regression;
+  restored it. Existing-output export rejection also preserved the file hash.

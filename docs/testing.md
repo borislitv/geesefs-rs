@@ -14,7 +14,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
 ```
 
-The 126 Rust integration tests cover actual loopback SDK HTTP requests and signed
+The 130 Rust integration tests cover actual loopback SDK HTTP requests and signed
 extension transport, metadata/schema contracts, configuration, inode/namespace
 state, dirty generations and concurrency. The performance-gate test invokes 12
 Python evidence/summary tests. Five additional Python tests cover provenance and
@@ -98,7 +98,7 @@ deterministic library/contract/gate tests only, not mounted acceptance.
 
 ## Local verification record
 
-- Formatting, warning-denying clippy and all 126 Rust tests (including the twelve
+- Formatting, warning-denying clippy and all 130 Rust tests (including the twelve
   Python evidence/summary cases): passed after scheduling, streaming, adaptive
   read-window and negative-cache changes.
   `cargo build` passed in the prior cancellation tranche; current full-target
@@ -189,3 +189,17 @@ a restored full-history-condition mutation failed the seek case. These fixtures
 prove the corrected heuristic contract, not mounted speed: the subsequent bounded
 measurement still showed the severe regression. The summary test also rejected
 a deliberate mutation that counted failed runs as correct; the fault was restored.
+
+The actual-FUSE overlap follow-up adds four public read regressions, bringing the
+suite to 130: coalescing under large-window pressure with a cancelled follower,
+publication after another inode replaces the cache, concurrent disjoint windows
+and cancelled-owner follower recovery with exact owner charging. Original-code
+and deliberate mutation failures were observed for all four scenarios; all faults
+were restored. See [mechanism and invariants](read-fill-pressure.md).
+
+Committed source 572195abfd37db14dc13b23b33708ddfdf4d662c then completed all 80
+selected paired sequential/eviction results and one concurrent pair, all byte-correct.
+The throughput collapse is resolved in those measurements, with lower mean RSS
+and cgroup memory. P95 remains worse; full compatibility/performance gates remain
+false. [Performance](performance.md) retains complete groups and both favorable
+and unfavorable accounting/latency results rather than replacing earlier receipts.

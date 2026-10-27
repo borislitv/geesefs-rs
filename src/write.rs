@@ -651,6 +651,23 @@ impl Drop for UploadGuard {
     }
 }
 
+/// A fully visible base range with no dirty overlay can keep the backend's one
+/// charged allocation, including its full Range/body/checksum validation.
+pub(crate) fn remote_only(snapshot: &Snapshot, offset: u64, length: usize) -> bool {
+    snapshot.remote.as_ref().is_some_and(|remote| {
+        (length as u64)
+            <= snapshot
+                .size
+                .min(snapshot.visible)
+                .min(remote.size)
+                .saturating_sub(offset)
+            && !snapshot
+                .extents
+                .range(..offset + length as u64)
+                .any(|(_, extent)| extent.end > offset)
+    })
+}
+
 pub async fn materialize(
     store: &Arc<dyn Store>,
     snapshot: &Snapshot,
@@ -658,6 +675,17 @@ pub async fn materialize(
     length: usize,
     budget: &Budget,
 ) -> Result<Block> {
+    if remote_only(snapshot, offset, length) {
+        return store
+            .read_range(
+                &snapshot.key,
+                offset,
+                length,
+                snapshot.remote.as_ref().unwrap(),
+                budget,
+            )
+            .await;
+    }
     let mut data = budget.reserve(length).await?.zeroed();
     if let Some(remote) = &snapshot.remote {
         let available = snapshot

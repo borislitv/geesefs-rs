@@ -58,6 +58,7 @@ pub struct EffectiveBudgets {
     pub requested_small_window_bytes: usize,
     pub requested_large_window_bytes: usize,
     pub max_effective_window_bytes: usize,
+    pub max_overlay_window_bytes: usize,
     pub read_parallel_chunk_bytes: usize,
     pub upload_chunk_bytes: usize,
     pub max_read_tasks_per_window: usize,
@@ -86,8 +87,7 @@ impl Filesystem {
             .data
             .limit()
             .saturating_sub(MAX_IO)
-            .min(u32::MAX as usize - MAX_IO)
-            / 2;
+            .min(u32::MAX as usize - MAX_IO);
         EffectiveBudgets {
             payload_limit_bytes: self.ingress.limit() + self.data.limit() + self.flush_lane.limit(),
             data_shared_bytes: self.data.limit(),
@@ -101,6 +101,7 @@ impl Filesystem {
             requested_small_window_bytes: self.config.read_ahead_small * 1024,
             requested_large_window_bytes: self.config.read_ahead_large * 1024,
             max_effective_window_bytes: window,
+            max_overlay_window_bytes: window / 2,
             read_parallel_chunk_bytes: (self.config.read_ahead_parallel * 1024).min(window),
             upload_chunk_bytes: crate::upload_body::CHUNK_SIZE,
             max_read_tasks_per_window: self.config.max_requests,
@@ -646,7 +647,7 @@ impl Filesystem {
             return Err(Error::Fs(libc::EINVAL));
         }
         let node = self.node(ino)?;
-        let (size, clean, generation, version, etag) = {
+        let (size, clean, generation, version, etag, mut single_buffer) = {
             let state = node.state.lock().unwrap();
             use std::hash::{Hash, Hasher};
             let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -658,6 +659,10 @@ impl Filesystem {
                 hash.finish(),
                 state.version,
                 state.remote.as_ref().map(|remote| remote.etag.clone()),
+                state.version == state.durable
+                    && state.extents.is_empty()
+                    && state.remote.is_some()
+                    && state.visible_remote_size >= state.size,
             )
         };
         let length = length.min(size.saturating_sub(offset) as usize);
@@ -696,18 +701,30 @@ impl Filesystem {
         } else {
             offset
         };
-        if offset - start + length as u64 > budgets.max_effective_window_bytes as u64 {
+        let window_limit = if single_buffer {
+            budgets.max_effective_window_bytes
+        } else {
+            budgets.max_overlay_window_bytes
+        };
+        if offset - start + length as u64 > window_limit as u64 {
             start = offset;
         }
         let relative = (offset - start) as usize;
-        let prefetch = if clean {
+        let mut prefetch = if clean {
             window
                 .max(relative + length)
-                .min(budgets.max_effective_window_bytes)
+                .min(window_limit)
                 .min(size.saturating_sub(start) as usize)
         } else {
             length
         };
+        let chunk = budgets.read_parallel_chunk_bytes.max(1);
+        // A budget-limited large window should end on a configured parallel
+        // chunk boundary, not add another partial GET at every refill. EOF keeps
+        // its exact tail, and the caller's requested range always fits.
+        if clean && prefetch < window && start + (prefetch as u64) < size && prefetch >= chunk {
+            prefetch = (prefetch / chunk * chunk).max(relative + length);
+        }
         // FUSE may issue neighboring reads before the first window completes.
         // Waiting readers must not reserve another whole window and evict the
         // very fill they can reuse. Recheck after wakeup and after taking ownership.
@@ -739,16 +756,33 @@ impl Filesystem {
         };
         // Atomically admit all payload/GET/output buffers before the first
         // allocation; otherwise competing readers could each pin half a lane.
-        let mut charge = self.admit(2 * prefetch + length).await?;
+        let (mut charge, snapshot) = loop {
+            let charge = self
+                .admit((if single_buffer { 1 } else { 2 }) * prefetch + length)
+                .await?;
+            // Capture payload owners only after admission. Pinning dirty extents
+            // while waiting for their own permits would deadlock a pressured read.
+            let snapshot = read::snapshot(&node)?;
+            let available = (snapshot.size.saturating_sub(start)).min(prefetch as u64) as usize;
+            if single_buffer && !write::remote_only(&snapshot, start, available) {
+                drop(snapshot);
+                drop(charge);
+                single_buffer = false;
+                prefetch = prefetch.min(budgets.max_overlay_window_bytes);
+                if prefetch < window && start + (prefetch as u64) < size && prefetch >= chunk {
+                    prefetch = (prefetch / chunk * chunk).max(relative + length);
+                }
+                continue;
+            }
+            break (charge, Arc::new(snapshot));
+        };
         let mut result = charge.split(length).zeroed();
-        let snapshot = Arc::new(read::snapshot(&node)?);
         let cacheable = clean
             && snapshot.version == version
             && snapshot.remote.as_ref().map(|head| head.etag.clone()) == etag;
         // The snapshot may have shrunk while admission flushed another generation.
         let available = length.min(snapshot.size.saturating_sub(offset) as usize);
         let end = (start + prefetch as u64).min(snapshot.size);
-        let chunk = budgets.read_parallel_chunk_bytes.max(1);
         let mut tasks = tokio::task::JoinSet::new();
         let mut next = start;
         while next < end || !tasks.is_empty() {
@@ -756,7 +790,7 @@ impl Filesystem {
                 let at = next;
                 let amount = (end - next).min(chunk as u64) as usize;
                 next += amount as u64;
-                let mut owner = charge.split(2 * amount);
+                let mut owner = charge.split((if single_buffer { 1 } else { 2 }) * amount);
                 let (store, snapshot) = (self.store.clone(), snapshot.clone());
                 tasks.spawn(async move {
                     let local = Budget::new(2 * amount)?;

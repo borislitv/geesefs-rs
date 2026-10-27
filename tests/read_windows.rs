@@ -6,6 +6,86 @@ use support::MemoryStore;
 const MIB: usize = 1024 * 1024;
 
 #[tokio::test]
+async fn clean_sequential_windows_use_single_owned_buffers_and_whole_parallel_chunks() {
+    const STEP: usize = 128 * 1024;
+    let expected: Vec<u8> = (0..64 * MIB)
+        .map(|offset| ((offset / (64 * 1024)) % 251) as u8)
+        .collect();
+    let store = MemoryStore::new();
+    store.seed("file", &expected);
+    let mut config = MemoryStore::config(64);
+    config.large_read_cutoff = 0;
+    let fs = Filesystem::new(config, store.clone()).unwrap();
+    let node = fs.lookup(1, "file").await.unwrap();
+    for offset in (0..expected.len()).step_by(STEP) {
+        let block = fs.read(node.ino, offset as u64, STEP).await.unwrap();
+        assert_eq!(block.as_slice(), &expected[offset..offset + STEP]);
+        assert!(fs.effective_budgets().data_used_bytes <= fs.effective_budgets().data_shared_bytes);
+        if offset == 0 {
+            assert_eq!(
+                *store.read_ranges.lock().unwrap(),
+                [(0, 20 * MIB), (20 * MIB as u64, 20 * MIB)]
+            );
+            assert_eq!(fs.effective_budgets().data_used_bytes, 40 * MIB + STEP);
+        }
+    }
+    assert_eq!(
+        *store.read_ranges.lock().unwrap(),
+        [
+            (0, 20 * MIB),
+            (20 * MIB as u64, 20 * MIB),
+            (40 * MIB as u64, 20 * MIB),
+            (60 * MIB as u64, 4 * MIB),
+        ]
+    );
+    assert_eq!(fs.effective_budgets().payload_limit_bytes, 64 * MIB);
+    assert_eq!(
+        store.read_materialization_peak.load(Ordering::Relaxed),
+        20 * MIB,
+        "a clean 20 MiB GET must not also own a redundant 20 MiB overlay buffer"
+    );
+}
+
+#[tokio::test]
+async fn clean_read_waiting_for_admission_rechecks_a_truncate_regrow_before_using_one_buffer() {
+    use std::{future::Future, task::Poll, time::Duration};
+    let store = MemoryStore::new();
+    store.seed("file", &vec![b'x'; 8 * MIB]);
+    store.seed("pin", &vec![b'p'; MIB]);
+    let mut config = MemoryStore::config(16);
+    config.large_read_cutoff = 0;
+    let fs = Filesystem::new(config, store.clone()).unwrap();
+    let node = fs.lookup(1, "file").await.unwrap();
+    let pin = fs.lookup(1, "pin").await.unwrap();
+    let pinned = fs.read(pin.ino, 0, MIB).await.unwrap();
+    let mut read = Box::pin(fs.read(node.ino, 0, 128 * 1024));
+    std::future::poll_fn(|cx| {
+        assert!(read.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    fs.truncate(node.ino, (2 * MIB) as u64).unwrap();
+    fs.truncate(node.ino, (8 * MIB) as u64).unwrap();
+    drop(pinned);
+    let block = tokio::time::timeout(Duration::from_secs(3), read)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(block.as_slice(), vec![b'x'; 128 * 1024]);
+    let hole = fs
+        .read(node.ino, (2 * MIB) as u64, 128 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(hole.as_slice(), vec![0; 128 * 1024]);
+    assert!(
+        store.read_materialization_peak.load(Ordering::Relaxed)
+            <= fs.effective_budgets().data_shared_bytes,
+        "GET output plus already allocated overlay scratch must fit the data lane"
+    );
+    assert!(fs.effective_budgets().data_used_bytes <= fs.effective_budgets().data_shared_bytes);
+}
+
+#[tokio::test]
 async fn overlapping_large_read_fills_share_work_under_pressure_and_cancelled_waiters_do_not_evict_it()
  {
     use std::{future::Future, sync::Arc, task::Poll, time::Duration};
@@ -30,12 +110,12 @@ async fn overlapping_large_read_fills_share_work_under_pressure_and_cancelled_wa
         async move { fs.read(ino, (20 * MIB) as u64, STEP).await }
     });
     tokio::time::timeout(Duration::from_secs(3), async {
-        while store.read_calls.load(Ordering::Relaxed) < 6 {
+        while store.read_calls.load(Ordering::Relaxed) < 7 {
             store.read_started.notified().await;
         }
     })
     .await
-    .expect("the promoted window's two parallel chunks must start");
+    .expect("the promoted window's three EOF-bounded parallel chunks must start");
     let mut cancelled = Box::pin(fs.read(node.ino, (20 * MIB + STEP) as u64, STEP));
     let mut follower = Box::pin(fs.read(node.ino, (20 * MIB + 2 * STEP) as u64, STEP));
     std::future::poll_fn(|cx| {
@@ -62,8 +142,9 @@ async fn overlapping_large_read_fills_share_work_under_pressure_and_cancelled_wa
     );
     assert_eq!(
         store.read_calls.load(Ordering::Relaxed),
-        6,
-        "overlapping kernel-sized reads must reuse one promoted window, not evict and reload it"
+        7,
+        "overlapping kernel-sized reads must reuse one promoted window, not evict and reload it: {:?}",
+        store.read_ranges.lock().unwrap()
     );
     let budgets = fs.effective_budgets();
     assert_eq!(budgets.payload_limit_bytes, 64 * MIB);
@@ -75,24 +156,25 @@ async fn in_flight_window_publishes_into_the_current_policy_after_other_inode_pr
     use std::{future::Future, sync::Arc, task::Poll, time::Duration};
     const STEP: usize = 128 * 1024;
     let store = MemoryStore::new();
-    store.seed("file", &vec![b'x'; 64 * MIB]);
-    store.seed("other", &vec![b'y'; MIB]);
-    let fs = store.filesystem(64);
+    store.seed("file", &vec![b'x'; 8 * MIB]);
+    store.seed("other", &vec![b'y'; MIB / 2]);
+    store.seed("pin", &vec![b'p'; MIB / 2]);
+    let mut config = MemoryStore::config(16);
+    config.large_read_cutoff = 0;
+    let fs = Filesystem::new(config, store.clone()).unwrap();
     let node = fs.lookup(1, "file").await.unwrap();
     let other = fs.lookup(1, "other").await.unwrap();
-    for offset in (0..20 * MIB).step_by(STEP) {
-        let block = fs.read(node.ino, offset as u64, STEP).await.unwrap();
-        assert_eq!(block.as_slice(), vec![b'x'; STEP]);
-    }
+    let pin = fs.lookup(1, "pin").await.unwrap();
+    let pinned = fs.read(pin.ino, 0, MIB / 2).await.unwrap();
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
     *store.read_gate.lock().unwrap() = Some(gate.clone());
     let first = tokio::spawn({
         let fs = fs.clone();
         let ino = node.ino;
-        async move { fs.read(ino, (20 * MIB) as u64, STEP).await }
+        async move { fs.read(ino, 0, STEP).await }
     });
     tokio::time::timeout(Duration::from_secs(3), async {
-        while store.read_calls.load(Ordering::Relaxed) < 6 {
+        while store.read_calls.load(Ordering::Relaxed) < 2 {
             store.read_started.notified().await;
         }
     })
@@ -111,19 +193,18 @@ async fn in_flight_window_publishes_into_the_current_policy_after_other_inode_pr
         .unwrap()
         .unwrap();
     assert_eq!(first.as_slice(), vec![b'x'; STEP]);
+    drop(first);
+    drop(pinned);
     let competing = tokio::time::timeout(Duration::from_secs(3), competing)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(competing.as_slice(), vec![b'y'; STEP]);
-    let following = fs
-        .read(node.ino, (20 * MIB + STEP) as u64, STEP)
-        .await
-        .unwrap();
+    let following = fs.read(node.ino, STEP as u64, STEP).await.unwrap();
     assert_eq!(following.as_slice(), vec![b'x'; STEP]);
     assert_eq!(
         store.read_calls.load(Ordering::Relaxed),
-        7,
+        3,
         "a concurrent policy replacement must not orphan the completed window"
     );
     assert!(fs.effective_budgets().data_used_bytes <= fs.effective_budgets().data_shared_bytes);
@@ -457,14 +538,18 @@ async fn cache_hit_never_pins_the_bytes_needed_by_an_earlier_fifo_miss() {
         .await;
     }
     let store = MemoryStore::new();
-    for (key, byte) in [("pin", b'p'), ("cached", b'c'), ("large", b'l')] {
-        store.seed(key, &vec![byte; 2 * MIB]);
+    for (key, byte, size) in [
+        ("pin", b'p', 2 * MIB),
+        ("cached", b'c', 2 * MIB),
+        ("large", b'l', 4 * MIB),
+    ] {
+        store.seed(key, &vec![byte; size]);
     }
     let mut config = MemoryStore::config(16);
-    config.read_ahead = 2048;
-    config.read_ahead_small = 2048;
-    config.read_ahead_large = 2048;
-    config.read_ahead_parallel = 2048;
+    config.read_ahead = 4096;
+    config.read_ahead_small = 4096;
+    config.read_ahead_large = 4096;
+    config.read_ahead_parallel = 4096;
     let fs = Filesystem::new(config, store.clone()).unwrap();
     assert_eq!(fs.effective_budgets().data_shared_bytes, 5 * MIB);
     let pin = fs.lookup(1, "pin").await.unwrap();
@@ -473,8 +558,8 @@ async fn cache_hit_never_pins_the_bytes_needed_by_an_earlier_fifo_miss() {
     // This externally owned reply leaves four MiB free after cache eviction.
     let owner = fs.read(pin.ino, 0, MIB).await.unwrap();
     assert!(owner.as_slice().iter().all(|b| *b == b'p'));
-    // Queue two full five-MiB reservations in this order. Neither has a cache
-    // handle yet; the second resets the policy before the first is admitted.
+    // Queue a three-MiB cache fill, then a full five-MiB large reservation.
+    // The latter resets the policy and cannot progress while the fill is pinned.
     let mut fill = Box::pin(fs.read(cached.ino, 0, MIB));
     pending(fill.as_mut()).await;
     let mut older = Box::pin(fs.read(large.ino, 0, MIB));

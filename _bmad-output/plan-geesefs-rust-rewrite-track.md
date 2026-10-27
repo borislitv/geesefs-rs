@@ -358,3 +358,23 @@ Transitive binary notices, full review and parent commit/push/draft PR remain.
   errors for diagnosis, so publication requires review; these groups have none.
   A deliberate removal of the limits whitelist failed its Python regression;
   restored it. Existing-output export rejection also preserved the file hash.
+
+## 2026-10-27: sequential request shape and redundant clean buffers
+
+- Actual-mount SDK/backend timing separated headers/body. The preceding Rust
+  path issued 26 GETs versus 17 for Go on the same 256 MiB diagnostic object;
+  Range response preparation typically cost about 100 ms. This short trace is
+  diagnosis, not a repeated performance result. Temporary trace code was removed.
+- Clean remote-only materialization now retains the backend's one charged buffer
+  rather than allocating and copying a second window. Dirty/hole ranges retain
+  double-buffer reservation. Effective budgets report separate clean and overlay
+  bounds; budget-limited large windows align to configured parallel chunks.
+- Recheck the post-admission snapshot and reacquire conservative reservation if a
+  writer changed the range. A controlled truncate/regrow race proves scratch/GET
+  ownership stays in the lane and holes remain zero. No configured limits,
+  requested windows, concurrency or integrity checks were lowered.
+- Two new public regressions and updated allocation-shape pressure fixtures have
+  observed failure sensitivity. Redundant-copy, missing recheck, detached-policy
+  and pre-admission cache-pin mutations all failed, then were restored. All 132
+  Rust tests, formatting and warning-denying Clippy pass. Details are in
+  docs/clean-read-windows.md; frozen-source paired measurements are next.

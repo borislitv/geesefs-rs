@@ -86,6 +86,17 @@ Owned perf/syscall diagnostics and a three-repeat unchanged-binary allocator A/B
 preserve a partially confirmed allocation cost, not a completed performance fix.
 See docs/immutable-read-results-20261027.md and docs/immutable-read-dataset.md.
 
+The charged-view, requested-reply and body-prefix checkpoints retain their
+separate matched repeats. The subsequent cache-lookup repair at
+`3b94a76abc422f6e944c9e596fa971cf19b03858` completes another forty phases with
+120,000 full file checks, unchanged native data, 280 recomputed CPU windows and
+460 verified artifacts. Mean throughput/CPU/p99 improve against exact body-prefix
+source, but warm repetitions are mixed and RSS rises slightly; Go still wins
+speed/CPU/tails. Three separate profiles pass 9,000 further file checks and native
+verification while showing reduced selected BTree/cache leaf shares, not a whole
+performance fix. See docs/cached-fragment-lookup.md and its numeric/quality/profile
+receipts.
+
 Compatibility and comparative performance are **UNACCEPTED**. Delivery is a draft
 for review, not a complete port or permission to replace a served mount. Reduce
 the remaining tail latency and metadata cost, resolve compatibility gaps and Go

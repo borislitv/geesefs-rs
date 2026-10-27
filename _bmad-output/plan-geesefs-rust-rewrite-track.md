@@ -4,10 +4,12 @@ Latest checkpoint: the sealed native, charged-view and requested-reply matched
 comparisons retain equivalent bytes and adverse CPU/throughput/tail results.
 Incremental conditional-GET publication has real HTTP/filesystem regressions,
 178 passing Rust cases, seven assertion-sensitive faults and complete ownership/
-checksum barriers. Its forty-phase matched run improves p99 versus prior Rust but
-regresses throughput, CPU, steady RSS and p50/p95. Stage 10 and overall
-compatibility/performance acceptance remain incomplete. See
-`docs/streamed-read-body.md` and the appended ub-mode action log.
+checksum barriers. Its adverse comparison remains retained. Removing the futile
+whole-span cache scan then improves mean throughput/CPU/p99 against exact prior
+Rust in forty matched phases, but warm results are mixed, RSS slightly higher
+and both Go references still faster. Stage 10 and overall compatibility/performance
+acceptance remain incomplete. See `docs/cached-fragment-lookup.md` and the appended
+ub-mode action log.
 
 Status format: [ ] - incomplete, [X] - completed. Updated: 2026-10-26.
 The parent owns BMAD orchestration, final review and all VCS delivery.

@@ -1,0 +1,129 @@
+{
+  "schema": "cached-fragment-lookup-comparison-summary-v1",
+  "accepted": false,
+  "comparison_valid": true,
+  "source_commit": "3b94a76abc422f6e944c9e596fa971cf19b03858",
+  "scope": "additional explicit xattr/forced-stat/full-payload workload; plain-list/stat Go failure retained separately",
+  "runs": 40,
+  "file_checks_verified": 120000,
+  "cpu_windows_recomputed": 280,
+  "artifact_count_verified": 460,
+  "elapsed_seconds": 762.0395452659577,
+  "raw_source_report_sha256": "1a33beafe8e3885932af7c8df94c99a022145842859158ac08ddb40656916447",
+  "evidence_index_sha256": "a99fa57b2b614212bfd84da67a56ba333f242947913c6df45ee7b729c3d07200",
+  "compiled_inputs_verified_against_commits": true,
+  "fixture": {
+    "server": "SeaweedFS 4.51",
+    "files": 3000,
+    "bytes": 8298727528,
+    "listings": 97,
+    "manifest_sha256": "7bd537c12c702a614b51383a28ed167c86dbf2d964696525cdf8b4c2871555a1",
+    "native_full_hashes_before": 3000,
+    "native_full_hashes_after": 3000,
+    "native_exact_listings_after": 97,
+    "read_only_mutations_rejected": 4,
+    "wrong_if_match_rejected": true
+  },
+  "limits": {
+    "filesystem_cpu_quota": 2,
+    "filesystem_cgroup_memory_bytes": 4294967296,
+    "backend_cpu_quota": 4,
+    "backend_cgroup_memory_bytes": 6442450944,
+    "configured_payload_budget_MiB": 512,
+    "entry_limit": 100000,
+    "reader_threads": 4,
+    "read_chunk_bytes": 131072,
+    "allocator": "unchanged default; no candidate tuning",
+    "fresh": "new mount/process; host and backend caches not controlled or globally dropped",
+    "warm-revisit": "complete dataset revisited in the same mount; larger than daemon cache",
+    "metadata": "all stored xattrs checked, GNU stat --cached=never, ordinary stat and full payload; extra work included in whole CPU"
+  },
+  "provenance": {
+    "go-experimental": {
+      "source_revision": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "binary_sha256": "7ad836e0bdd23ea279bb236627e9b130d11c174ae649c7582213a83e5d11a28b",
+      "toolchain": "go1.25.9"
+    },
+    "go-packaged": {
+      "source_revision": "80c214ef14f620d93407454fc76ca01dd71fa25f",
+      "binary_sha256": "e04492363d29985ab1f74521482a01a3c6f7fdeeed35ad1ba0faa991370f4683",
+      "toolchain": "go1.25.9"
+    },
+    "rust-body-prior": {
+      "source_revision": "20a9dcd2f125e30f251e02510fe3f44501a290f6",
+      "binary_sha256": "0e2dccb00faf2356ba89c0f486250efb3193a82b94d92f193e98810a1692e32d"
+    },
+    "rust": {
+      "source_revision": "3b94a76abc422f6e944c9e596fa971cf19b03858",
+      "binary_sha256": "0e5a852d7fe4812eedb05cb11c74da67bdbe428764dbddd7f988daa91ddca07b",
+      "compiled_input_tree_sha256": "e80b7aaab82091be42dd8f3f3df3d0cf688391957550762a4275c514744de9d0"
+    }
+  },
+  "units": "decimal MB; CPU/elapsed seconds; syscall milliseconds; five-phase means rounded to 6 decimals",
+  "rss_scope": "observed peak and mean final fifth, not stationary steady state; combined RSS is pointwise daemon plus client and may double-count shared pages",
+  "memory_scope": "filesystem cgroup includes controller/client/file/kernel memory; native backend has a separate cgroup; component peaks need not coincide",
+  "missing": ["Go peak/steady heap time series", "native backend request metrics: configured endpoint refused connections"],
+  "mean_columns": [
+    "throughput_MB_second", "daemon_rss_peak_MB", "daemon_rss_steady_MB", "cgroup_cpu_seconds",
+    "daemon_cpu_user_seconds", "daemon_cpu_system_seconds", "client_cpu_user_seconds", "client_cpu_system_seconds",
+    "read_syscall_ms_p50", "read_syscall_ms_p95", "read_syscall_ms_p99", "listing_seconds",
+    "metadata_roundtrip_seconds", "whole_wall_seconds", "read_seconds",
+    "client_rss_peak_MB", "client_rss_steady_MB", "daemon_client_rss_peak_MB", "daemon_client_rss_steady_MB",
+    "allocator_peak_MB", "allocator_steady_MB", "cgroup_current_peak_MB", "cgroup_current_steady_MB",
+    "cgroup_anon_peak_MB", "cgroup_anon_steady_MB", "cgroup_file_peak_MB", "cgroup_file_steady_MB",
+    "cgroup_kernel_peak_MB", "cgroup_kernel_steady_MB", "backend_rss_peak_MB", "backend_rss_steady_MB",
+    "backend_cgroup_current_peak_MB", "backend_cgroup_current_steady_MB", "backend_backend_cpu_seconds"
+  ],
+  "dispersion_columns": ["throughput_MB_second", "read_syscall_ms_p99", "cgroup_cpu_seconds"],
+  "dispersion_values": ["population_standard_deviation", "minimum", "maximum"],
+  "groups": [
+    {
+      "implementation": "go-experimental", "state": "fresh", "runs": 5,
+      "means": [550.37773, 1312.101171, 1223.334054, 32.944503, 5.476, 10.094, 8.061296, 8.182814, 0.286026, 1.552247, 12.995046, 0.515466, 1.201055, 17.343232, 15.325709, 57.223578, 53.402201, 1364.912538, 1276.736255, null, null, 4297.851699, 4293.720539, 1388.190106, 1300.132897, 2972.930048, 2950.22717, 44.109005, 42.055844, 774.361907, 742.983534, 6442.472243, 6438.247248, 32.63],
+      "dispersion": [[68.47092, 464.767442, 621.811686], [2.535663, 10.606023, 16.433134], [4.227825, 29.038975, 38.354373]]
+    },
+    {
+      "implementation": "go-experimental", "state": "warm-revisit", "runs": 5,
+      "means": [546.495138, 1260.276122, 1220.824655, 32.214231, 4.868, 9.028, 7.754063, 9.471487, 0.285644, 1.508411, 12.977738, 0.034144, 0.663001, 16.471377, 15.468158, 57.356288, 53.165646, 1313.051443, 1273.990302, null, null, 4300.164301, 4293.409764, 1336.315085, 1297.509627, 2982.039552, 2950.297313, 44.276941, 44.219685, 800.056934, 778.404897, 6442.430464, 6436.770948, 29.99],
+      "dispersion": [[72.216983, 458.331723, 624.207882], [2.711252, 10.158781, 16.357083], [4.411643, 27.832094, 37.683171]]
+    },
+    {
+      "implementation": "go-packaged", "state": "fresh", "runs": 5,
+      "means": [533.272595, 1303.463526, 1211.320919, 33.932404, 5.69, 10.336, 8.300549, 8.40668, 0.292682, 1.567942, 13.493783, 0.54664, 1.210107, 17.866601, 15.810499, 57.119539, 53.461953, 1355.997184, 1264.782872, null, null, 4296.903066, 4293.789533, 1380.595302, 1289.408291, 2981.074534, 2960.964939, 44.096717, 42.062794, 811.536384, 778.05396, 6442.428006, 6438.169645, 32.726],
+      "dispersion": [[63.215317, 421.323367, 598.302006], [3.170864, 11.014256, 19.366254], [4.529731, 29.832914, 42.287119]]
+    },
+    {
+      "implementation": "go-packaged", "state": "warm-revisit", "runs": 5,
+      "means": [537.664163, 1299.390464, 1185.225849, 32.529292, 4.914, 9.158, 7.89928, 9.485253, 0.289966, 1.484022, 13.073575, 0.031193, 0.680288, 16.616354, 15.620955, 56.554291, 53.608923, 1351.747994, 1238.834772, null, null, 4302.088602, 4293.757114, 1376.293683, 1263.333603, 3010.615706, 2984.958373, 44.251546, 44.193234, 786.282906, 767.163455, 6442.436198, 6438.073853, 29.19],
+      "dispersion": [[55.692719, 437.896919, 583.826814], [2.457856, 11.175018, 17.758703], [3.672218, 29.671566, 39.152796]]
+    },
+    {
+      "implementation": "rust", "state": "fresh", "runs": 5,
+      "means": [511.120591, 561.242931, 437.33019, 34.990474, 6.042, 11.222, 8.838759, 7.989715, 0.113859, 2.178461, 14.231379, 1.530383, 0.639005, 18.818325, 16.347541, 57.111347, 53.122185, 614.081331, 490.452375, 521.130571, 294.582894, 4297.04233, 4283.004279, 653.380813, 530.323246, 3855.087206, 3709.994807, 42.449306, 40.181802, 759.200154, 728.127934, 6442.47552, 6437.764978, 32.69],
+      "dispersion": [[41.398144, 452.158242, 552.126565], [1.957531, 12.107063, 16.783586], [2.927999, 32.161487, 39.347075]]
+    },
+    {
+      "implementation": "rust", "state": "warm-revisit", "runs": 5,
+      "means": [497.2817, 566.108979, 463.358443, 34.612766, 4.972, 10.598, 8.807801, 9.338178, 0.113415, 2.0733, 14.337101, 0.022572, 0.608936, 17.667975, 16.737333, 56.911462, 53.461775, 619.323392, 516.820218, 523.886205, 301.643491, 4299.084595, 4286.212019, 658.894848, 556.300067, 3839.239782, 3685.380243, 42.563174, 42.506158, 763.673805, 740.200279, 6442.437018, 6437.329687, 31.108],
+      "dispersion": [[27.584397, 470.264837, 546.73419], [1.134563, 12.366645, 15.773769], [1.806542, 31.448013, 36.32592]]
+    },
+    {
+      "implementation": "rust-body-prior", "state": "fresh", "runs": 5,
+      "means": [473.424252, 558.901658, 431.997696, 37.726707, 7.18, 11.868, 9.200789, 8.485461, 0.127875, 2.442309, 16.315187, 1.618308, 0.710434, 20.265284, 17.629562, 56.518246, 53.388147, 612.458496, 485.385843, 520.834979, 287.149931, 4297.30775, 4278.424112, 653.245645, 525.446342, 3860.937114, 3710.28297, 42.479616, 40.169251, 743.547699, 697.557119, 6442.441933, 6437.821667, 35.63],
+      "dispersion": [[35.148467, 424.632769, 504.935395], [3.213575, 12.754979, 21.251557], [2.742293, 35.117607, 41.518301]]
+    },
+    {
+      "implementation": "rust-body-prior", "state": "warm-revisit", "runs": 5,
+      "means": [471.799301, 562.293965, 451.893973, 36.303368, 5.994, 11.014, 8.780518, 9.548623, 0.122067, 2.31966, 16.029095, 0.020949, 0.559823, 18.513637, 17.64872, 56.537088, 53.704397, 615.41417, 505.598371, 520.663498, 296.774033, 4297.65591, 4287.265921, 656.666624, 546.55121, 3825.624678, 3695.911683, 42.600858, 42.543666, 763.478016, 721.375425, 6442.468966, 6437.893145, 32.186],
+      "dispersion": [[27.827936, 441.328457, 519.284166], [1.931772, 13.148371, 18.231826], [2.018865, 33.071671, 38.824395]]
+    }
+  ],
+  "paired_candidate_vs_body_prior": {
+    "scope": "same repetition numbers 40 through 44; directional observations, not a significance test",
+    "columns": ["throughput", "whole_cgroup_cpu", "read_p99", "daemon_rss_peak", "daemon_rss_final_fifth"],
+    "fresh_mean_change_percent": [7.962486, -7.252774, -12.772201, 0.418906, 1.23438],
+    "warm_mean_change_percent": [5.40111, -4.656875, -10.555768, 0.678473, 2.536982],
+    "fresh_favorable_repetitions_out_of_five": [5, 5, 5, 1, 1],
+    "warm_favorable_repetitions_out_of_five": [3, 3, 4, 1, 1]
+  }
+}

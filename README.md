@@ -98,6 +98,10 @@ publishes complete body fragments, preserving advertised whole-body checksum
 validation and full admitted ownership. Its forty-phase matched comparison
 improves p99 against prior Rust but loses throughput/CPU/steady RSS and p50/p95;
 the adverse result is retained, not presented as an unconditional speed fix.
+The [cached-fragment lookup follow-up](docs/cached-fragment-lookup.md) removes a
+redundant predecessor scan. Its matched forty-phase repeat improves mean
+throughput/CPU/p99 against exact prior Rust, but warm repetitions are mixed,
+RSS rises slightly and Go remains faster. Full acceptance stays incomplete.
 
 Backend IAM/profile authentication, signature discovery/SigV2, encryption and
 request options now have loopback HTTP/TLS coverage. See [backend options](docs/backend-options.md)

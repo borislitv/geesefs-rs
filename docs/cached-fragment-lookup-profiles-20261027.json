@@ -1,0 +1,82 @@
+{
+  "schema": "cached-fragment-lookup-owned-profiles-v1",
+  "performance_comparison": false,
+  "instrumented": true,
+  "source_commit": "3b94a76abc422f6e944c9e596fa971cf19b03858",
+  "fixture_manifest_sha256": "7bd537c12c702a614b51383a28ed167c86dbf2d964696525cdf8b4c2871555a1",
+  "file_checks_verified": 9000,
+  "profiles": [
+    {
+      "implementation": "go-experimental",
+      "binary_sha256": "7ad836e0bdd23ea279bb236627e9b130d11c174ae649c7582213a83e5d11a28b",
+      "correct_files": 3000,
+      "observer_exitcode": -2,
+      "requested_stop_signal": "SIGINT",
+      "report_validated": true,
+      "leaf_report_threshold_percent": 0.1,
+      "absent_entry": "below report threshold or not sampled; never inferred as zero",
+      "lost_samples": 0,
+      "leaf_share_percent": {
+        "kernel_memcpy_orig": 12.9,
+        "kernel_rep_movs": 7.3,
+        "kernel_page_clear": 0.85,
+        "btree_range_search": null,
+        "moka_bucket_lookup": null,
+        "moka_policy_maintenance": null,
+        "moka_recency_update": null,
+        "cached_range_covering": null
+      },
+      "leaf_report_sha256": "44960a1759392168b3bada3617c41ebe4fef97e9fcdca4c21cbf346c80c1c069",
+      "raw_profile_sha256": "1dedee6b76e89a2f521e142808ada31ce270e42db3ec3ce9f82a863c74862177"
+    },
+    {
+      "implementation": "rust-body-prior",
+      "binary_sha256": "0e2dccb00faf2356ba89c0f486250efb3193a82b94d92f193e98810a1692e32d",
+      "correct_files": 3000,
+      "observer_exitcode": -2,
+      "requested_stop_signal": "SIGINT",
+      "report_validated": true,
+      "leaf_report_threshold_percent": 0.1,
+      "absent_entry": "below report threshold or not sampled; never inferred as zero",
+      "lost_samples": 0,
+      "leaf_share_percent": {
+        "kernel_memcpy_orig": 10.58,
+        "kernel_rep_movs": 7.92,
+        "kernel_page_clear": 2.58,
+        "btree_range_search": 1.78,
+        "moka_bucket_lookup": 1.27,
+        "moka_policy_maintenance": 0.93,
+        "moka_recency_update": 0.55,
+        "cached_range_covering": 1.1
+      },
+      "leaf_report_sha256": "5b0d697ed42af8197cccc88a98bbe6123ae23e89aeec34de9c873db2081c779a",
+      "raw_profile_sha256": "a13fa5466d952426b91435eaa69b4a4929acaae593448f0bf78dab668c94e1d4"
+    },
+    {
+      "implementation": "rust",
+      "binary_sha256": "0e5a852d7fe4812eedb05cb11c74da67bdbe428764dbddd7f988daa91ddca07b",
+      "correct_files": 3000,
+      "observer_exitcode": -2,
+      "requested_stop_signal": "SIGINT",
+      "report_validated": true,
+      "leaf_report_threshold_percent": 0.1,
+      "absent_entry": "below report threshold or not sampled; never inferred as zero",
+      "lost_samples": 0,
+      "leaf_share_percent": {
+        "kernel_memcpy_orig": 11.66,
+        "kernel_rep_movs": 7.72,
+        "kernel_page_clear": 2.85,
+        "btree_range_search": 0.84,
+        "moka_bucket_lookup": 1.25,
+        "moka_policy_maintenance": 0.56,
+        "moka_recency_update": 0.28,
+        "cached_range_covering": 0.36
+      },
+      "leaf_report_sha256": "bbcd75b03407801cc14e274ca18beda4c6e56d37dadcc3955695924afacf1b60",
+      "raw_profile_sha256": "30b8155167566d485b1e61fb1811f7c7e833cc7ee67ce3cacb95c838d99c638f"
+    }
+  ],
+  "scope": "owned daemon PIDs only; one byte-correct diagnostic mount per executable; sampled leaf shares are not throughput or CPU-comparison measurements",
+  "native_full_hashes_after": 3000,
+  "native_exact_listings_after": 97
+}

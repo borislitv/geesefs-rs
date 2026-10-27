@@ -51,8 +51,9 @@ The compatibility runner still fails: actual-service optional paths, hardlink
 emulation and a Go failure-recovery check are unresolved. The full-matrix attempt
 hit its 90-minute deadline at 42/280 results: Rust used less sampled RSS in those
 groups, but metadata and sequential reads were substantially slower. A subsequent
-adaptive-read fix passes deterministic regressions; post-fix mounted results are
-tracked separately in [performance](docs/performance.md). Overall acceptance is
+adaptive-read fix passes deterministic regressions, but the bounded mounted repeat
+still showed a severe sequential slowdown and timed out. All results are retained
+in [performance](docs/performance.md). Overall acceptance is
 **UNACCEPTED**. Owned cpu+memory cgroup execution works without changing the
 hosting service's controls.
 

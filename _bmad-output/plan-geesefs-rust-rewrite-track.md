@@ -299,3 +299,21 @@ Transitive binary notices, full review and parent commit/push/draft PR remain.
   Python cases. Audit reports 336 public Cargo packages and zero origin errors.
   The source-origin/license-metadata audit is not a complete redistributed-binary
   license-notice audit. Full compatibility and comparative acceptance stay open.
+
+## 2026-10-27: post-fix mounted diagnostic remains unaccepted
+
+- Committed the adaptive fix and its tests/tooling as
+  980949072c02e786c213c227a4ff22122984cec7 before building/measuring it.
+- The selected sequential diagnostic retained the full limits and attempted both
+  baselines, cold/warm states and five repetitions, with an explicit 1,200-second
+  deadline. It stopped with five completed, byte-correct results: three cold Go
+  runs averaged 3.496 seconds and two Rust runs averaged 403.906 seconds for
+  256 MiB. Another Rust run was interrupted. No complete repeated paired group,
+  warm state or packaged-baseline result exists; all records are preserved.
+- The remaining mounted bottleneck is not established. The deterministic fix is
+  valid but did not resolve the measured slowdown. No performance victory or
+  production readiness is claimed. The gate reports 234 errors, including missing
+  full compatibility, missing heap time series and the incomplete matrix.
+- Readback found the owned systemd unit inactive and no owned FUSE mounts. Updated
+  public docs with all completed groups and exact source/executable hashes.
+  Stop repeating long matrices until actual mounted behavior is diagnosed.

@@ -14,10 +14,11 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
 ```
 
-The 123 Rust integration tests cover actual loopback SDK HTTP requests and signed
+The 126 Rust integration tests cover actual loopback SDK HTTP requests and signed
 extension transport, metadata/schema contracts, configuration, inode/namespace
-state, dirty generations and concurrency. The performance-gate test invokes eight
-Python evidence-validation tests. No Rust tests are ignored. These are not a
+state, dirty generations and concurrency. The performance-gate test invokes 12
+Python evidence/summary tests. Five additional Python tests cover provenance and
+the fixture oracle. No Rust tests are ignored. These are not a
 claim of complete reference-test parity or production durability acceptance.
 
 The storage fake preserves generation conditions, multipart state and byte
@@ -97,17 +98,19 @@ deterministic library/contract/gate tests only, not mounted acceptance.
 
 ## Local verification record
 
-- Formatting, warning-denying clippy and all 123 Rust tests (including the eleven
-  Python gate cases): passed after scheduling, streaming, read-window and
-  negative-cache changes.
+- Formatting, warning-denying clippy and all 126 Rust tests (including the twelve
+  Python evidence/summary cases): passed after scheduling, streaming, adaptive
+  read-window and negative-cache changes.
   `cargo build` passed in the prior cancellation tranche; current full-target
   tests also build the CLI used by subprocess tests.
 - Public source audit: 336 packages, zero non-public/path sources and no missing
   license declarations. This is not a complete binary license-notice audit.
 - The initial benchmark preflight failed without delegated controllers. A dedicated
   user unit subsequently supplied owned CPU+memory delegation and ran a real paired
-  smoke test. Its unfavorable cold-metadata result and accounting limits are
-  preserved in [performance](performance.md); this is not a full-matrix pass.
+  smoke test. The subsequent full attempt timed out at 42/280; a post-adaptive-fix
+  sequential diagnostic also timed out at five completed runs and retained the
+  severe slowdown. All results and accounting limits are preserved in
+  [performance](performance.md); neither attempt passes acceptance.
 
 The 26 dedicated backend-option tests cover independently asserted real wire
 headers/signatures, IAM cache/expiry, profile precedence, SSE-C copy phases,
@@ -153,7 +156,7 @@ non-directory dirent hint and requester-pays whitelist. Final full-suite count:
 
 The bounded resolver/pressure follow-up adds two cross-call metadata concurrency
 and cleanup tests plus a deterministic cache-hit/FIFO pressure regression. The
-current full suite has 123 passing cases, including the parent's lifecycle test.
+suite then had 123 passing cases, including the parent's lifecycle test.
 See [measured baseline versus verified changes](bounded-metadata-pressure.md);
 the supplied diagnostic pair is pre-change evidence, not proof of improvement.
 
@@ -177,3 +180,12 @@ unmount cleanup, isolated correctness-gate mutation sensitivity and public sourc
 checks are recorded in [review summary](review-summary.md). The mistargeted first
 O_SYNC probe did not inject its fault and was rejected rather than counted as a
 regression; the corrected controlled suffix exercises actual failure.
+
+The final adaptive-window follow-up adds three public read tests, bringing the
+Rust suite to 126: contiguous 128 KiB requests including cache hits, promoted-window
+cancellation/retry/owner budgets and true small seeks/count-one history. Original
+code and partial repairs failed the independently expected range assertions;
+a restored full-history-condition mutation failed the seek case. These fixtures
+prove the corrected heuristic contract, not mounted speed: the subsequent bounded
+measurement still showed the severe regression. The summary test also rejected
+a deliberate mutation that counted failed runs as correct; the fault was restored.

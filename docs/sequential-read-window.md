@@ -3,9 +3,11 @@
 ## Status and scope
 
 The bounded core fix and regression checks are complete. Whole-filesystem
-compatibility and performance remain **UNACCEPTED**: no post-fix mounted paired
-measurement has been obtained in this task. Existing unfavorable benchmark
-receipts are unchanged. No cache budgets, benchmark settings, FUSE negotiation,
+compatibility and performance remain **UNACCEPTED**. A subsequent bounded mounted
+diagnostic still averaged about 404 seconds for Rust versus 3.5 for Go on 256 MiB;
+it timed out with only five completed runs. The deterministic fix did not resolve
+the measured throughput regression. See [all results and provenance](performance.md).
+Existing unfavorable receipts are unchanged. No cache budgets, FUSE negotiation,
 dependencies or production mounts were changed.
 
 The preceding full-matrix experiment stopped at its 5400-second deadline after
@@ -13,7 +15,7 @@ The preceding full-matrix experiment stopped at its 5400-second deadline after
 averaging about 3.55 seconds for Go and 422.67 seconds for Rust. These are
 pre-fix measurements, not evidence of improvement from this change.
 
-## Contract and root cause
+## Contract and deterministic adaptive-window defect
 
 The public Go reference is
 [`core/file.go` at 5c0884c9](https://github.com/yandex-cloud/geesefs/blob/5c0884c9e8799bbab93e2d4102fdc15e9c079e0d/core/file.go).
@@ -98,7 +100,7 @@ For the existing public fuser 0.18 API:
 
 Pattern ownership remains per inode, whereas Go tracks per open file handle;
 interleaved independent readers can affect this heuristic. This bounded fix does
-not claim full per-handle parity. Rebuild the release binary and obtain new paired
-receipts with equivalent datasets, generations, budgets, quotas and cache state.
-Preserve the incomplete matrix and report new correctness, memory, throughput
-and latency results separately before revisiting acceptance.
+not claim full per-handle parity. The subsequent release/mounted diagnostic
+confirmed that an additional bottleneck remains, without establishing its cause.
+Preserve both incomplete attempts. Diagnose actual mounted behavior before
+repeating a long matrix or revisiting acceptance.

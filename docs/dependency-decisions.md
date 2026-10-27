@@ -6,7 +6,9 @@ The reference checkout was verified clean at
 `5c0884c9e8799bbab93e2d4102fdc15e9c079e0d`, public upstream
 <https://github.com/yandex-cloud/geesefs> (Apache-2.0). Its contracts inform
 independent Rust implementation; no Go SDK implementation is vendored.
-The packaged `80c214ef14f620d93407454fc76ca01dd71fa25f` baseline has not yet been built or verified.
+The packaged `80c214ef14f620d93407454fc76ca01dd71fa25f` baseline was also built
+from its verified public source object and hashed. Both incomplete benchmark
+attempts stopped before reaching its mounted comparisons; see [performance](performance.md).
 
 Before implementation, `cargo info` verified these releases and licenses from
 the public crates.io registry (2026-10-26). APIs are linked below. All Cargo
@@ -66,9 +68,9 @@ policy; parser-only support is not backend compatibility.
 ## Audit status
 
 Cargo.lock is reviewed for public registry origins and CI for public actions.
-`cargo metadata --locked --format-version 1` reported 290 packages (including
+`cargo metadata --locked --format-version 1` reported 336 packages (including
 this root package), with no non-public source: every dependency resolves from
-the public crates.io index. All packages declare a license; the declarations
+the public crates.io index. All packages declare a license or license file; the declarations
 include permissive alternatives and Unicode data licenses. This is a source/
 declaration audit, not a completed binary-distribution notice bundle.
 There is no vendored/generated/internal code. License for this repository remains

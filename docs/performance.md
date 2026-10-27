@@ -121,6 +121,41 @@ counts, mean/min/max/dispersion and a whitelist of executable provenance.
 unchanged limits: both baselines, states and all five repetitions still run for
 that workload. Diagnostic selection never passes the full acceptance gate.
 
+## Post-fix bounded sequential diagnostic
+
+The repeat at committed source `980949072c02e786c213c227a4ff22122984cec7`
+also exhausted its deadline, this time **1,200 seconds**. It recorded only five
+completed cold experimental-baseline runs out of the selected 40; another Rust
+run was interrupted and has no completed measurement. The selected workload kept
+the same configuration, dataset size, effective memory/entry budgets, CPU quota
+and correctness oracle. All five completed checks passed. The full gate remains
+**UNACCEPTED**, with 234 errors and no complete repeated paired group.
+
+| Implementation | Completed runs | Mean throughput ± SD, bytes/s | Mean seconds | Mean sampled peak RSS, bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Experimental Go | 3 | 81,979,201 ± 20,523,960 | 3.496 | 220,396,203 |
+| Rust after adaptive fix | 2 | 664,906 ± 14,319 | 403.906 | 138,784,768 |
+
+These are **all completed results**, including the unmatched third Go run, not
+a five-repetition paired comparison or a before/after causal estimate. The severe
+mounted throughput regression remains. Correcting the deterministic adaptive
+history defect did not resolve it; its remaining cause is not yet established.
+No warm, packaged-baseline or writer result was obtained in this diagnostic.
+The owned unit is inactive and owned FUSE mounts were removed.
+
+Executable provenance, with the same toolchains as the preceding attempt:
+
+| Executable | Source revision | SHA-256 |
+| --- | --- | --- |
+| Experimental Go | `5c0884c9e8799bbab93e2d4102fdc15e9c079e0d` | `7d7c1072ce0dacddba59f384e25f696254e3d10ba822d7b47121964cf4992729` |
+| Packaged Go, built but not reached | `80c214ef14f620d93407454fc76ca01dd71fa25f` | `6b3ae76b4c494e38fa2586d0bdd0e1d53c2a9f4ce5a523264fbee3d6062b6622` |
+| Rust | `980949072c02e786c213c227a4ff22122984cec7` | `511468a8d05352c8692ea26aa8b9956f7f93aedefa00a195d50a39cd3267dfd7` |
+
+Original records and partial-run traces remain in the ignored
+`benchmark-results/private/paired-sequential-20261027-v1/`. Preserve them alongside
+the earlier attempt. Further performance work must explain the mounted behavior
+before repeating a long matrix; library request counts cannot substitute for it.
+
 ## Accounting and acceptance boundaries
 
 - RSS includes daemon and fresh client, with separate PSS traces. Its peak is

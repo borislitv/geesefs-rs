@@ -34,6 +34,8 @@ filesystem and S3 behavior. A language change alone does not satisfy this goal.
   cgroup memory, kernel cache, throughput and p50/p95/p99 latency separately.
   Include daemon/client user/system CPU, whole-cgroup CPU, normalized work cost
   and throttling; elapsed wall time is not CPU consumed.
+  Keep peak/steady RSS visible in performance checkpoint tables alongside CPU;
+  publish cgroup/file/kernel memory and label process scope and missing metrics.
 - Include metadata-heavy traversal, sequential/random payload reads, concurrent
   readers, cache eviction and writer/fsync workloads, including dependency errors.
 - Require reproducible improvement rather than one favorable sample; retain raw

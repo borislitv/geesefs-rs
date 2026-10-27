@@ -463,3 +463,16 @@ Transitive binary notices, full review and parent commit/push/draft PR remain.
 - Saved the fixed binary assets, counter traces, Pod receipts and post-run native
   checks before removing the final owned diagnostic Pod. All four owned Pods are
   removed; served mounts, writers, CSI and GitOps configuration were not changed.
+
+## 2026-10-27: restore RSS visibility beside CPU
+
+- The operator noted that RSS disappeared from the displayed CPU checkpoint.
+  Restored daemon peak/steady RSS directly beside throughput, tails and CPU;
+  added cgroup peak/steady and file/kernel steady memory without dropping CPU.
+- Independently recomputed fifty memory traces, checked per-phase sampled peaks
+  and final-fifth means, then all sixty displayed group memory values. Verified
+  both Markdown tables against the whitelisted JSON. RSS is daemon-only;
+  standalone client/controller RSS was not measured and is not inferred as zero.
+- This is a reporting correction, not a workload rerun or an acceptance change.
+  Source mutation and the six EAGAIN errors remain explicit. Future checkpoints
+  must keep RSS visible alongside CPU under the project's agent rules.

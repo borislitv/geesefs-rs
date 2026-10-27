@@ -83,6 +83,29 @@
     ["rust", "fresh", 14572, 428, 13, 184.242, 37.757, 637.986, 11.854, 19.126, 13.546, 45.099, 1.673, 0.642, 46.669],
     ["rust", "warm-revisit", 14572, 428, 13, 269.400, 33.715, 818.549, 8.920, 18.106, 14.810, 42.270, 1.937, 2.389, 42.474]
   ],
+  "memory_scope": {
+    "rss": "filesystem daemon only, sampled every 50 ms; standalone client/controller RSS was not collected",
+    "peak": "per-phase maximum sampled value, then arithmetic mean across all five phases",
+    "steady": "mean of the final 20 percent of per-phase samples, then mean across all five phases; not proof of a stationary plateau",
+    "cgroup": "all owned processes, file cache and kernel memory; not interchangeable with daemon RSS",
+    "units": "decimal MB, 1000000 bytes",
+    "comparison_valid": false,
+    "raw_phase_traces_recomputed": 50,
+    "group_memory_means_verified": 60
+  },
+  "memory_group_columns": ["implementation", "state", "daemon_rss_peak_MB_mean", "daemon_rss_steady_MB_mean", "cgroup_peak_MB_mean", "cgroup_steady_MB_mean", "file_cache_steady_MB_mean", "kernel_steady_MB_mean"],
+  "memory_groups": [
+    ["go-experimental", "fresh", 1138.208, 1092.696, 4298.206, 4293.619, 3100.860, 42.625],
+    ["go-experimental", "warm-revisit", 1217.713, 1109.181, 4306.436, 4293.582, 3080.845, 45.894],
+    ["go-packaged", "fresh", 1241.598, 1203.881, 4299.583, 4293.535, 2988.769, 43.381],
+    ["go-packaged", "warm-revisit", 1331.284, 1222.838, 4306.630, 4292.266, 2965.596, 46.135],
+    ["rust-original", "fresh", 547.730, 397.017, 4294.942, 4249.809, 3738.894, 39.566],
+    ["rust-original", "warm-revisit", 757.681, 339.713, 4295.760, 4239.740, 3784.097, 41.525],
+    ["rust-prior", "fresh", 548.506, 363.125, 4296.790, 4227.619, 3750.718, 39.677],
+    ["rust-prior", "warm-revisit", 689.815, 363.449, 4297.282, 4232.622, 3753.246, 41.972],
+    ["rust", "fresh", 637.986, 471.993, 4295.868, 4249.823, 3664.614, 39.303],
+    ["rust", "warm-revisit", 818.549, 473.964, 4299.947, 4243.129, 3653.122, 42.191]
+  ],
   "post_run_preload_inspection": {
     "directories": 1261,
     "selected_names_on_first_native_page": 2314,

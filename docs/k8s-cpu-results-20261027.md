@@ -32,22 +32,46 @@ from useful work; cgroup CPU must not be added to its constituent process totals
 
 Each row includes all five phases, including failures. MB is decimal; CPU values
 are seconds averaged over the read/stat/open/hash window, excluding the preceding
-listing and client startup. The JSON additionally retains user/system splits,
+listing and client startup. RSS is the filesystem daemon's sampled memory over
+the whole client phase, including listing; it is not an all-process RSS total.
+The JSON additionally retains user/system splits,
 cgroup dispersion, whole-phase CPU and the complete failure counts. These means
 do not compensate for differing bytes or errors.
 
-| Implementation | State | Verified files / 15000 | Observed MB/s | Read p99 ms | Daemon CPU s | Client CPU s | Cgroup CPU s | Throttled s |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| go-experimental | fresh | 14358 | 219.215 | 27.715 | 40.470 | 14.346 | 55.364 | 2.457 |
-| go-experimental | warm-revisit | 14358 | 268.281 | 23.813 | 32.552 | 14.980 | 47.970 | 5.516 |
-| go-packaged | fresh | 14358 | 206.098 | 25.030 | 46.170 | 13.870 | 60.555 | 3.236 |
-| go-packaged | warm-revisit | 14358 | 243.822 | 24.123 | 39.196 | 14.980 | 54.622 | 5.799 |
-| rust-original | fresh | 14400 | 184.440 | 40.645 | 30.134 | 13.706 | 44.434 | 0.749 |
-| rust-original | warm-revisit | 14358 | 260.402 | 33.785 | 25.980 | 14.048 | 40.446 | 2.083 |
-| rust-prior | fresh | 14572 | 196.463 | 36.821 | 29.814 | 13.222 | 43.574 | 0.801 |
-| rust-prior | warm-revisit | 14572 | 275.760 | 33.894 | 26.668 | 14.032 | 41.071 | 2.159 |
-| rust | fresh | 14572 | 184.242 | 37.757 | 30.980 | 13.546 | 45.099 | 0.642 |
-| rust | warm-revisit | 14572 | 269.400 | 33.715 | 27.026 | 14.810 | 42.270 | 2.389 |
+| Implementation | State | Verified files / 15000 | Observed MB/s | Read p99 ms | RSS peak MB | RSS steady MB | Daemon CPU s | Client CPU s | Cgroup CPU s | Throttled s |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| go-experimental | fresh | 14358 | 219.215 | 27.715 | 1138.208 | 1092.696 | 40.470 | 14.346 | 55.364 | 2.457 |
+| go-experimental | warm-revisit | 14358 | 268.281 | 23.813 | 1217.713 | 1109.181 | 32.552 | 14.980 | 47.970 | 5.516 |
+| go-packaged | fresh | 14358 | 206.098 | 25.030 | 1241.598 | 1203.881 | 46.170 | 13.870 | 60.555 | 3.236 |
+| go-packaged | warm-revisit | 14358 | 243.822 | 24.123 | 1331.284 | 1222.838 | 39.196 | 14.980 | 54.622 | 5.799 |
+| rust-original | fresh | 14400 | 184.440 | 40.645 | 547.730 | 397.017 | 30.134 | 13.706 | 44.434 | 0.749 |
+| rust-original | warm-revisit | 14358 | 260.402 | 33.785 | 757.681 | 339.713 | 25.980 | 14.048 | 40.446 | 2.083 |
+| rust-prior | fresh | 14572 | 196.463 | 36.821 | 548.506 | 363.125 | 29.814 | 13.222 | 43.574 | 0.801 |
+| rust-prior | warm-revisit | 14572 | 275.760 | 33.894 | 689.815 | 363.449 | 26.668 | 14.032 | 41.071 | 2.159 |
+| rust | fresh | 14572 | 184.242 | 37.757 | 637.986 | 471.993 | 30.980 | 13.546 | 45.099 | 0.642 |
+| rust | warm-revisit | 14572 | 269.400 | 33.715 | 818.549 | 473.964 | 27.026 | 14.810 | 42.270 | 2.389 |
+
+### Total memory, file cache and kernel memory
+
+Mean of all five phases, including failures, in decimal MB. Peak is the sampled
+per-phase maximum at 50 ms intervals; steady is the mean of the final 20% of
+samples, not proof of a stationary plateau. Cgroup totals include the client,
+controller and cache; standalone client/controller RSS was not collected and
+must not be inferred as zero. Cgroup memory is near its 4 GiB limit even when
+daemon RSS is lower. Source mutation still invalidates comparative acceptance.
+
+| Implementation | State | Cgroup peak MB | Cgroup steady MB | File cache steady MB | Kernel steady MB |
+| --- | --- | ---: | ---: | ---: | ---: |
+| go-experimental | fresh | 4298.206 | 4293.619 | 3100.860 | 42.625 |
+| go-experimental | warm-revisit | 4306.436 | 4293.582 | 3080.845 | 45.894 |
+| go-packaged | fresh | 4299.583 | 4293.535 | 2988.769 | 43.381 |
+| go-packaged | warm-revisit | 4306.630 | 4292.266 | 2965.596 | 46.135 |
+| rust-original | fresh | 4294.942 | 4249.809 | 3738.894 | 39.566 |
+| rust-original | warm-revisit | 4295.760 | 4239.740 | 3784.097 | 41.525 |
+| rust-prior | fresh | 4296.790 | 4227.619 | 3750.718 | 39.677 |
+| rust-prior | warm-revisit | 4297.282 | 4232.622 | 3753.246 | 41.972 |
+| rust | fresh | 4295.868 | 4249.823 | 3664.614 | 39.303 |
+| rust | warm-revisit | 4299.947 | 4243.129 | 3653.122 | 42.191 |
 
 ## Correctness and source changes
 

@@ -7,6 +7,50 @@ use crate::{
 };
 use std::{collections::HashMap, sync::Arc};
 
+pub(crate) struct Fill {
+    end: u64,
+    done: tokio::sync::watch::Sender<()>,
+}
+
+pub(crate) enum FillAdmission {
+    Leader(FillGuard),
+    Wait(tokio::sync::watch::Receiver<()>),
+}
+
+pub(crate) struct FillGuard {
+    node: Arc<Inode>,
+    key: (u64, u64),
+}
+
+/// Coalesce overlapping windows of one generation, without serializing disjoint
+/// readers. The owned interval closes its channel on success, error or cancellation.
+pub(crate) fn start_fill(
+    node: &Arc<Inode>,
+    generation: u64,
+    start: u64,
+    end: u64,
+) -> FillAdmission {
+    let mut fills = node.read_fills.lock().unwrap();
+    for (&(_, at), fill) in fills.range((generation, 0)..=(generation, u64::MAX)) {
+        if at < end && start < fill.end {
+            return FillAdmission::Wait(fill.done.subscribe());
+        }
+    }
+    let key = (generation, start);
+    let (done, _) = tokio::sync::watch::channel(());
+    fills.insert(key, Fill { end, done });
+    FillAdmission::Leader(FillGuard {
+        node: node.clone(),
+        key,
+    })
+}
+
+impl Drop for FillGuard {
+    fn drop(&mut self) {
+        self.node.read_fills.lock().unwrap().remove(&self.key);
+    }
+}
+
 #[derive(Default)]
 pub struct Pattern {
     end: u64,

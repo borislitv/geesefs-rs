@@ -317,3 +317,22 @@ Transitive binary notices, full review and parent commit/push/draft PR remain.
 - Readback found the owned systemd unit inactive and no owned FUSE mounts. Updated
   public docs with all completed groups and exact source/executable hashes.
   Stop repeating long matrices until actual mounted behavior is diagnosed.
+
+## 2026-10-27: actual FUSE overlap and cache-policy pressure diagnosis
+
+- Continued at the user's request. A short actual-mount trace exposed neighboring
+  128 KiB reads each admitting a 24.5 MiB window, replacing the cache while a
+  previous fill was active, then missing its publication into an orphaned clone.
+  The single-reader adaptive-history fixture had not modeled this interleaving.
+- Added generation-scoped overlapping-fill ownership using maintained Tokio watch
+  notifications and RAII cleanup. Followers retry cache lookup; disjoint windows
+  remain concurrent. Completed blocks publish into the current cache policy.
+  No payload/cache limits, request concurrency or durability rules were reduced.
+- Four public regressions establish failure sensitivity: original overlap gives
+  eight GETs versus six; detached-policy mutation gives nine versus seven;
+  overbroad overlap blocks disjoint readers; missing unregister strands a cancelled
+  owner's follower. Restored all mutations and passed all 130 Rust tests,
+  formatting, warning-denying Clippy and the 336-package public-origin audit.
+- Diagnosis and invariants: docs/read-fill-pressure.md. Temporary trace code is
+  removed. Fresh committed-source paired measurement is the next verification;
+  short uncontrolled scratch timings are not comparative acceptance evidence.

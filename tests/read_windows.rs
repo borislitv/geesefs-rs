@@ -6,6 +6,207 @@ use support::MemoryStore;
 const MIB: usize = 1024 * 1024;
 
 #[tokio::test]
+async fn overlapping_large_read_fills_share_work_under_pressure_and_cancelled_waiters_do_not_evict_it()
+ {
+    use std::{future::Future, sync::Arc, task::Poll, time::Duration};
+    const STEP: usize = 128 * 1024;
+    let expected: Vec<u8> = (0..64 * MIB)
+        .map(|offset| ((offset / (64 * 1024)) % 251) as u8)
+        .collect();
+    let store = MemoryStore::new();
+    store.seed("file", &expected);
+    let fs = store.filesystem(64);
+    let node = fs.lookup(1, "file").await.unwrap();
+    for offset in (0..20 * MIB).step_by(STEP) {
+        let block = fs.read(node.ino, offset as u64, STEP).await.unwrap();
+        assert_eq!(block.as_slice(), &expected[offset..offset + STEP]);
+    }
+    assert_eq!(store.read_calls.load(Ordering::Relaxed), 4);
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *store.read_gate.lock().unwrap() = Some(gate.clone());
+    let first = tokio::spawn({
+        let fs = fs.clone();
+        let ino = node.ino;
+        async move { fs.read(ino, (20 * MIB) as u64, STEP).await }
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while store.read_calls.load(Ordering::Relaxed) < 6 {
+            store.read_started.notified().await;
+        }
+    })
+    .await
+    .expect("the promoted window's two parallel chunks must start");
+    let mut cancelled = Box::pin(fs.read(node.ino, (20 * MIB + STEP) as u64, STEP));
+    let mut follower = Box::pin(fs.read(node.ino, (20 * MIB + 2 * STEP) as u64, STEP));
+    std::future::poll_fn(|cx| {
+        assert!(cancelled.as_mut().poll(cx).is_pending());
+        assert!(follower.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    drop(cancelled);
+    gate.add_permits(16);
+    let first = tokio::time::timeout(Duration::from_secs(3), first)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let follower = tokio::time::timeout(Duration::from_secs(3), follower)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.as_slice(), &expected[20 * MIB..20 * MIB + STEP]);
+    assert_eq!(
+        follower.as_slice(),
+        &expected[20 * MIB + 2 * STEP..20 * MIB + 3 * STEP]
+    );
+    assert_eq!(
+        store.read_calls.load(Ordering::Relaxed),
+        6,
+        "overlapping kernel-sized reads must reuse one promoted window, not evict and reload it"
+    );
+    let budgets = fs.effective_budgets();
+    assert_eq!(budgets.payload_limit_bytes, 64 * MIB);
+    assert!(budgets.data_used_bytes <= budgets.data_shared_bytes);
+}
+
+#[tokio::test]
+async fn in_flight_window_publishes_into_the_current_policy_after_other_inode_pressure() {
+    use std::{future::Future, sync::Arc, task::Poll, time::Duration};
+    const STEP: usize = 128 * 1024;
+    let store = MemoryStore::new();
+    store.seed("file", &vec![b'x'; 64 * MIB]);
+    store.seed("other", &vec![b'y'; MIB]);
+    let fs = store.filesystem(64);
+    let node = fs.lookup(1, "file").await.unwrap();
+    let other = fs.lookup(1, "other").await.unwrap();
+    for offset in (0..20 * MIB).step_by(STEP) {
+        let block = fs.read(node.ino, offset as u64, STEP).await.unwrap();
+        assert_eq!(block.as_slice(), vec![b'x'; STEP]);
+    }
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *store.read_gate.lock().unwrap() = Some(gate.clone());
+    let first = tokio::spawn({
+        let fs = fs.clone();
+        let ino = node.ino;
+        async move { fs.read(ino, (20 * MIB) as u64, STEP).await }
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while store.read_calls.load(Ordering::Relaxed) < 6 {
+            store.read_started.notified().await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut competing = Box::pin(fs.read(other.ino, 0, STEP));
+    std::future::poll_fn(|cx| {
+        assert!(competing.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    gate.add_permits(16);
+    let first = tokio::time::timeout(Duration::from_secs(3), first)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.as_slice(), vec![b'x'; STEP]);
+    let competing = tokio::time::timeout(Duration::from_secs(3), competing)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(competing.as_slice(), vec![b'y'; STEP]);
+    let following = fs
+        .read(node.ino, (20 * MIB + STEP) as u64, STEP)
+        .await
+        .unwrap();
+    assert_eq!(following.as_slice(), vec![b'x'; STEP]);
+    assert_eq!(
+        store.read_calls.load(Ordering::Relaxed),
+        7,
+        "a concurrent policy replacement must not orphan the completed window"
+    );
+    assert!(fs.effective_budgets().data_used_bytes <= fs.effective_budgets().data_shared_bytes);
+}
+
+#[tokio::test]
+async fn cancelled_fill_owner_wakes_overlapping_follower_to_retry_without_leaking_budget() {
+    use std::{future::Future, sync::Arc, task::Poll, time::Duration};
+    let store = MemoryStore::new();
+    store.seed("file", &vec![b'r'; 16 * MIB]);
+    let fs = store.filesystem(64);
+    let node = fs.lookup(1, "file").await.unwrap();
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *store.read_gate.lock().unwrap() = Some(gate.clone());
+    let owner = tokio::spawn({
+        let fs = fs.clone();
+        let ino = node.ino;
+        async move { fs.read(ino, 0, 128 * 1024).await }
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while store.read_calls.load(Ordering::Relaxed) < 1 {
+            store.read_started.notified().await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut follower = Box::pin(fs.read(node.ino, 128 * 1024, 128 * 1024));
+    std::future::poll_fn(|cx| {
+        assert!(follower.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    owner.abort();
+    match owner.await {
+        Err(error) => assert!(error.is_cancelled()),
+        Ok(_) => panic!("fill owner was not cancelled"),
+    }
+    gate.add_permits(2);
+    let block = tokio::time::timeout(Duration::from_secs(3), follower)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(block.as_slice(), vec![b'r'; 128 * 1024]);
+    assert_eq!(store.read_calls.load(Ordering::Relaxed), 2);
+    assert_eq!(fs.effective_budgets().data_used_bytes, 5 * MIB + 128 * 1024);
+}
+
+#[tokio::test]
+async fn disjoint_read_fills_of_one_inode_still_fetch_concurrently() {
+    use std::{sync::Arc, time::Duration};
+    let store = MemoryStore::new();
+    store.seed("file", &vec![b'd'; 32 * MIB]);
+    let fs = store.filesystem(64);
+    let node = fs.lookup(1, "file").await.unwrap();
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *store.read_gate.lock().unwrap() = Some(gate.clone());
+    let mut reads = Vec::new();
+    for offset in [0, 16 * MIB] {
+        let fs = fs.clone();
+        let ino = node.ino;
+        reads.push(tokio::spawn(async move {
+            fs.read(ino, offset as u64, 128 * 1024).await
+        }));
+    }
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while store.read_calls.load(Ordering::Relaxed) < 2 {
+            store.read_started.notified().await;
+        }
+    })
+    .await
+    .expect("disjoint windows must both start before either completes");
+    gate.add_permits(2);
+    for read in reads {
+        let block = tokio::time::timeout(Duration::from_secs(3), read)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(block.as_slice(), vec![b'd'; 128 * 1024]);
+    }
+}
+
+#[tokio::test]
 async fn sequential_128_kib_reads_track_cache_hits_and_keep_adaptive_windows() {
     const STEP: usize = 128 * 1024;
     let size = 32 * MIB;

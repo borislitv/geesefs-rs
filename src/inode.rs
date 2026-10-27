@@ -48,6 +48,7 @@ pub struct Inode {
     /// Serialize commits/rename/delete for this object only, never the namespace.
     pub flush: std::sync::Arc<tokio::sync::Mutex<()>>,
     pub pattern: Mutex<crate::read::Pattern>,
+    pub(crate) read_fills: Mutex<BTreeMap<(u64, u64), crate::read::Fill>>,
 }
 
 pub fn parse_integer(bytes: &[u8]) -> Option<u64> {
@@ -173,6 +174,7 @@ impl Inode {
             }),
             flush: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             pattern: Mutex::new(crate::read::Pattern::default()),
+            read_fills: Mutex::new(BTreeMap::new()),
         }
     }
 

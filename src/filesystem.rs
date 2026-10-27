@@ -708,6 +708,35 @@ impl Filesystem {
         } else {
             length
         };
+        // FUSE may issue neighboring reads before the first window completes.
+        // Waiting readers must not reserve another whole window and evict the
+        // very fill they can reuse. Recheck after wakeup and after taking ownership.
+        let _fill = loop {
+            let owner = match read::start_fill(&node, generation, start, start + prefetch as u64) {
+                read::FillAdmission::Leader(owner) => Some(owner),
+                read::FillAdmission::Wait(mut done) => {
+                    // A closed channel means the owner exited, including errors
+                    // and cancellation. Retry the cache; do not cache its failure.
+                    let _ = tokio::time::timeout(self.config.request_timeout, done.changed())
+                        .await
+                        .map_err(|_| Error::Timeout("overlapping read fill"))?;
+                    None
+                }
+            };
+            let reply = self.admit(length).await?;
+            let cached = self
+                .cache
+                .lock()
+                .unwrap()
+                .covering(ino, generation, offset, length);
+            if let Some((block, relative)) = cached {
+                return reply.copy(&block.as_slice()[relative..relative + length]);
+            }
+            drop(reply);
+            if let Some(owner) = owner {
+                break owner;
+            }
+        };
         // Atomically admit all payload/GET/output buffers before the first
         // allocation; otherwise competing readers could each pin half a lane.
         let mut charge = self.admit(2 * prefetch + length).await?;
@@ -720,7 +749,6 @@ impl Filesystem {
         let available = length.min(snapshot.size.saturating_sub(offset) as usize);
         let end = (start + prefetch as u64).min(snapshot.size);
         let chunk = budgets.read_parallel_chunk_bytes.max(1);
-        let cache = self.cache.lock().unwrap().clone();
         let mut tasks = tokio::task::JoinSet::new();
         let mut next = start;
         while next < end || !tasks.is_empty() {
@@ -759,7 +787,12 @@ impl Filesystem {
                     );
             }
             if cacheable {
-                cache.insert(ino, generation, at, block);
+                // Pressure may have replaced the policy while GET was in flight.
+                // Never publish into an orphaned clone invisible to followers.
+                self.cache
+                    .lock()
+                    .unwrap()
+                    .insert(ino, generation, at, block);
             }
         }
         result.shrink(available);

@@ -168,3 +168,16 @@ path and cancel synchronously on drop. Acquire an existing Tokio semaphore's
 global owned job permit before adding each future, not inside per-page spawned
 tasks. This bounds admitted work across readdir calls and preserves the existing
 lookup metadata/type/generation checks without custom scheduling infrastructure.
+
+## Overlapping read-window coordination
+
+Reuse Tokio's maintained watch channel
+(<https://docs.rs/tokio/1.54.1/tokio/sync/watch/>) to notify read followers when
+an owned fill completes or is cancelled. Moka's identical-key get-with operation
+does not coalesce overlapping read-ahead ranges with different caller offsets.
+The small per-inode, generation-scoped interval registry is filesystem state,
+not a new generic single-flight framework. Its RAII owner removes the interval
+and closes the channel on every exit; followers retry the normal cache check
+under the existing request deadline. Disjoint windows still run concurrently.
+Publish completed blocks into the current cache policy, not a clone detached
+by a concurrent pressure eviction. Do not change payload/cache budgets.

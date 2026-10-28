@@ -768,8 +768,37 @@ impl Filesystem {
         length: usize,
         ready: impl FnOnce(Result<Block>) + Send,
     ) -> Option<Error> {
+        self.read_reply_inner(ino, offset, length, false, ready)
+            .await
+    }
+
+    /// Send bytes synchronously without allowing a reply to pin its GET owner.
+    pub async fn read_reply_data(
+        &self,
+        ino: u64,
+        offset: u64,
+        length: usize,
+        ready: impl FnOnce(Result<&[u8]>) + Send,
+    ) -> Option<Error> {
+        self.read_reply_inner(ino, offset, length, true, move |result| match result {
+            Ok(block) => ready(Ok(block.as_slice())),
+            Err(error) => ready(Err(error)),
+        })
+        .await
+    }
+
+    async fn read_reply_inner(
+        &self,
+        ino: u64,
+        offset: u64,
+        length: usize,
+        borrow_reply: bool,
+        ready: impl FnOnce(Result<Block>) + Send,
+    ) -> Option<Error> {
         let mut ready = Some(ready);
-        let result = self.read_inner(ino, offset, length, &mut ready).await;
+        let result = self
+            .read_inner(ino, offset, length, borrow_reply, &mut ready)
+            .await;
         if let Some(ready) = ready {
             ready(result.map(|block| block.expect("unpublished read owns its result")));
             None
@@ -780,7 +809,7 @@ impl Filesystem {
 
     pub async fn read(&self, ino: u64, offset: u64, length: usize) -> Result<Block> {
         Ok(self
-            .read_inner(ino, offset, length, &mut None::<fn(Result<Block>)>)
+            .read_inner(ino, offset, length, false, &mut None::<fn(Result<Block>)>)
             .await?
             .expect("a read without early publication retains its result"))
     }
@@ -790,6 +819,7 @@ impl Filesystem {
         ino: u64,
         offset: u64,
         length: usize,
+        borrow_reply: bool,
         ready: &mut Option<impl FnOnce(Result<Block>) + Send>,
     ) -> Result<Option<Block>> {
         if length > MAX_IO {
@@ -920,14 +950,19 @@ impl Filesystem {
             }
             break (charge, Arc::new(snapshot));
         };
-        let mut result = charge.split(length).zeroed();
+        let mut output = charge.split(length);
         let cacheable = clean
             && snapshot.version == version
             && snapshot.remote.as_ref().map(|head| head.etag.clone()) == etag;
         // The snapshot may have shrunk while admission flushed another generation.
         let available = length.min(snapshot.size.saturating_sub(offset) as usize);
-        result.shrink(available);
-        let mut result = Some(result);
+        let mut reply = Some(output.split(available));
+        drop(output);
+        let mut result = if available == 0 {
+            Some(reply.take().expect("empty reply admission").zeroed())
+        } else {
+            None
+        };
         let mut remaining = available;
         if remaining == 0
             && let Some(ready) = ready.take()
@@ -1009,13 +1044,22 @@ impl Filesystem {
             let left = at.max(offset);
             let right = (at + block.as_slice().len() as u64).min(offset + available as u64);
             if right > left {
-                result
-                    .as_mut()
-                    .expect("incomplete requested result")
-                    .as_mut_slice()[(left - offset) as usize..(right - offset) as usize]
-                    .copy_from_slice(
-                        &block.as_slice()[(left - at) as usize..(right - at) as usize],
-                    );
+                if borrow_reply && remaining == available && right - left == available as u64 {
+                    // The delivered immutable owner already covers the reply.
+                    // Retain its complete backing charge instead of allocating a copy.
+                    result = Some(block.slice((left - at) as usize..(right - at) as usize));
+                    drop(reply.take());
+                } else {
+                    result
+                        .get_or_insert_with(|| {
+                            reply.take().expect("composed reply admission").zeroed()
+                        })
+                        .as_mut_slice()
+                        [(left - offset) as usize..(right - offset) as usize]
+                        .copy_from_slice(
+                            &block.as_slice()[(left - at) as usize..(right - at) as usize],
+                        );
+                }
                 remaining -= (right - left) as usize;
             }
             if remaining == 0

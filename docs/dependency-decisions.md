@@ -31,6 +31,17 @@ SDK, Arcadia code, or private dependency is permitted.
 
 ## Narrow custom state
 
+The operator reaffirmed maximum reuse of maintained library mechanisms during
+the read-buffer continuation. The miss-reply optimization reuses the existing
+immutable `Block` view and Tokio-owned reservation lifetime; it adds no pool,
+allocator, stream protocol or cache implementation. AWS Smithy ByteStream 1.9.0
+already exposes `try_next() -> Result<Option<Bytes>, Error>` and
+`into_async_read() -> impl AsyncBufRead`; the current body adapter uses the latter.
+Direct transport `Bytes` adoption must account for a slice's complete retained
+allocation, not just its visible length, and preserve whole-body checksum/EOF
+barriers. That is a separate verified adapter change, not a reason to replace
+the maintained SDK or introduce a second transport.
+
 The package forbids unsafe code for every target. rustix 1.1.5 (Apache-2.0 WITH
 LLVM-exception OR Apache-2.0 OR MIT,
 <https://docs.rs/rustix/1.1.5/rustix/process/>) provides safe uid/gid operations;

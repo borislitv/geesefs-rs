@@ -299,6 +299,22 @@ async fn validation_and_empty_reads_publish_exactly_one_result_without_backend_r
             (Err(Error::Fs(actual)), Some(expected)) => assert_eq!(actual, expected),
             _ => panic!("unexpected validation or EOF outcome"),
         }
+        let mut borrowed = None;
+        assert!(
+            fs.read_reply_data(ino, offset, length, |result| {
+                assert!(borrowed.replace(result.map(<[u8]>::to_vec)).is_none());
+            })
+            .await
+            .is_none()
+        );
+        match (
+            borrowed.expect("borrowed read must publish exactly once"),
+            errno,
+        ) {
+            (Ok(bytes), None) => assert!(bytes.is_empty()),
+            (Err(Error::Fs(actual)), Some(expected)) => assert_eq!(actual, expected),
+            _ => panic!("unexpected borrowed validation or EOF outcome"),
+        }
     }
     assert_eq!(
         store.read_calls.load(std::sync::atomic::Ordering::Relaxed),

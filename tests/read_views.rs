@@ -7,6 +7,39 @@ const MIB: usize = 1024 * 1024;
 const STEP: usize = 128 * 1024;
 
 #[tokio::test]
+async fn a_borrowed_miss_reply_reuses_its_complete_charged_backing() {
+    let expected: Vec<u8> = (0..2 * MIB).map(|at| (at % 251) as u8).collect();
+    for (offset, length) in [(0, STEP), (65_539, 4096), (2 * MIB - 7, STEP)] {
+        let store = MemoryStore::new();
+        store.seed("file", &expected);
+        let mut config = MemoryStore::config(16);
+        config.large_read_cutoff = 0;
+        let fs = Filesystem::new(config, store.clone()).unwrap();
+        let ino = fs.lookup(1, "file").await.unwrap().ino;
+        let mut replies = 0;
+        assert!(
+            fs.read_reply_data(ino, offset as u64, length, |result| {
+                replies += 1;
+                assert_eq!(
+                    result.unwrap(),
+                    &expected[offset..(offset + length).min(expected.len())]
+                );
+                assert_eq!(
+                    fs.effective_budgets().data_used_bytes,
+                    store.read_ranges.lock().unwrap()[0].1,
+                    "a borrowed miss reply must not retain a second payload allocation"
+                );
+            })
+            .await
+            .is_none()
+        );
+        assert_eq!(replies, 1);
+        let charged = store.read_ranges.lock().unwrap()[0].1;
+        assert_eq!(fs.effective_budgets().data_used_bytes, charged);
+    }
+}
+
+#[tokio::test]
 async fn cached_reply_keeps_the_complete_backing_charge_without_another_payload_allocation() {
     let expected: Vec<u8> = (0..2 * MIB).map(|at| (at % 251) as u8).collect();
     let store = MemoryStore::new();

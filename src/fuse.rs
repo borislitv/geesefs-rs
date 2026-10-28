@@ -255,8 +255,8 @@ impl fuser::Filesystem for Fuse {
     ) {
         self.spawn(reply, move |fs, reply| async move {
             if let Some(error) = fs
-                .read_reply(ino.0, offset, size as usize, move |result| match result {
-                    Ok(data) => reply.data(data.as_slice()),
+                .read_reply_data(ino.0, offset, size as usize, move |result| match result {
+                    Ok(data) => reply.data(data),
                     Err(error) => reply.error(errno(error)),
                 })
                 .await

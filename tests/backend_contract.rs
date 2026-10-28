@@ -720,6 +720,147 @@ async fn filesystem_keeps_a_valid_prefix_after_tail_failure_or_cancellation() {
     }
 }
 
+#[tokio::test]
+async fn borrowed_wire_reply_shares_admission_and_survives_tail_failure_or_cancellation() {
+    const CHUNK: usize = 128 * 1024;
+    let expected: Vec<u8> = (0..4 * CHUNK).map(|at| (at % 251) as u8).collect();
+    for cancel in [false, true] {
+        let (entered, at_tail) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let body = GatedBody {
+            prefix: Cursor::new(expected[..CHUNK].to_vec()),
+            tail: Cursor::new(expected[CHUNK..CHUNK + 17].to_vec()),
+            entered: Some(entered),
+            release: Some(wait),
+        };
+        let (store, server) = file_server(body, expected.len());
+        let fs = filesystem(store);
+        let ino = fs.lookup(1, "file").await.unwrap().ino;
+        let (ready, received) = tokio::sync::oneshot::channel();
+        let load = tokio::spawn({
+            let fs = fs.clone();
+            async move {
+                fs.read_reply_data(ino, 7, 4096, |result| {
+                    ready
+                        .send((
+                            result.map(<[u8]>::to_vec),
+                            fs.effective_budgets().data_used_bytes,
+                        ))
+                        .unwrap();
+                })
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), at_tail)
+            .await
+            .unwrap()
+            .unwrap();
+        let (bytes, charge) = tokio::time::timeout(Duration::from_secs(2), received)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes.unwrap(), expected[7..4103]);
+        assert_eq!(
+            charge,
+            expected.len(),
+            "borrowed wire replies must reuse the full GET charge without a second output"
+        );
+        assert!(!load.is_finished());
+        if cancel {
+            load.abort();
+            assert!(
+                tokio::time::timeout(Duration::from_secs(3), load)
+                    .await
+                    .unwrap()
+                    .unwrap_err()
+                    .is_cancelled()
+            );
+            release.send(()).unwrap();
+        } else {
+            release.send(()).unwrap();
+            let tail = tokio::time::timeout(Duration::from_secs(3), load)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(
+                    tail,
+                    Some(Error::Backend {
+                        operation: "GET body",
+                        ..
+                    })
+                ),
+                "borrowed publication must preserve late body errors: {tail:?}"
+            );
+        }
+        server.join().unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while fs.effective_budgets().data_used_bytes != expected.len() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("only complete GET cache admission may survive borrowed reply cleanup");
+        assert_eq!(
+            fs.read(ino, 7, 4096).await.unwrap().as_slice(),
+            &expected[7..4103]
+        );
+    }
+}
+
+#[tokio::test]
+async fn borrowed_wire_reply_composes_fragments_before_publishing_complete_bytes() {
+    const CHUNK: usize = 128 * 1024;
+    let expected: Vec<u8> = (0..4 * CHUNK).map(|at| (at % 251) as u8).collect();
+    let (entered, at_tail) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let body = GatedBody {
+        prefix: Cursor::new(expected[..CHUNK].to_vec()),
+        tail: Cursor::new(expected[CHUNK..].to_vec()),
+        entered: Some(entered),
+        release: Some(wait),
+    };
+    let (store, server) = file_server(body, expected.len());
+    let fs = filesystem(store);
+    let ino = fs.lookup(1, "file").await.unwrap().ino;
+    let (ready, mut received) = tokio::sync::oneshot::channel();
+    let load = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.read_reply_data(ino, CHUNK as u64 - 7, 21, |result| {
+                ready.send(result.map(<[u8]>::to_vec)).unwrap();
+            })
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), at_tail)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        received.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    release.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), received)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        expected[CHUNK - 7..CHUNK + 14]
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), load)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    server.join().unwrap();
+    assert_eq!(fs.effective_budgets().data_used_bytes, expected.len());
+}
+
 fn head(size: u64) -> ObjectHead {
     ObjectHead {
         size,

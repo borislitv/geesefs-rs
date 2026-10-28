@@ -1,0 +1,160 @@
+{
+  "schema": "borrowed-read-reply-quality-v1",
+  "accepted": false,
+  "scope": "Synchronous borrowed FUSE replies; independent escaping replies retain their prior ownership contract",
+  "source_base": "3b94a76abc422f6e944c9e596fa971cf19b03858",
+  "verification": {
+    "environment": "isolated secret-free Kubernetes build Pod",
+    "rust_tests_passed": 181,
+    "rust_tests_failed": 0,
+    "rust_tests_ignored": 0,
+    "source_oracle_python_cases_passed": 14,
+    "benchmark_python_cases_passed": 23,
+    "format_check_passed": true,
+    "all_target_all_feature_warning_denying_clippy_passed": true,
+    "public_cargo_packages_audited": 336,
+    "audit_errors": [],
+    "explicit_package_clean_after_mutations": true,
+    "red_scope": "Deliberately copied borrowed callback fails the extra retained-payload assertion before view reuse is enabled",
+    "red_log_sha256": "9ff8cec1871012e307787c746cccc900a711724b258d862ebbff47a6920863d6"
+  },
+  "source_hashes": {
+    "src/budget.rs": "90ef1cb1ce990cfdf4d2e2d27e48bd874b5ecb4d45e46dd02b4491eb7dac91b3",
+    "src/cache.rs": "4bc96fccfb0f62ccdd757f54f84251fe8fca13443b0abd8d8bc1c1cdf87df773",
+    "src/filesystem.rs": "786283af138a3033fd8836f4c25abc79d6f3756fac18ddb224fcc244c217fe22",
+    "src/fuse.rs": "db210faf385b0de6c1f7d3956357e36318a0d163d68be3b24f34b89533400830",
+    "src/read.rs": "b4d36c44f5619112db2d60426c2e33fdcc955f6e6c619d1725d08598dcc71e78",
+    "src/backend/mod.rs": "f5881062acd2379472355ea3b17ce502196ed44da30c66891fffcf2bb0de9eac",
+    "src/backend/s3.rs": "c91e0f454b43f6c424c91a06c8fcfc8924cd206a389b8f33df837a733cf49309",
+    "tests/read_views.rs": "8867739d1ce2e21fa4e0849496bd8f9057e01293766ab2b684481aba37e00e7a",
+    "tests/read_reply.rs": "a41cacc59fb9fb41158c76fa65f5f919ad4280e64ba7b642cf31cc45f2c3eac0",
+    "tests/backend_contract.rs": "d4a17cb98a50af1edee5b700b71805884703b4cb9c80e8b356342b81a9fe5512",
+    "tests/support/mod.rs": "08bc5a928c7183cc7a45baafcde5eb94e331dd3bb5e19f3c38f6ee379c836965"
+  },
+  "independent_faults": [
+    {
+      "fault": "copy-borrowed-reply",
+      "exitcode": 101,
+      "assertion_failure": true,
+      "log_sha256": "edd1d38e72eef18b715c0b3a7ca019c90a6ceb1b6ea6c1dfb2b3987b59100a80"
+    },
+    {
+      "fault": "lose-borrowed-offset",
+      "exitcode": 101,
+      "assertion_failure": true,
+      "log_sha256": "ba8a82d6edce3ab534c795c27eff31ccf0b440ba29c1f5d00f822a075557a9b1"
+    },
+    {
+      "fault": "escape-large-owner",
+      "exitcode": 101,
+      "assertion_failure": true,
+      "log_sha256": "d0dfff3849694acf418c64b83010a5d64f26b0fe26a7aeb90fc7d0101c9606d6"
+    },
+    {
+      "fault": "defer-body-prefix",
+      "exitcode": 101,
+      "assertion_failure": true,
+      "log_sha256": "f653a419f8731ec18e8fd9c44d39eccba0e02317f50d1dc4743bb4154e7497f2"
+    },
+    {
+      "fault": "omit-complete-get-charge",
+      "exitcode": 101,
+      "assertion_failure": true,
+      "log_sha256": "af2f346bef58b5062a96ba0fd46c2397a6374e074b5b8211473a4f9ecb706a1a"
+    },
+    {
+      "fault": "skip-cached-fragment-span",
+      "exitcode": 101,
+      "assertion_failure": true,
+      "log_sha256": "36edc471965e5f32ec8efeea70ca93ce74e68c8214160fb6e1916d72a85a1ccf"
+    },
+    {
+      "fault": "publish-before-checksum",
+      "exitcode": 101,
+      "assertion_failure": true,
+      "log_sha256": "d008fc68db32da2b58a5021b210a9455d41e5562c1d115fc238f4bac4b24eb5d"
+    },
+    {
+      "fault": "ignore-short-read",
+      "exitcode": 101,
+      "assertion_failure": true,
+      "log_sha256": "8008ab9f06e4e229aade6c65a982b21ac78163dc4f5e49bdabef264719a68280"
+    },
+    {
+      "fault": "hide-late-body-error",
+      "exitcode": 101,
+      "assertion_failure": true,
+      "log_sha256": "26c9e14838e2ef3d32024bd06e95e273a22d7044ac350225b85fb664a80847be"
+    },
+    {
+      "fault": "lose-fragment-offset",
+      "exitcode": 101,
+      "assertion_failure": true,
+      "log_sha256": "18c90b98b80fdc91c32d25a40e2a2a570a5ab9b916157c677a28379deec04bec"
+    }
+  ],
+  "companion_tools": {
+    "crapper_revision": "6fd92c4c9bcc56efb64a2f8743d5a2993bcfd42d",
+    "dryer_revision": "66ff6d21a42c04afcad89c78a80066176d1294b0",
+    "mutator_revision": "a5a0cb803b66e0cdb8bf471b3b08af701d424a41",
+    "reported_complexity": {
+      "filesystem_read_inner": 53,
+      "borrowed_callback_adapter": 3
+    },
+    "coverage": null,
+    "CRAP": null,
+    "remaining_duplicate_candidates_at_0_8": 3,
+    "filesystem_mutation_sites_scanned": 381,
+    "selected_mutations_executed": 5,
+    "selected_mutations_killed": 5,
+    "selected_mutations_survived": 0,
+    "unselected_mutation_sites": 376,
+    "selected_line": 1047,
+    "selected_mutations": [
+      "src/filesystem.rs:1047 && -> ||",
+      "src/filesystem.rs:1047 == -> !=",
+      "src/filesystem.rs:1047 && -> ||",
+      "src/filesystem.rs:1047 - -> +",
+      "src/filesystem.rs:1047 == -> !="
+    ],
+    "logs": [
+      {
+        "label": "complexity",
+        "tool": "crapper",
+        "exitcode": 0,
+        "log_sha256": "1fe5c5f9d930dd91447fc2d11163ee46f8d2fe9b65f764f31c94f2dae46aa253"
+      },
+      {
+        "label": "duplicates",
+        "tool": "dryer",
+        "exitcode": 0,
+        "log_sha256": "49a46aaecc603c8e3ae0fca38382b2281aac7871ece6379d5b50a0f321f97577"
+      },
+      {
+        "label": "mutation-scan",
+        "tool": "mutator",
+        "exitcode": 0,
+        "log_sha256": "64b561c6913b98a9b76db7eea85217a1457ad1f5600f74f91d5d7d8eaf89c225"
+      },
+      {
+        "label": "mutation-fragment-completion",
+        "tool": "mutator",
+        "exitcode": 0,
+        "log_sha256": "3546f635068d9d32cd4b4ae83f9313137623c6b99464e5a168351bcf6bdd6fd7"
+      }
+    ]
+  },
+  "release": {
+    "binary_sha256": "b96c9427be58f5c6ad3f22920417aea697ab01cdc83b0a64d0e60cedfbe8a55f",
+    "compiled_input_tree_sha256": "394be766410ccce70a3e29b80159ea8e896c95e913e81fe58cf606f9da53fff5",
+    "compiled_inputs_verified": 25
+  },
+  "rejected_attempt": "Allowing escaping replies to share GET backing prevents progress during the existing concurrent write/fsync pressure scenario; original charge/progress assertions restored",
+  "remaining": [
+    "Matched performance results, including adverse metrics",
+    "Go heap series, backend request metrics and representative writer/random/HTTP workloads",
+    "Complete compatibility, historical EAGAIN attribution and binary distribution notices",
+    "Whole-package coverage/CRAP, read-inner complexity and three previous duplication candidates",
+    "376 unselected filesystem mutation sites; selected score is not whole-package coverage"
+  ]
+}

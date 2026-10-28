@@ -151,14 +151,6 @@ impl Block {
         }
     }
 
-    pub(crate) fn shrink(&mut self, length: usize) {
-        let allocation = Arc::get_mut(&mut self.allocation).expect("unshared output block");
-        assert_eq!(self.range, 0..allocation.data.len());
-        let mut bytes = std::mem::take(&mut allocation.data).into_vec();
-        bytes.truncate(length);
-        allocation.data = bytes.into_boxed_slice();
-        self.range.end = allocation.data.len();
-    }
     pub(crate) fn with_owner(self, owner: Reservation) -> Self {
         self.with_shared_owner(Arc::new(owner))
     }

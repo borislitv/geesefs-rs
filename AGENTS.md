@@ -61,6 +61,9 @@ solutions; convenience or unfamiliarity is not sufficient justification.
   `docs/dependency-decisions.md` before writing a custom replacement.
 - Prefer small adapters around supported APIs. Preserve bounded ownership,
   streaming, cancellation, retries and integrity checks when using dependencies.
+- Maximize use of the selected libraries' mature buffer, streaming, cache and
+  ownership APIs. Inspect those APIs before adding a wrapper or custom mechanism;
+  remove redundant application allocations/copies instead of replacing libraries.
 
 ## Compatibility and verification
 

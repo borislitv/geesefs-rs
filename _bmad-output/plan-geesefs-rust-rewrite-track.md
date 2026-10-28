@@ -26,6 +26,12 @@ uses maintained futures/Tokio adapters. Its exact forty-phase repeat improves
 mean throughput/CPU/p99 versus index prior, with higher final-fifth RSS; profiles
 confirm reduced TCP faults. Continue into standard allocator/page reuse and
 remaining warm tails. See `docs/receive-buffer-reuse.md`; Stage 10 stays open.
+The opt-in standard allocator with explicit request accounting now passes 185
+Rust cases and a forty-phase matched comparison. It reduces page faults/kernel
+CPU but increases RSS against jemalloc and retains Go tail/CPU deficits. A further
+twelve-phase counter ablation has mixed warm results, rejecting a counter-only
+explanation. See `docs/system-allocator-accounting.md`; default jemalloc and all
+unaccepted stages remain unchanged while exact libc attribution continues.
 
 Status format: [ ] - incomplete, [X] - completed. Updated: 2026-10-28.
 The parent owns BMAD orchestration, final review and all VCS delivery.

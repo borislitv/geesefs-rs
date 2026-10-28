@@ -1,0 +1,623 @@
+{
+  "schema": "system-allocator-accounting-comparison-summary-v1",
+  "accepted": false,
+  "comparison_valid": true,
+  "source_commit": "b03783fcc09160e7b97f5ea816f43f89a4953df3",
+  "scope": "additional explicit xattr/forced-stat/full-payload workload; plain-list/stat Go failure retained separately",
+  "runs": 40,
+  "file_checks_verified": 120000,
+  "cpu_windows_recomputed": 280,
+  "artifact_count_verified": 460,
+  "elapsed_seconds": 699.2903771959245,
+  "raw_source_report_sha256": "807869f1e6fb90f079f702a1ba38edf5fa833036f8c1285a2d8c0773e6bdecda",
+  "evidence_index_sha256": "b10a75c743d87c54e7943ac3ad344699ce3d43c5ff86650243d3d495af83d704",
+  "compiled_inputs_verified_against_commits": true,
+  "fixture": {
+    "server": "SeaweedFS 4.51",
+    "files": 3000,
+    "bytes": 8298727528,
+    "listings": 97,
+    "manifest_sha256": "7bd537c12c702a614b51383a28ed167c86dbf2d964696525cdf8b4c2871555a1",
+    "native_full_hashes_before": 3000,
+    "native_full_hashes_after": 3000,
+    "native_exact_listings_after": 97,
+    "read_only_mutations_rejected": 4,
+    "wrong_if_match_rejected": true
+  },
+  "limits": {
+    "filesystem_cpu_quota": 2,
+    "filesystem_cgroup_memory_bytes": 4294967296,
+    "backend_cpu_quota": 4,
+    "backend_cgroup_memory_bytes": 6442450944,
+    "configured_payload_budget_MiB": 512,
+    "entry_limit": 100000,
+    "reader_threads": 4,
+    "read_chunk_bytes": 131072,
+    "allocator": "unchanged default; no candidate tuning",
+    "fresh": "new mount/process; host and backend caches not controlled or globally dropped",
+    "warm-revisit": "complete dataset revisited in the same mount; larger than daemon cache",
+    "metadata": "all stored xattrs checked, GNU stat --cached=never, ordinary stat and full payload; extra work included in whole CPU"
+  },
+  "provenance": {
+    "go-experimental": {
+      "source_revision": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "binary_sha256": "7ad836e0bdd23ea279bb236627e9b130d11c174ae649c7582213a83e5d11a28b",
+      "toolchain": "go1.25.9"
+    },
+    "go-packaged": {
+      "source_revision": "80c214ef14f620d93407454fc76ca01dd71fa25f",
+      "binary_sha256": "e04492363d29985ab1f74521482a01a3c6f7fdeeed35ad1ba0faa991370f4683",
+      "toolchain": "go1.25.9"
+    },
+    "rust-jemalloc-prior": {
+      "source_revision": "f2e0f04e2c79b3f7ec06531268ae620b384dfd6c",
+      "binary_sha256": "340f8e613b3267713fdb28e2b2c8519a74d0aabff3fc7660d051296a772f7392"
+    },
+    "rust": {
+      "source_revision": "b03783fcc09160e7b97f5ea816f43f89a4953df3",
+      "source_base": "f2e0f04e2c79b3f7ec06531268ae620b384dfd6c",
+      "compiled_input_tree_sha256": "e5e91cb9e739e9a557f96b23d9417e8b91a71914162848eac3b06c442210656f",
+      "binary_sha256": "98280f9792419af709e372950ec089ebf7ca56bb59647aa8a35e104e58477399",
+      "features": [
+        "system-allocator"
+      ],
+      "allocator_metric_scope": "sampled net requested Rust-global bytes, including failed requests; not exact live heap or RSS"
+    }
+  },
+  "units": "decimal MB; CPU/elapsed seconds; syscall milliseconds; five-phase means rounded to 6 decimals",
+  "rss_scope": "observed peak and mean final fifth, not a stationary plateau; client Python and GNU stat child separately accounted",
+  "memory_scope": "filesystem cgroup includes controller/client/file/kernel memory; native backend has a separate cgroup; component peaks need not coincide",
+  "missing": [
+    "Go peak/steady heap time series",
+    "backend request metrics: configured endpoint refused connections"
+  ],
+  "mean_columns": [
+    "throughput_MB_second",
+    "daemon_rss_peak_MB",
+    "daemon_rss_steady_MB",
+    "cgroup_cpu_seconds",
+    "daemon_cpu_user_seconds",
+    "daemon_cpu_system_seconds",
+    "client_cpu_user_seconds",
+    "client_cpu_system_seconds",
+    "read_syscall_ms_p50",
+    "read_syscall_ms_p95",
+    "read_syscall_ms_p99",
+    "listing_seconds",
+    "metadata_roundtrip_seconds",
+    "whole_wall_seconds",
+    "read_seconds",
+    "client_rss_peak_MB",
+    "client_rss_steady_MB",
+    "daemon_client_rss_peak_MB",
+    "daemon_client_rss_steady_MB",
+    "allocator_peak_MB",
+    "allocator_steady_MB",
+    "cgroup_current_peak_MB",
+    "cgroup_current_steady_MB",
+    "cgroup_anon_peak_MB",
+    "cgroup_anon_steady_MB",
+    "cgroup_file_peak_MB",
+    "cgroup_file_steady_MB",
+    "cgroup_kernel_peak_MB",
+    "cgroup_kernel_steady_MB",
+    "backend_rss_peak_MB",
+    "backend_rss_steady_MB",
+    "backend_cgroup_current_peak_MB",
+    "backend_cgroup_current_steady_MB",
+    "backend_backend_cpu_seconds"
+  ],
+  "dispersion_columns": [
+    "throughput_MB_second",
+    "read_syscall_ms_p99",
+    "cgroup_cpu_seconds"
+  ],
+  "dispersion_values": [
+    "population_standard_deviation",
+    "minimum",
+    "maximum"
+  ],
+  "groups": [
+    {
+      "implementation": "go-experimental",
+      "state": "fresh",
+      "runs": 5,
+      "means": [
+        598.813152,
+        1329.94089,
+        1203.627274,
+        30.627665,
+        5.304,
+        9.448,
+        7.225504,
+        7.704525,
+        0.281296,
+        1.569984,
+        10.590383,
+        0.483667,
+        1.269055,
+        16.142662,
+        14.092625,
+        56.984371,
+        53.676466,
+        1382.53353,
+        1257.303741,
+        null,
+        null,
+        4300.805734,
+        4293.892141,
+        1402.34752,
+        1277.118904,
+        2976.228966,
+        2962.710457,
+        55.093658,
+        52.958258,
+        762.66455,
+        726.766514,
+        6442.425549,
+        6436.65629,
+        26.548
+      ],
+      "dispersion": [
+        [
+          73.559532,
+          475.434342,
+          670.167699
+        ],
+        [
+          2.142141,
+          8.919129,
+          14.503356
+        ],
+        [
+          4.072993,
+          26.93678,
+          37.84155
+        ]
+      ]
+    },
+    {
+      "implementation": "go-experimental",
+      "state": "warm-revisit",
+      "runs": 5,
+      "means": [
+        587.618651,
+        1273.300582,
+        1189.365891,
+        29.835909,
+        4.592,
+        8.44,
+        7.142304,
+        8.633174,
+        0.279496,
+        1.476242,
+        10.516651,
+        0.030662,
+        0.704629,
+        15.254019,
+        14.226442,
+        57.380864,
+        53.488199,
+        1326.054605,
+        1242.85409,
+        null,
+        null,
+        4300.536218,
+        4293.843126,
+        1345.814528,
+        1262.765508,
+        2988.865126,
+        2974.638195,
+        55.213261,
+        55.174137,
+        731.693056,
+        690.934282,
+        6442.44521,
+        6425.069499,
+        23.85
+      ],
+      "dispersion": [
+        [
+          49.457581,
+          520.101907,
+          643.07453
+        ],
+        [
+          1.348138,
+          9.290102,
+          12.231941
+        ],
+        [
+          2.547161,
+          27.218999,
+          33.457056
+        ]
+      ]
+    },
+    {
+      "implementation": "go-packaged",
+      "state": "fresh",
+      "runs": 5,
+      "means": [
+        566.540154,
+        1253.992038,
+        1200.881428,
+        32.289278,
+        5.556,
+        9.998,
+        7.49881,
+        8.177974,
+        0.300544,
+        1.664277,
+        11.244461,
+        0.488265,
+        1.272014,
+        16.991209,
+        14.932597,
+        57.074483,
+        53.721155,
+        1307.50464,
+        1254.602583,
+        null,
+        null,
+        4298.029466,
+        4293.875011,
+        1329.55095,
+        1276.711342,
+        2991.5136,
+        2963.133806,
+        54.952755,
+        52.895835,
+        733.940122,
+        706.257414,
+        6442.446848,
+        6425.712837,
+        27.596
+      ],
+      "dispersion": [
+        [
+          78.32763,
+          474.499034,
+          665.803671
+        ],
+        [
+          2.309705,
+          8.505496,
+          13.960013
+        ],
+        [
+          4.588344,
+          27.116138,
+          37.637276
+        ]
+      ]
+    },
+    {
+      "implementation": "go-packaged",
+      "state": "warm-revisit",
+      "runs": 5,
+      "means": [
+        558.18318,
+        1308.092826,
+        1208.291615,
+        31.789806,
+        4.922,
+        9.072,
+        7.412861,
+        9.212056,
+        0.298076,
+        1.562856,
+        11.428958,
+        0.027618,
+        0.728719,
+        16.202688,
+        15.151003,
+        57.339085,
+        53.649536,
+        1360.65024,
+        1261.939476,
+        null,
+        null,
+        4301.597082,
+        4293.764882,
+        1382.670336,
+        1283.819969,
+        2983.18889,
+        2953.483421,
+        55.252582,
+        55.187488,
+        754.989466,
+        726.51273,
+        6442.411622,
+        6435.413691,
+        25.362
+      ],
+      "dispersion": [
+        [
+          75.136091,
+          462.963549,
+          652.328491
+        ],
+        [
+          2.334713,
+          8.94271,
+          14.596476
+        ],
+        [
+          4.299237,
+          26.811195,
+          37.292765
+        ]
+      ]
+    },
+    {
+      "implementation": "rust",
+      "state": "fresh",
+      "runs": 5,
+      "means": [
+        582.41881,
+        573.494067,
+        560.084169,
+        31.286116,
+        5.038,
+        8.892,
+        8.13556,
+        8.361253,
+        0.106343,
+        1.894102,
+        11.260122,
+        1.688249,
+        0.652127,
+        17.068754,
+        14.403119,
+        57.53897,
+        53.249945,
+        628.440269,
+        613.334114,
+        515.468983,
+        282.467852,
+        4298.276864,
+        4293.382871,
+        667.68896,
+        652.796757,
+        3642.140262,
+        3587.788989,
+        53.317632,
+        51.202943,
+        735.132058,
+        709.989607,
+        6442.470605,
+        6435.027732,
+        29.766
+      ],
+      "dispersion": [
+        [
+          60.896231,
+          514.298452,
+          673.376537
+        ],
+        [
+          1.553094,
+          8.843939,
+          13.176041
+        ],
+        [
+          3.214614,
+          26.906731,
+          34.917859
+        ]
+      ]
+    },
+    {
+      "implementation": "rust",
+      "state": "warm-revisit",
+      "runs": 5,
+      "means": [
+        565.830884,
+        592.054682,
+        580.177633,
+        30.838861,
+        4.024,
+        8.338,
+        7.935587,
+        9.66176,
+        0.107499,
+        1.789138,
+        11.983003,
+        0.026847,
+        0.657092,
+        15.84578,
+        14.864441,
+        57.030246,
+        53.514165,
+        647.23927,
+        633.691798,
+        521.233559,
+        278.703955,
+        4303.292826,
+        4293.472409,
+        686.558413,
+        673.111376,
+        3589.350195,
+        3565.449852,
+        53.419213,
+        53.366771,
+        747.216077,
+        694.31945,
+        6442.451763,
+        6435.959226,
+        26.902
+      ],
+      "dispersion": [
+        [
+          65.758984,
+          484.663231,
+          659.366111
+        ],
+        [
+          1.962267,
+          9.867896,
+          14.737731
+        ],
+        [
+          3.683202,
+          25.839727,
+          35.5618
+        ]
+      ]
+    },
+    {
+      "implementation": "rust-jemalloc-prior",
+      "state": "fresh",
+      "runs": 5,
+      "means": [
+        567.848484,
+        552.66263,
+        474.324068,
+        31.834795,
+        4.58,
+        10.168,
+        8.171521,
+        8.144402,
+        0.108525,
+        1.929009,
+        11.862348,
+        1.501596,
+        0.692716,
+        17.242291,
+        14.723419,
+        57.158042,
+        53.292344,
+        605.970432,
+        527.616412,
+        518.76488,
+        293.346844,
+        4299.105894,
+        4289.404042,
+        643.077734,
+        565.369585,
+        3778.892595,
+        3670.753155,
+        53.47328,
+        51.361818,
+        716.705792,
+        651.851575,
+        6442.417357,
+        6437.898157,
+        29.32
+      ],
+      "dispersion": [
+        [
+          47.823768,
+          490.757566,
+          625.852439
+        ],
+        [
+          2.104434,
+          9.656494,
+          15.01188
+        ],
+        [
+          2.680537,
+          28.692409,
+          36.318848
+        ]
+      ]
+    },
+    {
+      "implementation": "rust-jemalloc-prior",
+      "state": "warm-revisit",
+      "runs": 5,
+      "means": [
+        531.859738,
+        557.555712,
+        482.782863,
+        32.613309,
+        3.888,
+        9.706,
+        8.273275,
+        9.833414,
+        0.112345,
+        1.862982,
+        12.358595,
+        0.023761,
+        0.603672,
+        16.696718,
+        15.754118,
+        56.7296,
+        53.339052,
+        610.656256,
+        536.121915,
+        524.88345,
+        290.251245,
+        4303.817933,
+        4289.56797,
+        648.035533,
+        573.723642,
+        3759.27849,
+        3660.431928,
+        53.578138,
+        53.51772,
+        736.987546,
+        708.213864,
+        6442.491085,
+        6436.739374,
+        26.78
+      ],
+      "dispersion": [
+        [
+          52.09011,
+          465.22707,
+          597.492325
+        ],
+        [
+          2.243115,
+          9.982036,
+          15.873845
+        ],
+        [
+          3.199822,
+          28.903241,
+          36.93461
+        ]
+      ]
+    }
+  ],
+  "paired_candidate_vs_jemalloc_prior": {
+    "metric_order": [
+      "throughput",
+      "whole_cgroup_cpu",
+      "read_p99",
+      "peak_rss",
+      "final_fifth_rss"
+    ],
+    "fresh_mean_change_percent": [
+      2.565883,
+      -1.72352,
+      -5.076779,
+      3.769286,
+      18.080487
+    ],
+    "fresh_favorable_repetitions_out_of_five": [
+      2,
+      3,
+      4,
+      1,
+      0
+    ],
+    "warm_mean_change_percent": [
+      6.387238,
+      -5.440871,
+      -3.039114,
+      6.187538,
+      20.173618
+    ],
+    "warm_favorable_repetitions_out_of_five": [
+      3,
+      3,
+      2,
+      0,
+      0
+    ]
+  }
+}

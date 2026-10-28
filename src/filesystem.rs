@@ -1068,8 +1068,8 @@ impl Filesystem {
                 ready(Ok(result.take().expect("completed requested result")));
             }
             if cacheable {
-                // Pressure may have replaced the policy while GET was in flight.
-                // Never publish into an orphaned clone invisible to followers.
+                // Publish into the cache followers inspect, including after
+                // pressure reclamation while the GET was in flight.
                 self.cache
                     .lock()
                     .unwrap()
@@ -1087,14 +1087,15 @@ impl Filesystem {
         match self.data.try_reserve(size) {
             Ok(reservation) => Ok(reservation),
             Err(Error::Fs(code)) if code == libc::ENOMEM => {
-                // Replacing the policy also releases deferred Moka entries. Pinned
-                // borrowers keep their allocation permits until their own completion.
+                // Reclaim only as much old cache ownership as admission needs.
+                // Pinned borrowers retain their permits; FIFO waiters stay ahead.
                 {
-                    let mut cache = self.cache.lock().unwrap();
-                    *cache = crate::cache::ReadCache::with_entry_limit(
-                        self.data.limit() as u64,
-                        self.config.entry_limit as usize,
-                    );
+                    let cache = self.cache.lock().unwrap();
+                    while cache.evict_lru() {
+                        if let Ok(reservation) = self.data.try_reserve(size) {
+                            return Ok(reservation);
+                        }
+                    }
                 }
                 if let Ok(reservation) = self.data.try_reserve(size) {
                     return Ok(reservation);

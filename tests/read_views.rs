@@ -7,6 +7,36 @@ const MIB: usize = 1024 * 1024;
 const STEP: usize = 128 * 1024;
 
 #[tokio::test]
+async fn pressure_does_not_discard_recent_backings_when_old_ones_free_enough_bytes() {
+    let store = MemoryStore::new();
+    for (name, byte) in [("old", b'o'), ("recent", b'r'), ("incoming", b'n')] {
+        store.seed(name, &vec![byte; 2 * MIB]);
+    }
+    let mut config = MemoryStore::config(16);
+    config.large_read_cutoff = 0;
+    let fs = Filesystem::new(config, store.clone()).unwrap();
+    assert_eq!(fs.effective_budgets().data_shared_bytes, 5 * MIB);
+    let old = fs.lookup(1, "old").await.unwrap().ino;
+    let recent = fs.lookup(1, "recent").await.unwrap().ino;
+    let incoming = fs.lookup(1, "incoming").await.unwrap().ino;
+    for (ino, byte) in [(old, b'o'), (recent, b'r'), (incoming, b'n')] {
+        let data = fs.read(ino, 0, STEP).await.unwrap();
+        assert_eq!(data.as_slice(), vec![byte; STEP]);
+        drop(data);
+    }
+    assert_eq!(store.read_ranges.lock().unwrap().len(), 3);
+
+    let data = fs.read(recent, 0, STEP).await.unwrap();
+    assert_eq!(data.as_slice(), vec![b'r'; STEP]);
+    assert_eq!(
+        store.read_ranges.lock().unwrap().len(),
+        3,
+        "pressure must not refetch a recent backing when evicting old data was sufficient"
+    );
+    assert!(fs.effective_budgets().data_used_bytes <= 5 * MIB);
+}
+
+#[tokio::test]
 async fn a_borrowed_miss_reply_reuses_its_complete_charged_backing() {
     let expected: Vec<u8> = (0..2 * MIB).map(|at| (at % 251) as u8).collect();
     for (offset, length) in [(0, STEP), (65_539, 4096), (2 * MIB - 7, STEP)] {

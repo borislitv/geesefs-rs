@@ -1,10 +1,8 @@
-use moka::sync::Cache;
+use lru::LruCache;
 use std::{
     collections::BTreeMap,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    num::NonZeroUsize,
+    sync::{Arc, Mutex},
 };
 
 use crate::budget::{Block, Reservation};
@@ -12,21 +10,32 @@ use crate::budget::{Block, Reservation};
 /// Best-effort retained policy. Blocks remain charged to their allocation budget
 /// after eviction while any reader pins them. Cache admission never reserves bytes.
 type Key = (u64, u64, u64);
-#[derive(Clone)]
-struct Entry {
-    block: Block,
-    stamp: u64,
+struct State {
+    entries: LruCache<Key, Block>,
+    index: BTreeMap<Key, usize>,
+    weight: u64,
 }
-struct IndexEntry {
-    stamp: u64,
-    length: usize,
+
+impl State {
+    fn removed(&mut self, key: Key, block: Block) {
+        self.index.remove(&key);
+        self.weight -= block.as_slice().len() as u64;
+    }
+
+    fn evict_lru(&mut self) -> bool {
+        if let Some((key, block)) = self.entries.pop_lru() {
+            self.removed(key, block);
+            true
+        } else {
+            false
+        }
+    }
 }
+
 #[derive(Clone)]
 pub struct ReadCache {
-    entries: Cache<Key, Entry>,
-    index: Arc<Mutex<BTreeMap<Key, IndexEntry>>>,
-    sequence: Arc<AtomicU64>,
-    entry_limit: usize,
+    state: Arc<Mutex<State>>,
+    capacity: u64,
 }
 
 impl ReadCache {
@@ -34,34 +43,23 @@ impl ReadCache {
         Self::with_entry_limit(capacity, 100000)
     }
     pub fn with_entry_limit(capacity: u64, entry_limit: usize) -> Self {
-        let index = Arc::new(Mutex::new(BTreeMap::<Key, IndexEntry>::new()));
-        let evicted = index.clone();
         Self {
-            index,
-            sequence: Arc::new(AtomicU64::new(1)),
-            entry_limit: entry_limit.max(1),
-            entries: Cache::builder()
-                .max_capacity(capacity)
-                .weigher(|_, value: &Entry| {
-                    u32::try_from(value.block.as_slice().len()).unwrap_or(u32::MAX)
-                })
-                .eviction_listener(move |key: Arc<Key>, value: Entry, _| {
-                    let mut index = evicted.lock().unwrap();
-                    if index
-                        .get(key.as_ref())
-                        .is_some_and(|entry| entry.stamp == value.stamp)
-                    {
-                        index.remove(key.as_ref());
-                    }
-                })
-                .build(),
+            state: Arc::new(Mutex::new(State {
+                entries: LruCache::sparse(NonZeroUsize::new(entry_limit.max(1)).unwrap()),
+                index: BTreeMap::new(),
+                weight: 0,
+            })),
+            capacity,
         }
     }
 
     pub fn get(&self, inode: u64, generation: u64, offset: u64) -> Option<Block> {
-        self.entries
+        self.state
+            .lock()
+            .unwrap()
+            .entries
             .get(&(inode, generation, offset))
-            .map(|value| value.block)
+            .cloned()
     }
 
     pub fn covering(
@@ -79,16 +77,16 @@ impl ReadCache {
         let mut upper = (inode, generation, offset);
         loop {
             let candidate = self
-                .index
+                .state
                 .lock()
                 .unwrap()
+                .index
                 .range((inode, generation, 0)..=upper)
                 .rev()
-                // Reject unusable spans without recording Moka reads or cloning
+                // Reject unusable spans without updating recency or cloning
                 // payload owners. An older overlapping span may still cover it.
-                .find(|&(&(_, _, start), entry)| {
-                    entry
-                        .length
+                .find(|&(&(_, _, start), span_length)| {
+                    span_length
                         .checked_sub((offset - start) as usize)
                         .is_some_and(|available| available >= length)
                 })
@@ -146,35 +144,34 @@ impl ReadCache {
             return;
         }
         let key = (inode, generation, offset);
-        let stamp = self.sequence.fetch_add(1, Ordering::Relaxed);
-        let victim = {
-            let mut index = self.index.lock().unwrap();
-            index.insert(
-                key,
-                IndexEntry {
-                    stamp,
-                    length: block.as_slice().len(),
-                },
-            );
-            if index.len() > self.entry_limit {
-                index.pop_first().map(|(key, _)| key)
-            } else {
-                None
-            }
-        };
-        if let Some(victim) = victim {
-            self.entries.invalidate(&victim);
-            if victim == key {
-                return;
-            }
+        let length = block.as_slice().len();
+        let weight = length as u64;
+        let mut state = self.state.lock().unwrap();
+        if let Some(old) = state.entries.pop(&key) {
+            state.removed(key, old);
         }
-        self.entries.insert(key, Entry { block, stamp });
-        self.entries.run_pending_tasks();
+        if weight > self.capacity {
+            return;
+        }
+        while state.weight > self.capacity - weight {
+            assert!(state.evict_lru(), "positive cache weight owns entries");
+        }
+        if let Some((key, victim)) = state.entries.push(key, block) {
+            state.removed(key, victim);
+        }
+        state.weight += weight;
+        state.index.insert(key, length);
+    }
+
+    /// Release one cache owner; caller views retain their complete backing charge.
+    pub(crate) fn evict_lru(&self) -> bool {
+        self.state.lock().unwrap().evict_lru()
     }
 
     pub fn clear(&self) {
-        self.entries.invalidate_all();
-        self.entries.run_pending_tasks();
-        self.index.lock().unwrap().clear();
+        let mut state = self.state.lock().unwrap();
+        state.entries.clear();
+        state.index.clear();
+        state.weight = 0;
     }
 }

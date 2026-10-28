@@ -41,6 +41,11 @@ EIO and all broader acceptance gaps. Its forty-phase comparison preserves data
 and reduces excess payload, but fresh CPU/throughput/p99 regress versus prior
 and warm results remain mixed. Whole-cache pressure eviction is the next measured
 path to reproduce; see `docs/fragment-admission-transfer.md`.
+That filesystem pressure repro now fails with four GETs instead of three and is
+fixed using supported synchronous LRU victim removal. The candidate passes 192
+Rust cases, weighted/entry-limit/pinned/FIFO checks and the Rust-only mounted sweep
+with known hardlink EIO retained. Its repeated comparison remains pending; see
+`docs/selective-pressure-eviction.md`.
 
 Status format: [ ] - incomplete, [X] - completed. Updated: 2026-10-28.
 The parent owns BMAD orchestration, final review and all VCS delivery.

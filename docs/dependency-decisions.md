@@ -136,6 +136,31 @@ keep full-backing/FIFO/cancellation/checksum invariants and unchanged byte limit
 No new allocator, pool, reader or cache implementation is required. Whole-file
 amplification, throughput, RSS and tails still require matched measurements.
 
+### Synchronous pressure eviction (2026-10-28)
+
+A public Filesystem regression now reproduces whole-cache loss with the real
+equal cache/data budgets: three 2 MiB objects, a 5 MiB data lane, then revisiting
+the recent object causes a fourth backend GET although evicting the oldest object
+was sufficient. This is separate from the rejected cache-only TinyLFU example.
+
+The missing requirement is synchronous victim removal before payload admission.
+Moka 0.12.16 has no public pop-LRU API, and remove returns a clone while retaining
+its deferred maintenance model. Changing its admission policy alone cannot make
+permits available before allocating a new payload. Reuse maintained MIT-licensed
+[`lru`](https://github.com/jeromefroe/lru-rs) 0.19.0 instead for payload retention,
+using sparse to avoid preallocating the configured entry limit, push for bounded
+entry eviction, and pop_lru to release cache ownership synchronously. Keep Moka
+for metadata caches. The existing ordered range index and exact backing budget
+remain application state; do not implement a new replacement algorithm or pool.
+
+Inspected upstream 0.18.5 APIs and the 0.19.0 change at
+`3ed2e28cfc53059c5a29d6c4f73f5ddf26a29e98`: the latter corrects Send/Sync bounds for
+shared iterators. Select that maintained version; the SDK's existing 0.18.5 remains
+pinned rather than silently updating unrelated dependencies. Our cache accesses
+stay mutex-protected and do not expose shared iterators across threads. Verify
+weighted/entry limits, replacement/coverage, pinned views, FIFO and cancellation
+through public APIs before another matched comparison.
+
 The package forbids unsafe code for every target. rustix 1.1.5 (Apache-2.0 WITH
 LLVM-exception OR Apache-2.0 OR MIT,
 <https://docs.rs/rustix/1.1.5/rustix/process/>) provides safe uid/gid operations;

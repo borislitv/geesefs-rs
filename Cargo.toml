@@ -40,6 +40,7 @@ stats_alloc = { version = "=0.1.10", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
 clap = { version = "4", features = ["derive"] }
 moka = { version = "=0.12.16", features = ["sync"] }
+lru = "=0.19.0"
 percent-encoding = "2"
 quick-xml = { version = "=0.42.0", features = ["serialize"] }
 serde = { version = "1", features = ["derive"] }

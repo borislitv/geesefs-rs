@@ -115,6 +115,11 @@ blocks before Moka access. Separate absolute profiles confirm reduced lookup CPU
 but its forty-phase matched repeat retains worse warm throughput/CPU/p99. All
 120,000 file checks pass; this is not overall performance acceptance. Passthrough
 and disk-backed caching are deferred beyond the first stage.
+The [receive-buffer reuse follow-up](docs/receive-buffer-reuse.md) reproduces a
+consumed SDK chunk retaining shared transport storage. Maintained futures/Tokio
+adapters release it promptly. The matched repeat improves mean throughput/CPU/p99
+against exact prior Rust and separate profiles show fewer page faults, but
+final-fifth RSS and remaining warm Go deficits keep overall acceptance open.
 
 Backend IAM/profile authentication, signature discovery/SigV2, encryption and
 request options now have loopback HTTP/TLS coverage. See [backend options](docs/backend-options.md)

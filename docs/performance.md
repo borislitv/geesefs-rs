@@ -53,6 +53,14 @@ not an overall win: Rust page faults and kernel copies remain, and profile timin
 are not acceptance repetitions. See [absolute attribution](read-cost-attribution.md)
 and both numeric receipts. Passthrough/disk caching are outside the first stage.
 
+The [consumed receive-buffer fix](receive-buffer-reuse.md) uses maintained
+futures/Tokio adapters after a failure-sensitive ownership regression. Forty
+matched phases verify 120,000 files and improve throughput 4.96% fresh / 7.22%
+warm, whole CPU 5.17% / 6.29% and p99 4.81% / 11.25% against exact index prior.
+Final-fifth RSS rises 1.98% / 4.67%; warm p99 remains worse than both Go references.
+Nine separate profiles confirm lower TCP/page faults and expose admitted-fragment
+allocation as the next actor. This is measured progress, not overall acceptance.
+
 ## Runner and reproduction
 
 `bench/workloads.json`, `bench/compare.py` and `scripts/bench_worker.py` build the

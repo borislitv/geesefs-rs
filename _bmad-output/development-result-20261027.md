@@ -131,6 +131,15 @@ work and separate cold-listing costs remain. See docs/range-index-coverage.md an
 its complete numeric/profile receipts. Passthrough/disk cache are deferred beyond
 the first stage by the operator.
 
+The next source `f2e0f04e2c79b3f7ec06531268ae620b384dfd6c` reproduces consumed
+ByteStream chunks retaining transport backing and uses maintained futures/Tokio
+reader adapters to release them. All 185 Rust / 37 Python cases, fmt/Clippy and
+337-package public audit pass. Forty matched phases verify 120,000 files and
+improve throughput/whole CPU/p99 against exact index prior, but final-fifth RSS
+rises and Go warm-tail deficits remain. Nine separate profiles confirm minor
+fault reduction 1,168,644 → 740,848 and isolate remaining fragment-page cost.
+Continue with a standard allocator comparison; see docs/receive-buffer-reuse.md.
+
 Compatibility and comparative performance are **UNACCEPTED**. Delivery is a draft
 for review, not a complete port or permission to replace a served mount. Reduce
 the remaining tail latency and metadata cost, resolve compatibility gaps and Go

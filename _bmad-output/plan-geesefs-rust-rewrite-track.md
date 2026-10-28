@@ -21,6 +21,11 @@ candidate passes 184 Rust cases and another 120,000-file matched repeat, but
 warm throughput/CPU/p99 regress. Separate profiles confirm reduced lookup CPU
 while page work remains; see `docs/range-index-coverage.md`. Overall acceptance
 is still incomplete. Passthrough/disk cache are deferred beyond the first stage.
+The receive-buffer continuation reproduces consumed SDK backing retention and
+uses maintained futures/Tokio adapters. Its exact forty-phase repeat improves
+mean throughput/CPU/p99 versus index prior, with higher final-fifth RSS; profiles
+confirm reduced TCP faults. Continue into standard allocator/page reuse and
+remaining warm tails. See `docs/receive-buffer-reuse.md`; Stage 10 stays open.
 
 Status format: [ ] - incomplete, [X] - completed. Updated: 2026-10-28.
 The parent owns BMAD orchestration, final review and all VCS delivery.

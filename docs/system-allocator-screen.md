@@ -39,3 +39,6 @@ The next candidate needs truthful heap accounting and a full exact-source
 Go/jemalloc/system comparison before choosing a default. Maintained wrappers must
 preserve platform realloc/calloc behavior, and their measured counter overhead
 must be included. Production, cache budgets and durability are unchanged.
+
+The [opt-in accounting candidate](system-allocator-accounting.md) now preserves
+platform realloc/calloc and explicitly reports request-counter limitations.

@@ -79,6 +79,33 @@ needed. ByteStream remains responsible for SDK body/checksum errors. Verify
 exact payloads, partial/empty chunks, prompt owner release, EOF/errors and
 cancellation before measuring the same-budget native workload.
 
+### Standard allocator candidate and accounting (2026-10-28)
+
+The [same-source system allocator screen](system-allocator-screen.md) improves
+throughput/CPU/p99 but increases RSS and lacks heap telemetry. Keep default
+jemalloc while comparing an explicit `system-allocator` build. Reuse published
+stats_alloc 0.1.10 (MIT, <https://github.com/neoeinstein/stats_alloc>) around
+`std::alloc::System`; its stable release is from 2022, the repository is not
+archived, and the inspected implementation delegates alloc/calloc/realloc/free
+to System. No application GlobalAlloc implementation or unsafe exception.
+
+Report sampled net requested Rust-global bytes as allocated minus deallocated
+counters, preserving both raw counters. This is a non-atomic sampled difference,
+not native heap/retained/RSS or jemalloc size-class accounting. A transient
+inconsistent subtraction is missing, not zero. Native allocations bypassing
+Rust's global allocator and allocator metadata/retention remain outside that
+counter; requests are recorded before the underlying call, including failed
+allocations/reallocations, so it is not an exact live-allocation gauge even after
+quiescence. Preserve all six counters and label this limitation in each sample;
+RSS/cgroup/backend metrics remain necessary. Counter overhead is part of the
+candidate measurement.
+
+Reject peak_alloc 0.3.1 for this comparison: its inspected implementation replaces
+system realloc with alloc/copy/free and calloc with alloc/zeroing, changing the
+allocator behavior under investigation. The small stats_alloc wrapper preserves
+those platform operations; its six counters and scope are explicit. No force GC,
+malloc tuning, buffer pool, cache reduction or concurrency change is introduced.
+
 The package forbids unsafe code for every target. rustix 1.1.5 (Apache-2.0 WITH
 LLVM-exception OR Apache-2.0 OR MIT,
 <https://docs.rs/rustix/1.1.5/rustix/process/>) provides safe uid/gid operations;

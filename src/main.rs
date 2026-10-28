@@ -10,7 +10,12 @@ use geesefs_rs::{
 use std::{sync::Arc, time::Duration};
 
 #[global_allocator]
+#[cfg(not(feature = "system-allocator"))]
 static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[global_allocator]
+#[cfg(feature = "system-allocator")]
+static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::parse_from(normalize_fstab(std::env::args_os().collect()));
@@ -48,17 +53,43 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let mut timer = tokio::time::interval(Duration::from_millis(50));
             loop {
                 timer.tick().await;
-                let allocated = tikv_jemalloc_ctl::epoch::advance()
-                    .and_then(|_| tikv_jemalloc_ctl::stats::allocated::read())
-                    .ok();
+                #[cfg(not(feature = "system-allocator"))]
+                let (allocator, allocated, scope, counters) = (
+                    "jemalloc",
+                    tikv_jemalloc_ctl::epoch::advance()
+                        .and_then(|_| tikv_jemalloc_ctl::stats::allocated::read())
+                        .ok(),
+                    "jemalloc allocated size classes; excludes retained/free pages and external allocators",
+                    serde_json::Value::Null,
+                );
+                #[cfg(feature = "system-allocator")]
+                let (allocator, allocated, scope, counters) = {
+                    let stats = ALLOCATOR.stats();
+                    (
+                        "system",
+                        stats.bytes_allocated.checked_sub(stats.bytes_deallocated),
+                        "sampled net requested Rust global bytes; includes failed requests; non-atomic snapshot; excludes native allocations, allocator overhead and retention",
+                        serde_json::json!({
+                            "provider": "stats_alloc 0.1.10",
+                            "bytes_allocated": stats.bytes_allocated,
+                            "bytes_deallocated": stats.bytes_deallocated,
+                            "allocations": stats.allocations,
+                            "deallocations": stats.deallocations,
+                            "reallocations": stats.reallocations,
+                            "bytes_reallocated": stats.bytes_reallocated,
+                        }),
+                    )
+                };
                 let sample = serde_json::json!({
                     "unix_time_ns": std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_nanos(),
                     "monotonic_source": "interval-50ms",
-                    "allocator": "jemalloc",
+                    "allocator": allocator,
                     "allocated_bytes": allocated,
+                    "allocated_bytes_scope": scope,
+                    "allocation_counters": counters,
                     "effective_budgets": stats_fs.effective_budgets(),
                 });
                 if writeln!(file, "{sample}").is_err() {

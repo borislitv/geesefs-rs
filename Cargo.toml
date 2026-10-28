@@ -10,6 +10,9 @@ repository = "https://github.com/borislitv/geesefs-rs"
 [lints.rust]
 unsafe_code = "forbid"
 
+[features]
+system-allocator = ["dep:stats_alloc"]
+
 [dependencies]
 async-trait = "0.1"
 aws-config = { version = "=1.13.0", default-features = false, features = ["rt-tokio", "default-https-client"] }
@@ -33,6 +36,7 @@ libc = "0.2"
 rustix = { version = "=1.1.5", features = ["process"] }
 tikv-jemallocator = { version = "=0.7.0", features = ["stats"] }
 tikv-jemalloc-ctl = { version = "=0.7.0", features = ["stats"] }
+stats_alloc = { version = "=0.1.10", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
 clap = { version = "4", features = ["derive"] }
 moka = { version = "=0.12.16", features = ["sync"] }

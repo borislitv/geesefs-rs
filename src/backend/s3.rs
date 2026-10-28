@@ -15,8 +15,10 @@ use aws_sdk_s3::{
     primitives::ByteStream,
     types::{CompletedMultipartUpload, CompletedPart},
 };
+use futures_util::TryStreamExt;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio_util::compat::FuturesAsyncReadCompatExt;
 
 use crate::{
     budget::{Block, Budget, Reservation},
@@ -1101,7 +1103,16 @@ impl S3 {
         first: Reservation,
         output: &super::RangeSink,
     ) -> Result<()> {
-        let mut body = body.into_async_read();
+        // Unlike StreamReader<Bytes>, this library adapter drops a consumed
+        // chunk before polling the next one, allowing the HTTP buffer to reuse
+        // its backing allocation even with bytes 1.12.1's retaining advance().
+        let chunks = futures_util::stream::try_unfold(body, |mut body| async {
+            body.try_next()
+                .await
+                .map(|chunk| chunk.map(|chunk| (chunk, body)))
+                .map_err(std::io::Error::other)
+        });
+        let mut body = std::pin::pin!(chunks.into_async_read().compat());
         let mut first = Some(first);
         let mut filled = 0;
         while filled < length {

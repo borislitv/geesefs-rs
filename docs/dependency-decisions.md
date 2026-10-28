@@ -36,7 +36,7 @@ the read-buffer continuation. The miss-reply optimization reuses the existing
 immutable `Block` view and Tokio-owned reservation lifetime; it adds no pool,
 allocator, stream protocol or cache implementation. AWS Smithy ByteStream 1.9.0
 already exposes `try_next() -> Result<Option<Bytes>, Error>` and
-`into_async_read() -> impl AsyncBufRead`; the current body adapter uses the latter.
+`into_async_read() -> impl AsyncBufRead`; the initial body adapter used the latter.
 Direct transport `Bytes` adoption must account for a slice's complete retained
 allocation, not just its visible length, and preserve whole-body checksum/EOF
 barriers. That is a separate verified adapter change, not a reason to replace
@@ -53,6 +53,31 @@ Check the exact copied count before transferring the Vec into the existing
 charged Block. The standard/library implementations own buffer initialization;
 no local unsafe, manual polling, pool, BufMut implementation or new dependency
 is needed. The existing final EOF and whole-body checksum barriers remain.
+
+### Consumed transport-chunk lifetime (2026-10-28)
+
+The selected SDK reader uses `tokio-util` 0.7.20 `StreamReader<Bytes>`. Its
+`consume` calls `Bytes::advance`, leaving the empty handle stored until the next
+body poll finishes. In bytes 1.12.1 that handle still owns its shared allocation.
+[bytes #840](https://github.com/tokio-rs/bytes/issues/840) and the still-open
+[advance fix #856](https://github.com/tokio-rs/bytes/pull/856) describe this
+retention; the latest published release checked is still 1.12.1. The merged
+clear/truncate change #842 is not a released fix for advance. Hyper's shared
+`BytesMut::split_to(...).freeze()` receive path makes reuse sensitive to this
+lifetime. Header pinning in Hyper #4060 is a related mechanism but its HTTP/2
+proxy reproduction is not this workload; a transport replacement is unjustified.
+
+Reuse maintained `futures-util` 0.3.34 (MIT OR Apache-2.0) `try_unfold` and
+[`TryStreamExt::into_async_read`](https://docs.rs/futures-util/0.3.34/futures_util/stream/trait.TryStreamExt.html#method.into_async_read),
+whose AsyncBufRead `consume` drops the fully consumed chunk immediately. Enable
+its `io` feature, adding public futures-io 0.3.34 (MIT OR Apache-2.0), and use
+[`tokio-util::compat`](https://docs.rs/tokio-util/0.7.20/tokio_util/compat/index.html)
+(MIT) to retain the existing Tokio copy_buf/take/reservation path. Both adapters
+already have maintained implementations; no custom reader/pool, unsafe code,
+dependency fork, retained transport payload cache or protocol replacement is
+needed. ByteStream remains responsible for SDK body/checksum errors. Verify
+exact payloads, partial/empty chunks, prompt owner release, EOF/errors and
+cancellation before measuring the same-budget native workload.
 
 The package forbids unsafe code for every target. rustix 1.1.5 (Apache-2.0 WITH
 LLVM-exception OR Apache-2.0 OR MIT,

@@ -25,7 +25,7 @@ mime = "0.3"
 serde_json = "1"
 http = "1"
 http-body = "1"
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "io"] }
 s3s-sigv2 = "=0.17.0"
 bytes = "=1.12.1"
 fuser = "=0.18.0"
@@ -42,6 +42,7 @@ serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 unicode-general-category = "=1.1.0"
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "io-util"] }
+tokio-util = { version = "=0.7.20", features = ["compat"] }
 
 [dev-dependencies]
 crc32fast = "1"

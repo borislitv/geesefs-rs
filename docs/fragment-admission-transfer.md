@@ -82,11 +82,58 @@ The subsequent two legacy accounting failures exposed the old whole-GET
 expectations above; they are retained and corrected to physical backing sizes,
 not retried until green or weakened to ignore leakage.
 
-## Next measured check
+## Matched result and remaining work
 
-Compare exact source/binary inputs with frozen System and both Go references on
-the same sealed fixture and unchanged budgets. Include backend payload bytes and
-request counters now that the fixture listener works, alongside CPU, peak/final-
-fifth RSS, cgroup/file/kernel memory, latency and all adverse repetitions. Native
-functional checks do not establish a speed or RSS improvement. Overall acceptance
-remains open.
+Exact source `666bb2e7e03e797650c6fd0cd4119a3a9fd7b1c5` completes all forty rotated
+phases, repetitions 130–134, in 829.812 s. All 120,000 file checks, native hashes
+before/after, 97 listings, 280 CPU windows, forty backend-counter windows and 460
+artifact hashes pass. Both Rust executables use System/stats_alloc; only the two
+ownership inputs differ. The same sealed fixture, budgets, metadata work and
+CPU/memory quotas apply.
+
+The [numeric receipt](fragment-admission-transfer-results-20261028.json) includes
+all selected CPU/memory scopes, counter metrics and dispersion. Five-phase means,
+decimal MB; RSS is peak / final-fifth mean, not a stationary plateau.
+
+| Implementation/state | Read MB/s | Daemon RSS peak / final-fifth MB | Whole cgroup CPU s | Read p99 ms | Listing s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Go experimental fresh | 459.133 | 1284.634 / 1204.717 | 38.758 | 16.735 | 0.515 |
+| Go experimental warm-revisit | 446.397 | 1283.653 / 1220.570 | 38.591 | 17.500 | 0.037 |
+| Go packaged fresh | 470.645 | 1271.024 / 1202.470 | 38.147 | 16.319 | 0.590 |
+| Go packaged warm-revisit | 453.173 | 1274.926 / 1221.329 | 37.910 | 16.599 | 0.041 |
+| Rust fragment-owner fresh | 509.493 | 574.050 / 566.073 | 34.890 | 15.107 | 1.825 |
+| Rust fragment-owner warm-revisit | 469.036 | 590.071 / 580.326 | 36.016 | 16.865 | 0.025 |
+| Rust frozen System fresh | 520.080 | 569.839 / 557.035 | 34.252 | 14.669 | 1.864 |
+| Rust frozen System warm-revisit | 467.826 | 590.605 / 578.900 | 36.237 | 17.068 | 0.019 |
+
+Against prior System, fresh mean throughput regresses 2.04%, CPU 1.86%, p99 2.98%,
+peak RSS 0.74% and final-fifth RSS 1.62%. Warm mean throughput improves 0.26%, CPU
+0.61%, p99 1.19% and peak RSS 0.09%, but final-fifth RSS rises 0.25%. Favorable
+throughput pairs are only 2/5 in each state; CPU 3/5 fresh and 2/5 warm. Candidate
+throughput population stdev is 28.922/35.750 MB/s and p99 stdev 1.476/2.167 ms.
+Retain all adverse pairs rather than calling the accounting correction a general
+speed win.
+
+Payload writes above the logical 8298.728 MB dataset decrease, but remain:
+
+| Source/state | Extra object payload MB | Extra payload % | Range responses |
+| --- | ---: | ---: | ---: |
+| Candidate fresh | 237.420 | 2.861 | 4003.2 |
+| Prior fresh | 342.179 | 4.123 | 4000.6 |
+| Candidate warm-revisit | 473.409 | 5.705 | 3887.0 |
+| Prior warm-revisit | 520.419 | 6.271 | 3880.6 |
+
+Experimental Go has zero excess in these windows; packaged Go has 0.025 MB mean
+fresh excess and zero warm excess. Both Rust sources still have 213 fresh
+LIST-labelled requests versus seven. GET-labelled HTTP 200 includes HEAD; do not
+misclassify metadata or directory probes as full-body downloads or filesystem
+failures. Counter windows follow the phase boundaries, not a forced quiescent
+state; background read-ahead can cross those boundaries.
+
+Candidate fresh throughput/CPU/p99 and process RSS beat both Go means in this
+repeat, while warm p99 still loses to packaged Go and cold listing remains much
+slower. Whole-cgroup memory stays near its cap with different file-cache
+composition. The correction establishes backing ownership, not all-metric
+performance acceptance. Remaining payload work and whole-cache pressure eviction
+need further attribution; do not stop at the favorable fresh comparison. Default
+allocator, budgets and production acceptance are unchanged.

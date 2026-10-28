@@ -37,8 +37,10 @@ copy/allocation work and 3.18–4.82% excess Rust response payload in an eight-p
 inventory. A gated SDK regression then reproduces full-GET reservation retention
 after an independent prefix is freed. Fragment-scoped transfer passes 188 Rust
 cases; the Rust-only mounted reader/writer sweep completes with the known hardlink
-EIO and all broader acceptance gaps. Its matched comparison is still pending;
-see `docs/fragment-admission-transfer.md`.
+EIO and all broader acceptance gaps. Its forty-phase comparison preserves data
+and reduces excess payload, but fresh CPU/throughput/p99 regress versus prior
+and warm results remain mixed. Whole-cache pressure eviction is the next measured
+path to reproduce; see `docs/fragment-admission-transfer.md`.
 
 Status format: [ ] - incomplete, [X] - completed. Updated: 2026-10-28.
 The parent owns BMAD orchestration, final review and all VCS delivery.

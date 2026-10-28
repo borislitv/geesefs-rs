@@ -14,6 +14,7 @@ import signal
 import subprocess
 import tempfile
 import time
+import urllib.request
 
 import boto3
 from botocore.config import Config
@@ -154,7 +155,7 @@ def serve(args):
     command = [args.weed, "mini", f"-dir={data}", "-ip=127.0.0.1", "-ip.bind=127.0.0.1",
                f"-s3.config={config}", "-master.telemetry=false", "-webdav=false", "-admin.ui=false",
                "-s3.iam=false", "-s3.autoCreateBucket=false", "-s3.port.iceberg=0", "-s3.port.lance=0",
-               "-master.volumeSizeLimitMB=1024", "-volume.max=16", "-s3.metricsPort=9328"]
+               "-master.volumeSizeLimitMB=1024", "-volume.max=16", "-metricsPort=9328"]
     endpoint = "http://127.0.0.1:8333"
     process = None
     logs = []
@@ -170,6 +171,12 @@ def serve(args):
                 raise RuntimeError(f"native fixture {label} exited {process.returncode}; inspect server log")
             try:
                 client(endpoint).list_objects_v2(Bucket=BUCKET, MaxKeys=1)
+                # mini starts one shared metrics listener; s3.metricsPort is not
+                # used by that entry point. Require metrics before measuring.
+                with urllib.request.urlopen("http://127.0.0.1:9328/metrics", timeout=5) as response:
+                    metrics = response.read(8 * 1024 * 1024 + 1)
+                if len(metrics) > 8 * 1024 * 1024 or b"s3_request_total{" not in metrics:
+                    raise RuntimeError("native fixture S3 request metrics unavailable")
                 return process
             except Exception:
                 if time.monotonic() >= until:

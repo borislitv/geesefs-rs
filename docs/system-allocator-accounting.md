@@ -135,3 +135,27 @@ Standard-LIST cold type
 resolution remains constrained by fuser 0.18.0's concrete FileType API; do not
 label unknown objects as regular files to remove required HEAD requests.
 Overall compatibility/performance acceptance remains open.
+
+## Resolved libc follow-up
+
+The [exact-symbol receipt](system-allocator-libc-20261028.json) redecodes the same
+nine captures, without another timed workload. Ubuntu libc6-dbg 2.43-2ubuntu2.4
+matches recorded Build ID `066527e430a32768d82741e00b81eebb1a872294`. Verify the
+package, runtime ELF and separate debug file before use; do not upgrade libc.
+Nine resolved period reports, six Rust stack reports and all three native assets
+are checked, preserving original sample periods and total libc leaf time.
+
+Use the runtime ELF for unwinding and the separate debug object for symbols.
+The first debug-only cache entry resolved symbols but lost callers; an initial
+parser also omitted inline pseudo-frames. Retain those attempts and use the
+supported `perf script --no-inline` mode with the corrected runtime/debug cache.
+The final exclusive partition reconciles with all original libc leaf periods.
+
+System's 1.588 sampled libc CPU seconds include 0.785 s of admitted-fragment
+copying, 0.387 s of libc allocator leaves, 0.031 s of buffer-growth copying and
+0.013 s of HTTP/SDK copying. Jemalloc's 1.045 s include 0.680 s of admitted-fragment
+copying. These are leaf costs, excluding kernel/descendant allocation work; other
+or unresolved callers remain separately classified. They do not justify replacing
+the transport or writing a custom pool. The next
+[backend request inventory](backend-request-cost.md) restores missing S3 metrics
+and exposes additional payload/listing work to investigate.

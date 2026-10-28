@@ -33,6 +33,17 @@ byte-correct and reduces p99 versus the exact prior Rust, but throughput, CPU,
 steady RSS and p50/p95 regress. Both Go references still win throughput, CPU and
 p99. The complete result is retained as a tradeoff, not overall acceptance.
 
+The [cached-fragment lookup repeat](cached-fragment-lookup.md) improves mean
+throughput/CPU/p99 against that exact body-prefix prior, with mixed warm pairs
+and slightly higher RSS. The subsequent
+[borrowed miss-reply](borrowed-read-reply.md) and
+[initialized-fragment](initialized-read-fragment.md) repeats each add forty
+equivalent phases and 120,000 passing file checks. Reusing existing immutable
+views and Tokio copy_buf/take removes redundant application copy/zeroing, but
+neither repeat demonstrates a reproducible overall speed/CPU/RSS/tail win.
+Both Go references remain faster. All 920 indexed artifacts, 560 CPU windows,
+both sets of compiled-input commits and the adverse paired results are retained.
+
 ## Runner and reproduction
 
 `bench/workloads.json`, `bench/compare.py` and `scripts/bench_worker.py` build the

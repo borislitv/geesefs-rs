@@ -106,6 +106,10 @@ The [borrowed miss-reply follow-up](docs/borrowed-read-reply.md) removes a secon
 payload allocation in the synchronous FUSE callback while retaining independent
 owned replies. Its matched forty-phase repeat is correct but shows no speed/RSS
 win against cache prior; the adverse result and remaining Go gap are retained.
+The [initialized-fragment follow-up](docs/initialized-read-fragment.md) uses
+Tokio's existing `copy_buf`/`take` and Vec writer APIs instead of pre-zeroing a
+fully overwritten fragment. Its matched repeat still has mixed throughput,
+CPU/RSS and tail results; neither local optimization establishes an overall win.
 
 Backend IAM/profile authentication, signature discovery/SigV2, encryption and
 request options now have loopback HTTP/TLS coverage. See [backend options](docs/backend-options.md)

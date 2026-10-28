@@ -12,7 +12,10 @@ allocation in the synchronous FUSE callback; 181 Rust cases, ten independent
 faults and five selected mutants pass. Their forty-phase matched repeat has no
 speed/RSS win against cache prior and retains worse fresh p99. Stage 10 and
 overall compatibility/performance acceptance remain incomplete. See
-`docs/borrowed-read-reply.md` and the appended ub-mode action log.
+`docs/borrowed-read-reply.md` and the appended ub-mode action log. The subsequent
+Tokio buffered-fill change removes redundant initialization, passes the full
+181-case verification and eleven reachable faults, but its equivalent repeat
+still has mixed metrics and worse warm p99; see `docs/initialized-read-fragment.md`.
 
 Status format: [ ] - incomplete, [X] - completed. Updated: 2026-10-26.
 The parent owns BMAD orchestration, final review and all VCS delivery.

@@ -108,6 +108,16 @@ artifacts, 280 CPU windows, public summaries and paired counts are checked. See
 docs/borrowed-read-reply.md; no performance acceptance is inferred from the local
 allocation reduction.
 
+The subsequent initialized-fragment source
+`e000ecfd0d05aac39fc5809bfadc784ad1a75946` uses maintained Tokio copy_buf/take and
+Vec writer APIs, not a new buffer implementation. Full checks, eleven reachable
+faults, one selected tool mutant and the native release pass. A redundant-check
+survivor and initial proof error remain recorded. Another forty-phase matched
+repeat passes all 120,000 file checks and 460 artifact hashes, but throughput
+changes only +0.84% fresh / -0.13% warm; warm p99 worsens 3.55%, CPU/RSS are mixed.
+The copy/initialization-only performance hypothesis is insufficient. See
+docs/initialized-read-fragment.md and the complete numeric/quality receipts.
+
 Compatibility and comparative performance are **UNACCEPTED**. Delivery is a draft
 for review, not a complete port or permission to replace a served mount. Reduce
 the remaining tail latency and metadata cost, resolve compatibility gaps and Go

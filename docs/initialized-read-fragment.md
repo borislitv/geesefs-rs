@@ -63,5 +63,56 @@ Candidate executable SHA256:
 `20d450570792eb21a6090e1399d429472fac8d1648ae1fcc52bb95dda27c40e7`.
 Candidate 25-input tree SHA256:
 `42fd17aa65700cde56239094b8df7c4275a44a2d26263e6b5daaffaedf142472`.
-No comparative speed, CPU, tail or RSS improvement is claimed before the exact
-matched repeat with both Go references and all adverse metrics retained.
+
+## Matched native comparison
+
+Source `e000ecfd0d05aac39fc5809bfadc784ad1a75946` completes repetitions 60..64,
+five rotated/reversed orders with fresh and complete-dataset revisit for the new
+release, exact borrowed prior and both unchanged Go references. All 40 phases
+finish in 675.245 seconds: 120,000 full-byte/metadata checks, unchanged native
+conditional hashes before/after and 97 exact listings. All 460 indexed artifacts,
+280 CPU windows and both Rust compiled-input commits are independently checked.
+The [numeric receipt](initialized-read-fragment-results-20261028.json) includes
+all CPU splits, p50/p95/p99, dispersion and allocator/client/cgroup/file/kernel/
+backend memory, including unavailable metrics.
+
+The sealed SeaweedFS 4.51 manifest, 3,000 files / 8,298,727,528 bytes, 2 CPU / 4 GiB
+filesystem quota, separate 4 CPU / 6 GiB backend, 512 MiB payload budget,
+100,000 entries and four 128 KiB readers are unchanged. Default allocator settings
+and complete xattr/forced-stat workload are identical. Host/backend cache is not
+controlled cold or globally dropped; the full revisit exceeds daemon cache.
+
+Five-phase means, decimal MB. RSS is peak / final-fifth mean, not a stationary
+plateau. Whole CPU includes daemon, clients, controller and metadata work.
+
+| Implementation/state | Read MB/s | Daemon RSS peak / steady MB | Whole cgroup CPU s | Read p99 ms | Listing s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Go experimental fresh | 652.207 | 1238.274 / 1208.453 | 27.589 | 9.714 | 0.420 |
+| Go experimental warm | 629.293 | 1286.134 / 1203.692 | 27.746 | 10.274 | 0.034 |
+| Go packaged fresh | 622.615 | 1276.957 / 1211.058 | 29.036 | 10.416 | 0.448 |
+| Go packaged warm | 600.116 | 1280.059 / 1208.621 | 29.188 | 10.990 | 0.030 |
+| Rust initialized fresh | 560.922 | 559.474 / 438.540 | 32.035 | 12.034 | 1.512 |
+| Rust initialized warm | 537.871 | 561.948 / 452.708 | 32.053 | 12.931 | 0.020 |
+| Rust borrowed prior fresh | 556.240 | 564.261 / 429.579 | 32.145 | 12.192 | 1.499 |
+| Rust borrowed prior warm | 538.578 | 563.561 / 456.058 | 32.028 | 12.488 | 0.021 |
+
+Against exact prior, throughput changes +0.84% fresh / -0.13% warm and whole CPU
+-0.34% / +0.08%. Each favors only two of five pairs in both states. Fresh p99
+improves 1.30% (four favorable pairs), but warm p99 worsens 3.55% (two favorable
+pairs). Peak RSS falls 0.85% / 0.29% (three favorable pairs each); final-fifth RSS
+rises 2.09% fresh and falls 0.73% warm (one/two favorable pairs). The repeat does
+not demonstrate a reproducible overall gain or statistical significance.
+
+Both Go references still win throughput, whole CPU, p95/p99 and cold listing.
+Rust retains lower process RSS, but file-cache pressure prevents a whole-cgroup
+memory win. Go peak/steady heap series and backend request metrics remain missing,
+not zero; the separate plain-list/stat Go failure remains retained.
+
+Two targeted removals of application copy/initialization have not closed the
+sustained gap. Reject the premise that those redundant operations alone dominate
+this workload. Remaining actors include allocation/retention and kernel page
+work, per-fragment SDK/delivery/cache publication, and separate cold metadata
+resolution. Their absolute costs need a new controlled attribution before another
+mechanism change; selected sample percentages are not proof of dominance or a
+Rust/SDK/network ceiling. The existing writer/random/HTTP and broader compatibility
+gaps remain, and overall acceptance stays **UNACCEPTED**.

@@ -307,6 +307,173 @@ async fn a_complete_body_prefix_is_visible_before_the_conditional_get_finishes()
 }
 
 #[tokio::test]
+async fn releasing_an_independent_prefix_does_not_pin_the_remaining_get_reservation() {
+    const CHUNK: usize = 128 * 1024;
+    let expected: Vec<u8> = (0..2 * CHUNK).map(|at| (at % 251) as u8).collect();
+    let (entered, at_tail) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let body = GatedBody {
+        prefix: Cursor::new(expected[..CHUNK].to_vec()),
+        tail: Cursor::new(expected[CHUNK..].to_vec()),
+        entered: Some(entered),
+        release: Some(wait),
+    };
+    let (store, server) = server_reader(
+        206,
+        &[("Content-Range", "bytes 0-262143/262144")],
+        body,
+        expected.len(),
+    );
+    let data = Budget::new(expected.len()).unwrap();
+    let local = Budget::new(expected.len()).unwrap();
+    let (sender, mut received) = tokio::sync::mpsc::channel(1);
+    let output = RangeSink::new(sender, data.reserve(expected.len()).await.unwrap());
+    let load = tokio::spawn(async move {
+        store
+            .read_range_chunks(
+                "file",
+                0,
+                2 * CHUNK,
+                &head((2 * CHUNK) as u64),
+                &local,
+                &output,
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), at_tail)
+        .await
+        .unwrap()
+        .unwrap();
+    let (offset, prefix) = tokio::time::timeout(Duration::from_secs(2), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(offset, 0);
+    assert_eq!(prefix.as_slice(), &expected[..CHUNK]);
+    let small_view = prefix.slice(7..8);
+    drop(prefix);
+    let with_view_and_unfilled_tail = data.used();
+    drop(small_view);
+    let after_prefix_release = data.used();
+
+    // Finish the actual HTTP exchange before asserting the new lifetime contract.
+    release.send(()).unwrap();
+    let (offset, tail) = tokio::time::timeout(Duration::from_secs(2), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), load)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(offset, CHUNK as u64);
+    assert_eq!(tail.as_slice(), &expected[CHUNK..]);
+    let tail_view = tail.slice(13..14);
+    drop(tail);
+    let with_tail_view = data.used();
+    drop(tail_view);
+
+    assert_eq!(with_view_and_unfilled_tail, 2 * CHUNK);
+    assert_eq!(
+        after_prefix_release, CHUNK,
+        "a freed independent prefix must release its own backing charge"
+    );
+    assert_eq!(
+        with_tail_view, CHUNK,
+        "a small view retains its full backing"
+    );
+    assert_eq!(data.used(), 0);
+}
+
+#[tokio::test]
+async fn cancelling_a_blocked_delivery_releases_only_unpublished_allocations() {
+    let data = Budget::new(12).unwrap();
+    let local = Budget::new(12).unwrap();
+    let (sender, mut received) = tokio::sync::mpsc::channel(1);
+    let output = RangeSink::new(sender, data.reserve(12).await.unwrap());
+    output
+        .send(0, local.reserve(4).await.unwrap().copy(b"keep").unwrap())
+        .await
+        .unwrap();
+    let (entered, pending) = tokio::sync::oneshot::channel();
+    let load = tokio::spawn({
+        let local = local.clone();
+        async move {
+            let block = local.reserve(4).await.unwrap().copy(b"drop").unwrap();
+            let mut delivery = Box::pin(output.send(4, block));
+            std::future::poll_fn(|context| {
+                assert!(std::future::Future::poll(delivery.as_mut(), context).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            entered.send(()).unwrap();
+            delivery.await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), pending)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(data.used(), 12);
+    assert_eq!(local.used(), 8);
+    load.abort();
+    assert!(load.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        data.used(),
+        4,
+        "only the published backing remains admitted"
+    );
+    assert_eq!(local.used(), 4);
+    let (offset, block) = received.recv().await.unwrap();
+    assert_eq!(offset, 0);
+    assert_eq!(block.as_slice(), b"keep");
+    assert!(received.recv().await.is_none());
+    let view = block.slice(1..2);
+    drop(block);
+    assert_eq!(data.used(), 4);
+    drop(view);
+    assert_eq!(data.used(), 0);
+    assert_eq!(local.used(), 0);
+}
+
+#[tokio::test]
+async fn range_delivery_rejects_excess_bytes_without_publishing_or_losing_admission() {
+    let data = Budget::new(4).unwrap();
+    let local = Budget::new(8).unwrap();
+    let (sender, mut received) = tokio::sync::mpsc::channel(2);
+    let output = RangeSink::new(sender, data.reserve(4).await.unwrap());
+    output
+        .send(0, local.reserve(2).await.unwrap().copy(b"ok").unwrap())
+        .await
+        .unwrap();
+    assert!(matches!(
+        output
+            .send(2, local.reserve(3).await.unwrap().copy(b"bad").unwrap())
+            .await,
+        Err(Error::Budget {
+            requested: 3,
+            limit: 2
+        })
+    ));
+    assert_eq!(data.used(), 4);
+    assert_eq!(local.used(), 2);
+    drop(output);
+    assert_eq!(data.used(), 2);
+    let (offset, block) = received.recv().await.unwrap();
+    assert_eq!(offset, 0);
+    assert_eq!(block.as_slice(), b"ok");
+    assert!(
+        received.recv().await.is_none(),
+        "excess bytes were not queued"
+    );
+    drop(block);
+    assert_eq!(data.used(), 0);
+    assert_eq!(local.used(), 0);
+}
+
+#[tokio::test]
 async fn range_delivery_retains_admission_after_the_producer_has_finished() {
     let (store, server) = server(206, &[("Content-Range", "bytes 0-3/4")], b"abcd", None);
     let data = Budget::new(4).unwrap();
@@ -563,10 +730,7 @@ async fn a_short_body_publishes_only_complete_prefixes_and_releases_unpublished_
             assert_eq!(block.as_slice(), &expected[..CHUNK]);
         }
         assert_eq!(local.used(), blocks.len() * CHUNK);
-        assert_eq!(
-            data.used(),
-            if blocks.is_empty() { 0 } else { expected.len() }
-        );
+        assert_eq!(data.used(), blocks.len() * CHUNK);
         drop(blocks);
         assert_eq!(local.used(), 0);
         assert_eq!(data.used(), 0);
@@ -629,7 +793,7 @@ async fn closing_delivery_after_a_prefix_cancels_the_get_without_losing_its_pinn
     ));
     task.join().unwrap();
     assert_eq!(block.as_slice(), &expected[..CHUNK]);
-    assert_eq!(data.used(), expected.len());
+    assert_eq!(data.used(), CHUNK);
     assert_eq!(local.used(), CHUNK);
     drop(block);
     assert_eq!(data.used(), 0);
@@ -702,12 +866,12 @@ async fn filesystem_keeps_a_valid_prefix_after_tail_failure_or_cancellation() {
         }
         task.join().unwrap();
         tokio::time::timeout(Duration::from_secs(3), async {
-            while fs.effective_budgets().data_used_bytes != expected.len() + CHUNK {
+            while fs.effective_budgets().data_used_bytes != 2 * CHUNK {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("only the cache's complete GET charge and published reply may remain");
+        .expect("only the complete cached prefix backing and published reply may remain");
         let hit = tokio::time::timeout(Duration::from_secs(3), fs.read(ino, 3, 7))
             .await
             .unwrap()
@@ -716,7 +880,7 @@ async fn filesystem_keeps_a_valid_prefix_after_tail_failure_or_cancellation() {
         assert_eq!(block.as_slice(), &expected[..CHUNK]);
         drop(hit);
         drop(block);
-        assert_eq!(fs.effective_budgets().data_used_bytes, expected.len());
+        assert_eq!(fs.effective_budgets().data_used_bytes, CHUNK);
     }
 }
 
@@ -795,12 +959,12 @@ async fn borrowed_wire_reply_shares_admission_and_survives_tail_failure_or_cance
         }
         server.join().unwrap();
         tokio::time::timeout(Duration::from_secs(3), async {
-            while fs.effective_budgets().data_used_bytes != expected.len() {
+            while fs.effective_budgets().data_used_bytes != CHUNK {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("only complete GET cache admission may survive borrowed reply cleanup");
+        .expect("only the complete cached prefix backing may survive borrowed reply cleanup");
         assert_eq!(
             fs.read(ino, 7, 4096).await.unwrap().as_slice(),
             &expected[7..4103]

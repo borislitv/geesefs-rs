@@ -1,0 +1,124 @@
+{
+  "schema": "fragment-admission-transfer-quality-v1",
+  "accepted": false,
+  "rust_cases": 188,
+  "python_cases": 37,
+  "public_packages": 338,
+  "baseline_failure": {
+    "expected_bytes": 131072,
+    "observed_bytes": 262144,
+    "log_sha256": "b1147259eca0a424c406d7486f101554680f850b1ef3a98e4a4c0927f7bd6ce9"
+  },
+  "green_log_sha256": "f024f298765cd276a01e762582aab385a5f1d0bd25377ddb251d5c5e613bda5c",
+  "independent_faults": 3,
+  "assertion_failures": [
+    {
+      "label": "drop-global-owner-retained",
+      "log_sha256": "07e00ae9a0767a7b38e668a6d13ffb4d0e1201ac86e87ea25081c482851495ac"
+    },
+    {
+      "label": "drop-global-owner-cancelled",
+      "log_sha256": "3af06d9d0d82808652788dd20af13f94f653f8c6d1e8ab043d786a7aa2969ba2"
+    },
+    {
+      "label": "zero-transfer-prefix",
+      "log_sha256": "6717f33d3d73defa55b4e5109a5a5e7af078ea241c00b8048ec617ddfac1a746"
+    },
+    {
+      "label": "remove-delivery-limit-excess",
+      "log_sha256": "bde6eb5040bfaff018be10cc39152e7ea5185fecff104e67575e8e4d7397ff91"
+    }
+  ],
+  "tool_mutation": {
+    "scanned_sites": 2,
+    "selected": 1,
+    "killed": 1,
+    "survived": 0,
+    "unselected": 1,
+    "log_sha256": "da71bebbdbc68ff380dd12f7266ed84bd664c292d7dea4e4a9155068c476ebd9"
+  },
+  "quality_limits": [
+    "Coverage/CRAP not measured",
+    "Three prior duplicate candidates remain",
+    "No broad mutation gate claim"
+  ],
+  "compiled_inputs": {
+    "Cargo.toml": "0ebd256cc74f86e263945e2f39b4bbf828d1034a723e7672d72d21f9cdd9872d",
+    "Cargo.lock": "a10b490c4948f0a298e63ecc9f528bd6da69af600a68bb5133653d83d1f0846b",
+    "src/backend/auth.rs": "34cd7d3f307cafaa7eb23883466a59a1e016fd5927d4de79cd039063d24f771f",
+    "src/backend/content_type.rs": "17ff58a70795a19ba334652884089fc6651824ed318980cd3bb5e8d971af4a0d",
+    "src/backend/extended_list.rs": "b27e2fc78f2cc5a297e87d3649792f281ba0f890ba470b72fa0d149d1d29274a",
+    "src/backend/metadata.rs": "33e207b30d1bdf9b7228149e73bc90c4a7c415ff1130a7be8313b48a766d7002",
+    "src/backend/mod.rs": "b650b534205aaa1ca7dd471163ebf84ad258631338e6dd72d584d0bafde1cd5f",
+    "src/backend/options.rs": "40ace5edfbbe350e42107f608c5a97f1b25a4d0d186ac0d477f350770e84b3ad",
+    "src/backend/s3.rs": "a8b7aca38e5a77cdc383cf8924d5cf10527143d49edbfc0dc3e5adffa6a78d5a",
+    "src/backend/signature.rs": "1e2b1adae505ab7797067b26b014d0762ddf5f037faa781ca753d958f3d77fec",
+    "src/backend/transport.rs": "d723310c4ddef1c1dec28023af0a24a3e14b8d68fcb26287ba3d85defe843987",
+    "src/budget.rs": "577c5d59a27487a2f2f0f34f084900367f72b6115caa1f61816d7fe0d3a9b1e5",
+    "src/cache.rs": "030ab38ab53880061faec08f7f20fe661b7917fb307e3b7b420184fef9c07255",
+    "src/config.rs": "3ab72810c265bf47a51af61443168e4b783b4a04bd13825810dec8a1cb764b28",
+    "src/error.rs": "682a37d95ad89fd2c94ec5b15aa0741064e3ddb301ded617553f6bba4468f314",
+    "src/filesystem.rs": "786283af138a3033fd8836f4c25abc79d6f3756fac18ddb224fcc244c217fe22",
+    "src/fuse.rs": "db210faf385b0de6c1f7d3956357e36318a0d163d68be3b24f34b89533400830",
+    "src/inode.rs": "d730283b296aabf989927b178018c460693548738abeeb6bd9d943f54a3726fe",
+    "src/lib.rs": "fbc19e6379f5d66ba9267094bdbb9e576690752fe1ca1ec86d4b7fb5e8b2fabd",
+    "src/main.rs": "f182a6f1d127fe4d63e457fb89615bfddb359e64af0713e40a229d31156fb1e9",
+    "src/namespace.rs": "995f35ef79f3f711ec6176a82f0551ec16d0177a2a9593719b0153e59d1b896b",
+    "src/parts.rs": "45ea05e982c96f4b185b00baaaa1463373c7f597d92214be1df6b11a273dacaa",
+    "src/read.rs": "b4d36c44f5619112db2d60426c2e33fdcc955f6e6c619d1725d08598dcc71e78",
+    "src/upload_body.rs": "00f894ecdd9c139347bfda2b5d2b3e3407b3f04c7b24cb1698059c9bbf17ccbe",
+    "src/write.rs": "806165243edc85585e2e2dcfdc251382dca4dc658b5a9dfa12dd03dd9512ca83"
+  },
+  "compiled_input_count": 25,
+  "compiled_input_tree_sha256": "06b02ab104179492284f9b57807bf5e00a5beec50fffaaa5f762e8a7317aa8d6",
+  "changed_compiled_inputs": [
+    "src/backend/mod.rs",
+    "src/budget.rs"
+  ],
+  "features": [
+    "system-allocator"
+  ],
+  "binary_sha256": "aeb8aed1fcc2f6a94bf3a993b45614baf5160754a2d7d583e75073448ea5609e",
+  "release_receipt_sha256": "892aac787428d67c579a4c16c3e930fc4020cd8764a75122088c37a42fbc5cf6",
+  "mounted": {
+    "report_sha256": "b2e75cc1f78be146b14ae1ec7810f7381584d20464e11abfc025dd674a961989",
+    "checks": [
+      "full-checksum",
+      "range-eof",
+      "mmap",
+      "implicit-directory",
+      "http-full-range",
+      "rsync-full-delta",
+      "symlink",
+      "mode-mtime",
+      "hardlink-emulation:FAILED:errno=5",
+      "xattr",
+      "special-fifo",
+      "fsyncdir",
+      "sparse-truncate",
+      "fsync-fresh-reader",
+      "rename-before-close",
+      "concurrent-writer-fsync",
+      "sync-write-propagates-upload-failure",
+      "failed-fsync-retains-data"
+    ],
+    "errors": [],
+    "accepted": false,
+    "ordinary_mounted_passed": false,
+    "scope": "Rust-only disposable Moto functional sweep; not paired performance or full compatibility acceptance",
+    "python": "3.14.4 (main, Aug 20 2026, 10:41:58) [GCC 15.2.0]",
+    "packages": {
+      "moto": "5.1.17",
+      "aiohttp": "3.12.15",
+      "boto3": "1.43.121",
+      "botocore": "1.43.121",
+      "psutil": "7.2.2"
+    },
+    "script_sha256": {
+      "integration.py": "7cc5724318da9481cf2d695c1bae590caa0c593c212dc349aefa79ceded528fc",
+      "s3_fixture.py": "c91cbff183a961d6a92753398ba047cf210837dfc3d7e802205745e517d1e8c5",
+      "http_reader.py": "70d57bf375c7a5e18a5af25586e46964e983901f072f037118b018e5c02dfadf"
+    }
+  },
+  "matched_performance": "pending at source checkpoint"
+}

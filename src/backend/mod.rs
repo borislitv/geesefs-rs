@@ -10,35 +10,49 @@ use crate::{
 use aws_sdk_s3::{primitives::ByteStream, types::CompletedPart};
 use extended_list::ListPage;
 use s3::ObjectHead;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Mutex};
 
 /// Bounded delivery owned by one admitted range producer.
 pub struct RangeSink {
     sender: tokio::sync::mpsc::Sender<(u64, Block)>,
-    owner: Arc<Reservation>,
+    owner: Mutex<Reservation>,
 }
 
 impl RangeSink {
     pub fn new(sender: tokio::sync::mpsc::Sender<(u64, Block)>, owner: Reservation) -> Self {
         Self {
             sender,
-            owner: Arc::new(owner),
+            owner: Mutex::new(owner),
         }
     }
 
     fn check(&self, length: usize) -> Result<()> {
-        if length > self.owner.size() {
+        let owner = self.owner.lock().unwrap();
+        if length > owner.size() {
             return Err(Error::Budget {
                 requested: length,
-                limit: self.owner.size(),
+                limit: owner.size(),
             });
         }
         Ok(())
     }
 
     pub async fn send(&self, offset: u64, block: Block) -> Result<()> {
+        // Transfer already-admitted bytes to this complete physical backing.
+        // The producer retains only unfilled admission; views share the backing.
+        let owner = {
+            let mut remaining = self.owner.lock().unwrap();
+            let length = block.as_slice().len();
+            if length > remaining.size() {
+                return Err(Error::Budget {
+                    requested: length,
+                    limit: remaining.size(),
+                });
+            }
+            remaining.split(length)
+        };
         self.sender
-            .send((offset, block.with_shared_owner(self.owner.clone())))
+            .send((offset, block.with_owner(owner)))
             .await
             .map_err(|_| Error::Cancelled)
     }

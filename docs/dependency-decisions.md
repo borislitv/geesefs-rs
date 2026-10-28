@@ -106,6 +106,36 @@ allocator behavior under investigation. The small stats_alloc wrapper preserves
 those platform operations; its six counters and scope are explicit. No force GC,
 malloc tuning, buffer pool, cache reduction or concurrency change is introduced.
 
+### Streaming cache admission investigation (2026-10-28)
+
+With the native fixture's metrics listener corrected, a full-file request
+inventory observes more response payload bytes in Rust than in either Go, despite
+identical logical file checks. This is an additional measured actor, not yet an
+attributed cache-policy regression. Keep the raw byte/listing counts and their
+single-pass diagnostic scope separate from repeated timing acceptance.
+
+Inspect Moka 0.12.16's maintained
+[`EvictionPolicy`](https://docs.rs/moka/0.12.16/moka/policy/struct.EvictionPolicy.html)
+API before implementing another cache mechanism. Its default TinyLFU admission
+can reject a newly prefetched fragment in favor of previously used keys. Its
+built-in LRU policy is explicitly intended for strongly recency-biased streaming.
+An isolated ReadCache case reproduces rejection, but its cache capacity was below
+its payload budget. The filesystem sets both limits equal and replaces the cache
+on failed byte admission before Moka reaches that policy limit. Do not treat the
+isolated case as a production reproduction or switch policy on that evidence.
+The trial and its failing assertion remain retained; no cache-policy change is
+selected.
+
+Instead trace existing admitted range ownership: RangeSink shares one reservation
+among independently allocated streamed fragments. One surviving fragment can
+retain the entire GET's reservation after other physical buffers are freed.
+Reuse the already-supported Tokio permit split operation to transfer admission
+to complete backing allocations, retaining unfilled admission with the producer.
+First verify the contract through a gated real SDK body and tiny retained views;
+keep full-backing/FIFO/cancellation/checksum invariants and unchanged byte limits.
+No new allocator, pool, reader or cache implementation is required. Whole-file
+amplification, throughput, RSS and tails still require matched measurements.
+
 The package forbids unsafe code for every target. rustix 1.1.5 (Apache-2.0 WITH
 LLVM-exception OR Apache-2.0 OR MIT,
 <https://docs.rs/rustix/1.1.5/rustix/process/>) provides safe uid/gid operations;

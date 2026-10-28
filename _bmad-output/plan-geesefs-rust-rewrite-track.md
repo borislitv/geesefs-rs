@@ -32,6 +32,13 @@ CPU but increases RSS against jemalloc and retains Go tail/CPU deficits. A furth
 twelve-phase counter ablation has mixed warm results, rejecting a counter-only
 explanation. See `docs/system-allocator-accounting.md`; default jemalloc and all
 unaccepted stages remain unchanged while exact libc attribution continues.
+Exact libc symbols and a corrected native metrics listener expose independent
+copy/allocation work and 3.18–4.82% excess Rust response payload in an eight-phase
+inventory. A gated SDK regression then reproduces full-GET reservation retention
+after an independent prefix is freed. Fragment-scoped transfer passes 188 Rust
+cases; the Rust-only mounted reader/writer sweep completes with the known hardlink
+EIO and all broader acceptance gaps. Its matched comparison is still pending;
+see `docs/fragment-admission-transfer.md`.
 
 Status format: [ ] - incomplete, [X] - completed. Updated: 2026-10-28.
 The parent owns BMAD orchestration, final review and all VCS delivery.

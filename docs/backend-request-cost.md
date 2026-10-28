@@ -71,3 +71,7 @@ before Moka reaches its own capacity limit. Trace the ownership of admitted GETs
 independent fragment backings and pending reads before changing another policy.
 Default allocator, byte limits, concurrency, integrity and production acceptance
 are unchanged. Go heap series and the full representative matrix remain open.
+
+The subsequent [fragment-admission transfer](fragment-admission-transfer.md)
+reproduces retained permits for a freed independent prefix and checks a minimal
+ownership correction before its matched performance comparison.

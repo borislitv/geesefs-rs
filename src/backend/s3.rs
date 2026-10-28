@@ -1110,8 +1110,8 @@ impl S3 {
                 Some(reservation) => reservation,
                 None => budget.reserve(amount).await?,
             };
-            let mut block = reservation.zeroed();
-            body.read_exact(block.as_mut_slice())
+            let block = reservation
+                .read_exact(&mut body)
                 .await
                 .map_err(|error| backend("GET body", None, error))?;
             if filled + amount == length {

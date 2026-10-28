@@ -117,6 +117,20 @@ impl Reservation {
         Block::owned(data, self)
     }
 
+    pub(crate) async fn read_exact(
+        self,
+        reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
+    ) -> std::io::Result<Block> {
+        use tokio::io::AsyncReadExt;
+
+        let mut data = Vec::with_capacity(self.size);
+        let copied = tokio::io::copy_buf(&mut reader.take(self.size as u64), &mut data).await?;
+        if copied != self.size as u64 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        Ok(Block::owned(data.into_boxed_slice(), self))
+    }
+
     pub fn copy(self, bytes: &[u8]) -> Result<Block> {
         if bytes.len() != self.size {
             return Err(Error::Config("reservation length mismatch".into()));

@@ -42,6 +42,18 @@ allocation, not just its visible length, and preserve whole-body checksum/EOF
 barriers. That is a separate verified adapter change, not a reason to replace
 the maintained SDK or introduce a second transport.
 
+For the subsequent full-overwrite fragment path, Tokio 1.54.1 already supplies
+[`copy_buf`](https://docs.rs/tokio/1.54.1/tokio/io/fn.copy_buf.html),
+[`AsyncReadExt::take`](https://docs.rs/tokio/1.54.1/tokio/io/trait.AsyncReadExt.html#method.take)
+and `AsyncWrite for Vec<u8>`. The SDK's `into_async_read` implements AsyncBufRead.
+Bound `copy_buf` with the admitted fragment length and preallocate a Vec of that
+capacity: initialized bytes extend directly from the SDK reader's existing
+buffer, without a second intermediate buffer or pre-zeroing the destination.
+Check the exact copied count before transferring the Vec into the existing
+charged Block. The standard/library implementations own buffer initialization;
+no local unsafe, manual polling, pool, BufMut implementation or new dependency
+is needed. The existing final EOF and whole-body checksum barriers remain.
+
 The package forbids unsafe code for every target. rustix 1.1.5 (Apache-2.0 WITH
 LLVM-exception OR Apache-2.0 OR MIT,
 <https://docs.rs/rustix/1.1.5/rustix/process/>) provides safe uid/gid operations;

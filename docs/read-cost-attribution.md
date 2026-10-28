@@ -89,8 +89,50 @@ No allocator configuration, concurrency, cache budget or production mount change
   matching cause.
 - [FUSE passthrough evaluation](fuse-passthrough.md): the selected library has
   safe APIs, but the measured kernel rejects the capability. Its local backing
-  file and writer-coherence requirements need a separate design and experiment.
+  file and writer-coherence requirements need a separate design and experiment;
+  the operator explicitly deferred it beyond the first stage.
 
 Search discovery was followed by direct public GitHub API reads of issue bodies,
 maintainer comments and release metadata. Saved-copy page extraction did not
 produce usable text; no unseen page is treated as verified evidence.
+
+## Exact index-change follow-up
+
+The subsequent [matched index repeat](range-index-coverage.md) preserves adverse
+warm throughput/CPU/p99 means. Nine additional fresh instrumented profiles rotate
+exact `a5862ed`, initialized `e000ecf` and experimental Go; all 27,000 complete
+file checks and native hashes/listings pass. The
+[public profile receipt](range-index-coverage-profiles-20261028.json) retains
+absolute counters, RSS, sampled periods and source/binary/profile hashes. The
+workload, budgets and container limits above are unchanged.
+
+Within this diagnostic, initialized → candidate covering callchains fall
+1.541 → 0.145 CPU seconds and selected Moka/BTree leaves 1.577 → 0.365 s. Daemon
+user CPU falls 6.400 → 4.707 s; system CPU is 13.870 → 13.410 s. Mean process RSS
+peak/final fifth instead rises 558.488/425.700 → 562.924/440.879 MB. Experimental
+Go has 6.257/12.453 user/system CPU seconds and 1278.759/1206.140 MB RSS.
+These are instrumented fresh diagnostics, not proof of a speed/RSS acceptance win.
+
+Minor faults remain 1,199,178 → 1,195,905 in Rust, versus Go 305,973. Selected
+fault leaves cost 1.620 → 1.459 s versus Go 0.430 s; kernel `memcpy_orig` and
+`rep_movs_alternative` alone remain 2.649 and 2.002 sampled seconds in the candidate.
+Do not add callchain totals to leaves or equate page faults with allocator cause.
+Cold listing CPU is candidate 0.940 / prior 0.907 / Go 0.193 s, a separate actor.
+The higher matched warm system cost does not reproduce in these fresh profiles;
+its cause remains unattributed rather than silently dismissed as noise.
+
+Decoding the two selected kernel-copy leaves by their retained caller stacks
+places candidate 2.649 s in FUSE versus Go 2.803 s, and 2.002 s in TCP receive
+versus Go 1.454 s. Of selected fault leaves, candidate TCP receive costs 1.083 s
+versus Go 0.416 s; another 0.376 s has other/unresolved callers and is not assigned
+to transport. These are narrow sampled categories, not all syscall/kernel cost.
+The observed excess is on receive/page work rather than a demonstrated extra
+FUSE copy; a library-supported transport/allocation hypothesis needs its own
+contract-preserving test before changing the implementation.
+
+All raw profile/report/stack hashes and per-file bytes were rechecked after
+collection. The source report SHA256 is
+`e7715f11c5d0bbc225d9d069df8cf957cc0f37142e21afc19277615ccb8f0b76`.
+Candidate sample capture is 96.7–97.5%, prior 97.2–97.7%, Go 92.3–93.3%; unknown
+frames and unsampled CPU stay unassigned. No third speculative buffer workaround,
+allocator default, transport fork or budget/concurrency change follows from this.

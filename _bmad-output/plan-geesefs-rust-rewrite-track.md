@@ -16,8 +16,13 @@ overall compatibility/performance acceptance remain incomplete. See
 Tokio buffered-fill change removes redundant initialization, passes the full
 181-case verification and eleven reachable faults, but its equivalent repeat
 still has mixed metrics and worse warm p99; see `docs/initialized-read-fragment.md`.
+Absolute owned-PID attribution then isolates cache lookup work. The range-index
+candidate passes 184 Rust cases and another 120,000-file matched repeat, but
+warm throughput/CPU/p99 regress. Separate profiles confirm reduced lookup CPU
+while page work remains; see `docs/range-index-coverage.md`. Overall acceptance
+is still incomplete. Passthrough/disk cache are deferred beyond the first stage.
 
-Status format: [ ] - incomplete, [X] - completed. Updated: 2026-10-26.
+Status format: [ ] - incomplete, [X] - completed. Updated: 2026-10-28.
 The parent owns BMAD orchestration, final review and all VCS delivery.
 
 ## Execution Stages

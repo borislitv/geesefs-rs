@@ -110,6 +110,11 @@ The [initialized-fragment follow-up](docs/initialized-read-fragment.md) uses
 Tokio's existing `copy_buf`/`take` and Vec writer APIs instead of pre-zeroing a
 fully overwritten fragment. Its matched repeat still has mixed throughput,
 CPU/RSS and tail results; neither local optimization establishes an overall win.
+The [range-index follow-up](docs/range-index-coverage.md) filters non-covering
+blocks before Moka access. Separate absolute profiles confirm reduced lookup CPU,
+but its forty-phase matched repeat retains worse warm throughput/CPU/p99. All
+120,000 file checks pass; this is not overall performance acceptance. Passthrough
+and disk-backed caching are deferred beyond the first stage.
 
 Backend IAM/profile authentication, signature discovery/SigV2, encryption and
 request options now have loopback HTTP/TLS coverage. See [backend options](docs/backend-options.md)

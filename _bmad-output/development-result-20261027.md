@@ -118,6 +118,19 @@ changes only +0.84% fresh / -0.13% warm; warm p99 worsens 3.55%, CPU/RSS are mix
 The copy/initialization-only performance hypothesis is insufficient. See
 docs/initialized-read-fragment.md and the complete numeric/quality receipts.
 
+Absolute CPU attribution then identifies concrete predecessor/Moka work. Source
+`a5862ed9b3e3da884ba4a6a75ddb77df1202c1cd` filters non-covering blocks through the
+existing index, preserving actual bounds, stamps and ownership. All 184 Rust and
+37 Python cases, three assertion faults, one selected mutant, fmt/Clippy/audit and
+native release pass in Kubernetes. Forty matched phases verify 120,000 files,
+460 artifact hashes and 280 CPU windows, but warm throughput falls 3.72%, whole
+CPU rises 4.76% and p99 rises 14.32% against exact initialized prior. Separate nine
+profiles verify 27,000 more files and reduced covering cost 1.541 → 0.145 sampled
+CPU seconds; they do not override the adverse performance gate. Kernel page/copy
+work and separate cold-listing costs remain. See docs/range-index-coverage.md and
+its complete numeric/profile receipts. Passthrough/disk cache are deferred beyond
+the first stage by the operator.
+
 Compatibility and comparative performance are **UNACCEPTED**. Delivery is a draft
 for review, not a complete port or permission to replace a served mount. Reduce
 the remaining tail latency and metadata cost, resolve compatibility gaps and Go

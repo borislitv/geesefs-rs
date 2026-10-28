@@ -44,6 +44,15 @@ neither repeat demonstrates a reproducible overall speed/CPU/RSS/tail win.
 Both Go references remain faster. All 920 indexed artifacts, 560 CPU windows,
 both sets of compiled-input commits and the adverse paired results are retained.
 
+The [range-index comparison](range-index-coverage.md) adds forty phases and
+120,000 full-file checks against exact initialized prior and both Go references.
+Fresh throughput/whole CPU/p99 means improve slightly, but warm throughput falls
+3.72%, CPU rises 4.76% and p99 rises 14.32%; all dispersion and unfavorable pairs
+remain published. Separate absolute profiles confirm reduced covering/Moka work,
+not an overall win: Rust page faults and kernel copies remain, and profile timings
+are not acceptance repetitions. See [absolute attribution](read-cost-attribution.md)
+and both numeric receipts. Passthrough/disk caching are outside the first stage.
+
 ## Runner and reproduction
 
 `bench/workloads.json`, `bench/compare.py` and `scripts/bench_worker.py` build the

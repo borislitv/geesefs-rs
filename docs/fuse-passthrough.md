@@ -2,6 +2,10 @@
 
 ## Result
 
+**Deferred beyond the first stage by the operator on 2026-10-28.** Do not add
+passthrough, a disk-backed cache or a kernel-update dependency to the current
+implementation stage. The observations below retain the completed investigation.
+
 The selected public `fuser` 0.18.0 already exposes safe passthrough APIs and a
 passthrough example. A disposable capability-negotiation probe using that exact
 crate on the measurement kernel `6.8.0-142-generic` reports
@@ -9,10 +13,9 @@ crate on the measurement kernel `6.8.0-142-generic` reports
 handshake, not an assumption based only on the kernel release string. The probe
 then intentionally returns EINVAL and leaves no diagnostic mount behind.
 
-The operator is willing to update the test kernel if needed. Keep passthrough
-as a candidate for an already materialized local file cache; do not reject it
-solely because the present kernel lacks the feature. No kernel update was
-requested or performed at this checkpoint.
+The operator initially offered a test-kernel update if needed, then explicitly
+deferred passthrough because of its local-cache requirement. No kernel update
+was requested or performed at this checkpoint.
 
 ## Kernel and library contract
 
@@ -35,7 +38,7 @@ Inspected `fuser`'s installed public 0.18.0 source and example:
 Use those APIs if a later prototype is justified. There is no reason to add an
 application-owned ioctl/FUSE protocol implementation or local unsafe code.
 
-## Fit and next experiment
+## Fit and a possible later experiment
 
 An S3 HTTP stream is not a readable, seekable backing file at matching file
 offsets. Passthrough therefore does not directly replace a cold conditional GET

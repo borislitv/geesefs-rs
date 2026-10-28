@@ -24,6 +24,8 @@
   tool success does not replace compatibility or performance acceptance.
 - The current scope is a Linux/S3 replacement for both GeeseFS readers and
   writers, not an unlabelled read-only prototype or a Go wrapper.
+- FUSE passthrough and a disk-backed cache are deferred beyond the first stage
+  by the operator. Optimize the existing bounded streaming/RAM-cache path.
 - Keep Go behavior, source revisions, compatibility gaps and performance
   acceptance independently verifiable. Do not describe incomplete work as a
   complete port or measured improvement.

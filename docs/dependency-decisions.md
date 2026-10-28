@@ -286,3 +286,24 @@ immutable completed buffer. Retain complete-body SDK validation before exposing
 any prefix when the response advertises a whole-body checksum, rather than
 publishing bytes before that integrity check can finish. Existing whole-range
 reads and writer materialization keep their full validation contract.
+
+## Range-index filtering before cache access (2026-10-28)
+
+Re-inspected Moka 0.12.16's supported `sync::Cache::get`, `contains_key`,
+eviction listener and maintenance APIs. `get` clones its value and records a read;
+`contains_key` avoids popularity updates but does not expose the block length.
+Neither operation provides interval coverage. Keep Moka for retention and add
+the immutable block length to the existing bounded BTreeMap index. One standard
+`BTreeMap::range` iterator can reject non-covering predecessors without repeated
+hash lookups, block-owner clones or popularity updates for unusable blocks.
+Validate the returned block's actual bounds after the Moka lookup as before.
+The index stores no payload owner, and replacement stamps still protect new
+entries from deferred eviction callbacks. No dependency or cache budget changes.
+
+Related upstream findings are evidence to investigate, not a diagnosis by name:
+[Moka #498](https://github.com/moka-rs/moka/issues/498) describes maintenance and
+blocking rehash tail latency; [#412](https://github.com/moka-rs/moka/issues/412)
+was an async-cache busy loop fixed in 0.12.6, before the selected sync 0.12.16.
+The selected version is already the latest published release checked on this
+date. Do not import an experimental cache fork or disable reclamation to hide
+costs. Compare the candidate with exact frozen `e000ecf` and both Go references.

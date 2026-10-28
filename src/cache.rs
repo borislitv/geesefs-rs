@@ -17,10 +17,14 @@ struct Entry {
     block: Block,
     stamp: u64,
 }
+struct IndexEntry {
+    stamp: u64,
+    length: usize,
+}
 #[derive(Clone)]
 pub struct ReadCache {
     entries: Cache<Key, Entry>,
-    index: Arc<Mutex<BTreeMap<Key, u64>>>,
+    index: Arc<Mutex<BTreeMap<Key, IndexEntry>>>,
     sequence: Arc<AtomicU64>,
     entry_limit: usize,
 }
@@ -30,7 +34,7 @@ impl ReadCache {
         Self::with_entry_limit(capacity, 100000)
     }
     pub fn with_entry_limit(capacity: u64, entry_limit: usize) -> Self {
-        let index = Arc::new(Mutex::new(BTreeMap::<Key, u64>::new()));
+        let index = Arc::new(Mutex::new(BTreeMap::<Key, IndexEntry>::new()));
         let evicted = index.clone();
         Self {
             index,
@@ -43,7 +47,10 @@ impl ReadCache {
                 })
                 .eviction_listener(move |key: Arc<Key>, value: Entry, _| {
                     let mut index = evicted.lock().unwrap();
-                    if index.get(key.as_ref()) == Some(&value.stamp) {
+                    if index
+                        .get(key.as_ref())
+                        .is_some_and(|entry| entry.stamp == value.stamp)
+                    {
                         index.remove(key.as_ref());
                     }
                 })
@@ -76,7 +83,15 @@ impl ReadCache {
                 .lock()
                 .unwrap()
                 .range((inode, generation, 0)..=upper)
-                .next_back()
+                .rev()
+                // Reject unusable spans without recording Moka reads or cloning
+                // payload owners. An older overlapping span may still cover it.
+                .find(|&(&(_, _, start), entry)| {
+                    entry
+                        .length
+                        .checked_sub((offset - start) as usize)
+                        .is_some_and(|available| available >= length)
+                })
                 .map(|(&key, _)| key);
             let Some((_, _, start)) = candidate else {
                 break;
@@ -134,7 +149,13 @@ impl ReadCache {
         let stamp = self.sequence.fetch_add(1, Ordering::Relaxed);
         let victim = {
             let mut index = self.index.lock().unwrap();
-            index.insert(key, stamp);
+            index.insert(
+                key,
+                IndexEntry {
+                    stamp,
+                    length: block.as_slice().len(),
+                },
+            );
             if index.len() > self.entry_limit {
                 index.pop_first().map(|(key, _)| key)
             } else {

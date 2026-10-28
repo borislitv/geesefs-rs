@@ -11,6 +11,12 @@
   SSH must be noninteractive (BatchMode, connection/operation deadlines); do not
   prompt the user about SSH or wait for interactive authentication.
 - Read `docs/project-brief.md` before planning, implementation or review.
+- Write task progress and verification reports in Tracker in Russian, preserving
+  exact commands, identifiers, source hashes, measurements and links.
+- During performance diagnosis, inspect public upstream issues, release notes and
+  supported APIs for the measured hot libraries and kernel features. Check their
+  applicability against exact versions and observed stacks before implementing
+  another workaround or replacing a dependency.
 - Follow the requested [ub-mode](https://github.com/unclebob/ub-mode) workflow:
   understand the contract, choose the smallest cohesive change, observe a
   meaningful failing test, implement, verify and only then refactor. Keep an

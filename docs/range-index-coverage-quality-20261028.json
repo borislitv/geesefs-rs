@@ -1,0 +1,62 @@
+{
+  "schema": "range-index-coverage-quality-v1",
+  "accepted": false,
+  "source_base": "e000ecfd0d05aac39fc5809bfadc784ad1a75946",
+  "verification": {
+    "environment": "isolated secret-free Kubernetes build Pod",
+    "rust_tests_passed": 184, "rust_tests_failed": 0, "rust_tests_ignored": 0,
+    "source_oracle_python_cases_passed": 14, "benchmark_python_cases_passed": 23,
+    "format_check_passed": true,
+    "all_target_all_feature_warning_denying_clippy_passed": true,
+    "public_cargo_packages_audited": 336,
+    "explicit_package_clean_after_mutations": true,
+    "baseline_new_tests_pass_before_optimization": true,
+    "red_scope": "Retained matched performance deficit; behavior-preserving public tests start green, then fail intended bounds/length/replacement faults"
+  },
+  "source_hashes": {
+    "src/budget.rs": "758325cae82f5b3db1008fa56f9591a0d0b61231104ca9aac952afc540a03124",
+    "src/cache.rs": "030ab38ab53880061faec08f7f20fe661b7917fb307e3b7b420184fef9c07255",
+    "src/filesystem.rs": "786283af138a3033fd8836f4c25abc79d6f3756fac18ddb224fcc244c217fe22",
+    "src/fuse.rs": "db210faf385b0de6c1f7d3956357e36318a0d163d68be3b24f34b89533400830",
+    "src/read.rs": "b4d36c44f5619112db2d60426c2e33fdcc955f6e6c619d1725d08598dcc71e78",
+    "src/backend/mod.rs": "f5881062acd2379472355ea3b17ce502196ed44da30c66891fffcf2bb0de9eac",
+    "src/backend/s3.rs": "b6b55ed592bb9050267c886c9ce55918afbf0c6c5ba06fec83ad9d75e345c06d",
+    "tests/read_views.rs": "8867739d1ce2e21fa4e0849496bd8f9057e01293766ab2b684481aba37e00e7a",
+    "tests/read_reply.rs": "a41cacc59fb9fb41158c76fa65f5f919ad4280e64ba7b642cf31cc45f2c3eac0",
+    "tests/backend_contract.rs": "d4a17cb98a50af1edee5b700b71805884703b4cb9c80e8b356342b81a9fe5512",
+    "tests/support/mod.rs": "08bc5a928c7183cc7a45baafcde5eb94e331dd3bb5e19f3c38f6ee379c836965",
+    "tests/cache_index.rs": "0da0fd74b0ba9683bcd408d025c2ad39cea0355d577d8c0e76b4a1174c1f224c"
+  },
+  "independent_faults": [
+    {"name":"discard-indexed-length","test":"overlapping_shorter_blocks_do_not_hide_an_earlier_complete_range","exitcode":101,"seconds":10.497657380066812,"assertion_failure":true,"fault_source_sha256":"92cc565485a78e7c74ea3921d3a9f6b2e79f2e5fbaf7fbd45f52b2a8b65884ae","log_sha256":"7a0bb13903e31852a9833661803c8a431e7fec3583cd0051d4dbdf1ecfe81d2d"},
+    {"name":"exclude-exact-end","test":"coverage_preserves_gaps_entry_eviction_and_the_last_representable_offset","exitcode":101,"seconds":10.935646686004475,"assertion_failure":true,"fault_source_sha256":"0a5a91cafb41c248674f112fa2ffe21e500a9dd7735f7b8119c1a1af49fd111a","log_sha256":"b845e2990e59a27bbe817455009d85bd50acf4559e92583c9efde27318a533a9"},
+    {"name":"old-eviction-removes-replacement","test":"replacement_updates_coverage_without_invalidating_a_pinned_old_view","exitcode":101,"seconds":10.75061693484895,"assertion_failure":true,"fault_source_sha256":"eaf5e3d41b22e87a828a14fdb739f5c7e80c2d6de19cf9784137896812f1203d","log_sha256":"ce3debe08a15dd7033c8e097348e665860b7b7f9acaf9b43d531f79691b9df41"}
+  ],
+  "companion_tools": {
+    "crapper_revision":"6fd92c4c9bcc56efb64a2f8743d5a2993bcfd42d",
+    "dryer_revision":"66ff6d21a42c04afcad89c78a80066176d1294b0",
+    "mutator_revision":"a5a0cb803b66e0cdb8bf471b3b08af701d424a41",
+    "covering_complexity":6,"filesystem_read_inner_complexity":53,
+    "coverage":null,"CRAP":null,"remaining_duplicate_candidates_at_0_8":3,
+    "cache_mutation_sites_scanned":29,"selected_mutations_executed":1,
+    "selected_mutations_killed":1,"selected_mutations_survived":0,"unselected_mutation_sites":28,
+    "selected_mutations":["src/cache.rs:93 >= -> >"],
+    "logs":[
+      {"label":"complexity","tool":"crapper","exitcode":0,"log_sha256":"138bdc533a7ba4065d38170f5500283f4c1e140ad2181501d280450d0e9d1911"},
+      {"label":"duplicates","tool":"dryer","exitcode":0,"log_sha256":"49a46aaecc603c8e3ae0fca38382b2281aac7871ece6379d5b50a0f321f97577"},
+      {"label":"mutation-scan","tool":"mutator","exitcode":0,"log_sha256":"5e191e24773dccafbc927f55495f1641dc79b5fae4390dab8b6ed0ee3a860f11"},
+      {"label":"mutation-fragment-completion","tool":"mutator","exitcode":0,"log_sha256":"dc3fe8f9c14208b0184ea7530b96eebbf4d89dbe8db64af34cf9d876b99f4922"}
+    ]
+  },
+  "release": {
+    "binary_sha256":"e39a70ba3e8c492398005a13a95aebd7242c27c6badfc02b3ed0df7a1c70e047",
+    "compiled_inputs_verified":25,
+    "compiled_input_tree_sha256":"afa8a157fecd28fa2776d1cc202f38ff9b1e63de368712135589dcc49be0dea9"
+  },
+  "remaining":[
+    "Exact matched native comparison; no performance acceptance from unit tests",
+    "Whole-package coverage/CRAP, 28 unselected cache mutation sites and previous duplication/complexity",
+    "Go heap series, backend request metrics and representative writer/random/HTTP workloads",
+    "Complete compatibility, historical EAGAIN attribution and redistribution notices"
+  ]
+}

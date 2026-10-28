@@ -1,8 +1,9 @@
 # Borrowed single-fragment read replies
 
 Status: **unaccepted for production**. This checkpoint removes a redundant
-application allocation/copy. Its functional checks do not establish a measured
-whole-filesystem performance improvement.
+application allocation/copy. Its matched repeat does **not** demonstrate a
+whole-filesystem improvement; adverse means and individual repetitions remain
+retained below.
 
 ## Ownership contract
 
@@ -77,5 +78,57 @@ The new release executable SHA256 is
 its 25-input tree SHA256 is
 `394be766410ccce70a3e29b80159ea8e896c95e913e81fe58cf606f9da53fff5`.
 Only `src/budget.rs`, `src/filesystem.rs` and `src/fuse.rs` differ among compiled
-inputs. A new matched repeat must retain both Go references and all adverse
-metrics before reporting any speed, CPU, latency or RSS improvement.
+inputs.
+
+## Matched native comparison
+
+Source `906eb45cef9a015c8725bda189b3431d7c6b7d7b` completed repetitions 50..54:
+five rotated/reversed implementation orders, fresh and complete-dataset revisit
+for the new executable, frozen cache prior and both unchanged Go references.
+All 40 phases finish in 695.748 seconds with 120,000 full-byte/metadata checks,
+zero file errors, unchanged native conditional hashes before/after and 97 exact
+listings. All 460 indexed artifacts, 280 CPU windows and both Rust compiled-input
+commits are independently verified. The complete
+[numeric receipt](borrowed-read-reply-results-20261028.json) includes CPU splits,
+allocator/client/cgroup/file/kernel/backend memory, p50/p95/p99 and dispersion.
+
+The same sealed SeaweedFS 4.51 dataset has 3,000 files / 8,298,727,528 bytes.
+Filesystem quota is 2 CPU / 4 GiB; backend quota is a separate 4 CPU / 6 GiB.
+All implementations use a 512 MiB payload budget, 100,000 entries and four
+128 KiB readers. Budgets, allocator defaults and metadata workload are unchanged.
+Fresh means a new process/mount, not controlled cold host/backend caches.
+
+Five-phase means; decimal MB. RSS is peak / mean of final fifth, not a stationary
+plateau. Whole CPU includes daemon, clients and controller, including listing
+and metadata work; payload throughput is measured after listing.
+
+| Implementation/state | Read MB/s | Daemon RSS peak / steady MB | Whole cgroup CPU s | Read p99 ms | Listing s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Go experimental fresh | 628.968 | 1289.231 / 1221.133 | 28.566 | 10.977 | 0.460 |
+| Go experimental warm | 605.055 | 1292.544 / 1216.754 | 28.637 | 11.219 | 0.034 |
+| Go packaged fresh | 624.295 | 1267.116 / 1206.325 | 28.754 | 10.974 | 0.461 |
+| Go packaged warm | 596.628 | 1298.592 / 1218.926 | 28.971 | 11.365 | 0.037 |
+| Rust borrowed fresh | 529.945 | 563.953 / 434.934 | 33.768 | 13.796 | 1.523 |
+| Rust borrowed warm | 529.613 | 562.068 / 455.229 | 32.356 | 13.818 | 0.023 |
+| Rust cache prior fresh | 534.541 | 560.189 / 433.569 | 33.364 | 13.079 | 1.478 |
+| Rust cache prior warm | 532.183 | 560.906 / 453.227 | 32.416 | 13.912 | 0.024 |
+
+Against cache prior, mean throughput decreases 0.86% fresh / 0.48% warm; whole CPU
+increases 1.21% fresh and decreases only 0.19% warm. P99 worsens 5.48% fresh and
+improves 0.68% warm. Peak RSS rises 0.67% / 0.21%; final-fifth RSS rises 0.31% /
+0.44%. Throughput/CPU favor only two fresh and three warm pairs; p99 favors two
+pairs in each state. Peak RSS favors one pair and final-fifth RSS two in each
+state. These mixed directional observations are not significance or speed claims.
+
+Both Go references still win throughput, whole CPU, p95/p99 and cold listing.
+Lower Rust daemon RSS is not a whole-cgroup memory win under file-cache pressure.
+Go heap time series and backend request metrics remain missing, not zero.
+This repeat retains the prior failing plain standard-list/stat Go workload
+separately; it does not replace that failure with a changed success criterion.
+
+The useful local allocation change is insufficient to close the measured gap.
+Next isolate the adapter's zero-initialization before fully overwriting each
+fragment, using supported Tokio/standard buffer APIs rather than another buffer
+implementation. The current repeat is a performance failure to retain, not a
+reason to tune the comparison or infer a Rust/SDK/network ceiling. Full reader/
+writer compatibility and representative workload acceptance remain incomplete.

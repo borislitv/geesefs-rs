@@ -7,9 +7,12 @@ Incremental conditional-GET publication has real HTTP/filesystem regressions,
 checksum barriers. Its adverse comparison remains retained. Removing the futile
 whole-span cache scan then improves mean throughput/CPU/p99 against exact prior
 Rust in forty matched phases, but warm results are mixed, RSS slightly higher
-and both Go references still faster. Stage 10 and overall compatibility/performance
-acceptance remain incomplete. See `docs/cached-fragment-lookup.md` and the appended
-ub-mode action log.
+and both Go references still faster. Borrowed miss replies then remove a second
+allocation in the synchronous FUSE callback; 181 Rust cases, ten independent
+faults and five selected mutants pass. Their forty-phase matched repeat has no
+speed/RSS win against cache prior and retains worse fresh p99. Stage 10 and
+overall compatibility/performance acceptance remain incomplete. See
+`docs/borrowed-read-reply.md` and the appended ub-mode action log.
 
 Status format: [ ] - incomplete, [X] - completed. Updated: 2026-10-26.
 The parent owns BMAD orchestration, final review and all VCS delivery.

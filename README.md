@@ -102,6 +102,10 @@ The [cached-fragment lookup follow-up](docs/cached-fragment-lookup.md) removes a
 redundant predecessor scan. Its matched forty-phase repeat improves mean
 throughput/CPU/p99 against exact prior Rust, but warm repetitions are mixed,
 RSS rises slightly and Go remains faster. Full acceptance stays incomplete.
+The [borrowed miss-reply follow-up](docs/borrowed-read-reply.md) removes a second
+payload allocation in the synchronous FUSE callback while retaining independent
+owned replies. Its matched forty-phase repeat is correct but shows no speed/RSS
+win against cache prior; the adverse result and remaining Go gap are retained.
 
 Backend IAM/profile authentication, signature discovery/SigV2, encryption and
 request options now have loopback HTTP/TLS coverage. See [backend options](docs/backend-options.md)

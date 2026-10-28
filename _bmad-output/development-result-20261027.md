@@ -97,6 +97,17 @@ verification while showing reduced selected BTree/cache leaf shares, not a whole
 performance fix. See docs/cached-fragment-lookup.md and its numeric/quality/profile
 receipts.
 
+The synchronous borrowed-reply checkpoint at
+`906eb45cef9a015c8725bda189b3431d7c6b7d7b` removes a second miss-output allocation
+without letting escaping replies pin large GET owners. All 181 Rust cases,
+37 Python cases, ten independent faults, five selected mutants, full checks and
+the native release pass. Its forty-phase equivalent repeat passes all 120,000
+file checks but shows no speed/RSS win against cache prior: throughput declines
+0.86% fresh / 0.48% warm, fresh p99 worsens 5.48%, RSS rises slightly. All 460
+artifacts, 280 CPU windows, public summaries and paired counts are checked. See
+docs/borrowed-read-reply.md; no performance acceptance is inferred from the local
+allocation reduction.
+
 Compatibility and comparative performance are **UNACCEPTED**. Delivery is a draft
 for review, not a complete port or permission to replace a served mount. Reduce
 the remaining tail latency and metadata cost, resolve compatibility gaps and Go

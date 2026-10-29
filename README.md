@@ -52,6 +52,18 @@ See the [glossary](docs/glossary.md) for ownership and measurement terminology.
 
 ## Status
 
+Latest checkpoint: [steady-state tail diagnosis](docs/steady-state-tail-diagnosis.md)
+and [CPU/off-CPU flamegraphs](docs/flamegraphs-20261029/README.md). Fixed-binary
+experiments remove CPU throttling and cgroup memory-limit reclaim using an
+8 CPU / 16 GiB filesystem/client fixture and a 16 CPU / 12 GiB synthetic backend.
+At eight runtime workers, Rust averages 1256 MB/s versus Go 1070/1017, with daemon
+RSS peaks 803 MB versus 1310/1335; p95/p99 still lose to both Go references.
+The 216 unprofiled phases retain 648,000 passing full-file checks and all adverse
+resource/worker results. Cold-start superiority is no longer required; normal
+long-lived operation, writer/reader compatibility and representative acceptance
+remain open. These are resource/configuration experiments, not a new runtime fix.
+The earlier checkpoints below remain historical evidence.
+
 **Experimental read/write mounts work; do not replace a served mount.** The
 foreground binary integrates fuser, SDK-backed S3, bounded payload ownership,
 paged namespace operations and versioned sparse/truncate/fsync writes. Actual

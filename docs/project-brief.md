@@ -49,9 +49,13 @@ that Go cannot be optimized or that Rust automatically improves memory or speed.
    failures and original measurements; changed object generations invalidate
    equivalent-workload acceptance.
 5. The implementation demonstrates lower memory use and faster operation across
-   the agreed representative workloads without hiding regressions or weakening
-   correctness/durability. Do not invent acceptance percentages or mark the
-   performance gate passed before measurements exist.
+   the agreed representative workloads during normal, sustained operation of a
+   long-lived mount, including throughput, p50/p95/p99 latency and CPU cost.
+   Cold startup/listing cost remains reported separately; winning cold start is
+   not required by the operator's 2026-10-29 clarification. Preserve adverse
+   measurements without treating a cold-only regression as a steady-state gate.
+   Do not weaken correctness/durability, invent acceptance percentages or mark
+   the performance gate passed before representative measurements exist.
 6. Reviewable source, dependency lockfiles, meaningful tests, benchmark tooling,
    reproduction commands and explicit remaining gaps are committed to a task
    branch and delivered through a draft PR. Production acceptance is separate.
@@ -76,3 +80,25 @@ All implementation work follows the repository's `AGENTS.md`, especially the
 performance gate, public-source boundary and mandatory reuse-first rule. Use
 finite command/external-operation timeouts and noninteractive SSH without
 questions or authentication prompts.
+
+## Current diagnostic priority
+
+Attribute substantial CPU costs and read waits through CPU/off-CPU profiles,
+FUSE/scheduler events and controlled comparisons before another runtime fix.
+Keep instrumented timings separate from acceptance measurements. The operator
+permits testing higher CPU allocations: apply each allocation equally to Rust and
+both Go references, report filesystem/client, backend and parent-group limits,
+and keep worker counts and memory budgets explicit. An improvement after adding
+CPU is a resource-sensitivity result, not evidence of a source-code optimization.
+
+The verified code-diagnosis fixture now uses 8 CPU / 16 GiB for filesystem plus
+client and 16 CPU / 12 GiB for the synthetic S3 backend, with parent ceilings of
+24 CPU / 28 GiB. An intermediate 8 GiB filesystem/client limit still caused
+page reclaim despite low daemon RSS. Verify actual limits and pressure counters
+for each new fixture instead of assuming these numbers guarantee headroom.
+Keep the application payload budget and worker counts explicit and unchanged
+when comparing fixed-binary resource effects.
+
+The first-stage scope still excludes FUSE passthrough and disk-backed caching.
+No single profile proves that every possible optimization is exhausted; report
+covered workloads, unresolved attribution and remaining compatibility gaps.

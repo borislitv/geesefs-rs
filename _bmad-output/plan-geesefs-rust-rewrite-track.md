@@ -49,7 +49,19 @@ about 84%/94% fresh/warm, but raise final-fifth RSS against prior and retain mix
 timing/Go deficits. The source/API constraint on unknown readdir types remains;
 see `docs/selective-pressure-eviction.md`. Overall acceptance stays incomplete.
 
-Status format: [ ] - incomplete, [X] - completed. Updated: 2026-10-28.
+The 2026-10-29 [steady-state diagnostic](../docs/steady-state-tail-diagnosis.md)
+freezes the source and separates quota/period/memory/runtime-worker effects.
+216 unprofiled phases pass 648,000 full-file checks. The final fixture has
+8 CPU / 16 GiB for filesystem/client and 16 CPU / 12 GiB for the backend, with
+zero phase CPU throttling and no filesystem/client memory-limit reclaim. At
+eight runtime workers Rust has higher throughput and lower RSS, but worse
+p95/p99 than both Go references. Eighteen CPU/off-CPU flamegraphs and the raw
+artifact hash index are retained. Remaining waits are localized to FUSE request
+service; their admission/fill/S3 join remains open. Cold-start superiority is
+no longer required. Stage 10 and overall acceptance remain incomplete; runtime
+changes and the fuser fork remain paused pending causal attribution.
+
+Status format: [ ] - incomplete, [X] - completed. Updated: 2026-10-29.
 The parent owns BMAD orchestration, final review and all VCS delivery.
 
 ## Execution Stages

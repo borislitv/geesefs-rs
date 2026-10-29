@@ -48,6 +48,10 @@ filesystem and S3 behavior. A language change alone does not satisfy this goal.
   readers, cache eviction and writer/fsync workloads, including dependency errors.
 - Require reproducible improvement rather than one favorable sample; retain raw
   measurements, failures, variance and baseline executable provenance.
+- Prioritize sustained normal operation of a long-lived mount. Report cold
+  startup/listing separately; a cold-only loss does not block acceptance under
+  the operator's 2026-10-29 clarification. Higher diagnostic CPU allocations are
+  allowed when applied equally to every implementation and reported explicitly.
 - Do not lower caches, omit metadata, remove compatibility, change durability,
   force garbage collection or omit clients/cache memory to manufacture a win.
 - Correctness is a prerequisite. Until compatibility and performance gates pass,

@@ -1,5 +1,15 @@
 # Performance acceptance: UNACCEPTED
 
+The latest [steady-state diagnosis](steady-state-tail-diagnosis.md) and
+[numeric receipt](steady-state-headroom-results-20261029.json) supersede the
+historical measurements below for current resource-sensitivity findings. They
+retain 216 unprofiled phases, 648,000 full-file checks and eighteen separately
+scoped [flamegraphs](flamegraphs-20261029/README.md). Expanded CPU/memory removes
+quota throttling and filesystem/client reclaim. Rust's throughput and process
+memory improve relative to both Go references, but p95/p99 remain worse with
+eight runtime workers. No overall acceptance or runtime-code improvement is
+claimed. Cold startup is reported separately and is no longer a required win.
+
 No overall memory/speed acceptance is claimed. Selected local sequential/eviction
 matrices complete correctly with higher group mean throughput, but cold tail
 regressions remain. A separate real-object Kubernetes diagnostic completes all

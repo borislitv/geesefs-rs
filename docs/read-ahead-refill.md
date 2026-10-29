@@ -118,3 +118,6 @@ retains `hardlink-emulation:FAILED:errno=5`. The original export verifies 1,180
 artifacts and 25 compiled inputs; an independent check additionally verifies
 9,424 source-row/aggregate numeric cells and the resource intervals. Overall
 compatibility/performance acceptance remains **UNACCEPTED**.
+
+The subsequent [cross-reader eviction comparison](read-ahead-eviction.md) retains
+this first candidate as its exact baseline and reports the remaining p99 gap.

@@ -53,6 +53,18 @@ cargo test --locked --offline --test read_refill optional_refill_preserves_anoth
 
 ## Acceptance
 
-UNACCEPTED. The public failure confirms the cross-reader defect, not its share
-of measured payload amplification. The candidate needs native comparison, and
-remaining Go tail/CPU and broader compatibility/workload gates remain open.
+9. Completed 96 matched phases / 288,000 checks, authoritative v3 socket/FUSE
+   capture, and mounted verification. Retained two failed observer attempts;
+   corrected the namespace-helper filter using raw kernel comm after researching
+   bpftrace #4384. Never relax error, loss or complete-join guards.
+10. Collected and verified 2444 artifacts and 25 compiled inputs; independently
+    checked 9424 numeric cells and resource intervals. See
+    `docs/read-ahead-eviction.md` for full results and adverse mount pairs.
+    Mean warm excess payload falls 83.830174 to 67.202226 MB, but Rust p99 remains
+    11.62% worse than experimental Go in all four pairs. Required eviction and
+    initial-object waits are not solved by the optional-reclamation fix.
+
+UNACCEPTED. The public failure confirms the cross-reader defect, and matched
+native measurements establish its observed tradeoffs. Remaining experimental-Go
+p99 and broader compatibility/workload gates stay open. Next investigate initial
+object reads and read-history lifetime rather than assume refill explains them.

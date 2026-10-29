@@ -106,9 +106,11 @@ selective-delay injection establish that repair target. The
 [bounded refill candidate](read-ahead-refill.md) now has failure-sensitive public
 regressions, full library checks and 96 matched native phases. It improves prior
 Rust throughput/tails but still loses p95/p99 to both Go references, and repeated
-payload increases. Cross-reader speculative eviction is the next regression
-target. Neither the repaired scheduling mechanism nor these measurements pass
-acceptance or explain every tail wait.
+payload increases. The [cross-reader eviction fix](read-ahead-eviction.md) has a
+second complete 96-phase comparison: traffic and tails improve, but experimental
+Go p99 remains better. Initial-object dependencies and the inode-scoped lifetime
+of read history are the next diagnosis targets. Neither repaired mechanism nor
+these measurements pass acceptance or explain every tail wait.
 
 The first-stage scope still excludes FUSE passthrough and disk-backed caching.
 No single profile proves that every possible optimization is exhausted; report

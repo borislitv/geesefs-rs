@@ -31,6 +31,41 @@ SDK, Arcadia code, or private dependency is permitted.
 
 ## Narrow custom state
 
+### Read-ahead refill scheduling (2026-10-29)
+
+The [causal diagnostic](read-ahead-refill-causality.md) establishes a scheduling
+problem in the filesystem adapter, not a missing SDK transport or cache package.
+Public upstream examples were read before implementation:
+
+- [Mountpoint S3](https://github.com/awslabs/mountpoint-s3/blob/f58dbc52fec09394ee60d285bec1c3e082f06391/mountpoint-s3/src/prefetch.rs#L218-L289)
+  prepares future requests before the single-buffer early return and refills at
+  half-window consumption. Its historical unbounded part queue is not suitable
+  for this project's hard byte-admission contract.
+- [Mountpoint #488](https://github.com/awslabs/mountpoint-s3/issues/488), fixed by
+  [#556](https://github.com/awslabs/mountpoint-s3/pull/556), preserves useful data
+  across bounded reordered reads. [#505](https://github.com/awslabs/mountpoint-s3/pull/505)
+  retains task handles so discarded GETs are cancelled. Both fixes are merged.
+- [Goofys #21](https://github.com/kahing/goofys/issues/21) and merged
+  [#38](https://github.com/kahing/goofys/pull/38) top up the remaining read-ahead
+  before consuming buffered data, with parallel Range GETs and handle cleanup.
+- [RocksDB #9674](https://github.com/meta/rocksdb/pull/9674), delivered as
+  [49a10fe](https://github.com/meta/rocksdb/commit/49a10feb21dc5c766bb272406136667e1d8a969e),
+  overlaps consumption with asynchronous filling of a second buffer.
+  [#13774](https://github.com/meta/rocksdb/issues/13774) remains an open report of
+  cancellation leaving other async readers blocked, not a verified delivered fix.
+- [S3FS #214](https://github.com/s3fs-fuse/s3fs-fuse/issues/214) proposes half-buffer
+  asynchronous refill but is closed only as a duplicate of still-open
+  [#95](https://github.com/s3fs-fuse/s3fs-fuse/issues/95).
+
+Reuse the existing Tokio-owned request future, JoinSet cancellation, bounded
+RangeSink channel, FIFO byte permits and synchronous LRU index. The callback read
+APIs already retain a caller-owned future after publishing required bytes; extend
+that same lifetime to optional cache-hit refill rather than detach another task
+or add an executor, allocator, cache, HTTP client or dependency. Speculation must
+skip unavailable admission and preserve still-unconsumed cached data. Ordinary
+block-returning reads retain their immediate cache-hit path because they provide
+no separately owned post-publication lifetime.
+
 The operator reaffirmed maximum reuse of maintained library mechanisms during
 the read-buffer continuation. The miss-reply optimization reuses the existing
 immutable `Block` view and Tokio-owned reservation lifetime; it adds no pool,

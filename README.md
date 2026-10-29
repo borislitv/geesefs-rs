@@ -52,15 +52,23 @@ See the [glossary](docs/glossary.md) for ownership and measurement terminology.
 
 ## Status
 
-Latest checkpoint: [read-ahead refill causality](docs/read-ahead-refill-causality.md).
+Latest implementation: [bounded cache-hit refill](docs/read-ahead-refill.md).
+Nine new public regressions, eight independent fault checks and one selected
+boundary mutation verify early refill, cancellation, pressure, generations and
+EOF. Full Kubernetes checks pass 201 Rust / 37 Python cases, formatting, Clippy
+and the public-source audit. Native reader/writer and matched performance
+verification are in progress; overall acceptance remains UNACCEPTED.
+
+The preceding [read-ahead refill diagnosis](docs/read-ahead-refill-causality.md)
+established the mechanism on frozen executables.
 Rust's cache-hit return skips planning the next window; its GET starts only
 after demand reaches missing bytes. Direct socket/FUSE tracing finds 484/659
 unambiguous noninitial Rust GETs sent after consumption begins, versus 0/884 for
 each Go reference. Selectively delaying noninitial GETs exposes 5.829 seconds of
 summed inserted wait inside Rust reads and zero inside the joined Go reads.
-The new 72 controlled phases pass 216,000 full-file checks; separate network
-profiles add 18,000. This confirms a repair target, not an implemented fix or
-whole-workload acceptance. Backend-worker controls and all adverse results are
+Those 72 controlled phases pass 216,000 full-file checks; separate network
+profiles add 18,000. They confirm the repair target, not the new candidate's
+performance or whole-workload acceptance. Backend-worker controls and all adverse results are
 retained in the [numeric receipt](docs/read-ahead-refill-causality-20261029.json).
 
 The preceding [steady-state tail diagnosis](docs/steady-state-tail-diagnosis.md)

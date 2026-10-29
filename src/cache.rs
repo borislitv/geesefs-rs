@@ -2,6 +2,7 @@ use lru::LruCache;
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
+    ops::Range,
     sync::{Arc, Mutex},
 };
 
@@ -10,6 +11,23 @@ use crate::budget::{Block, Reservation};
 /// Best-effort retained policy. Blocks remain charged to their allocation budget
 /// after eviction while any reader pins them. Cache admission never reserves bytes.
 type Key = (u64, u64, u64);
+
+pub(crate) fn first_gap(
+    mut range: Range<u64>,
+    covered: impl Iterator<Item = Range<u64>>,
+) -> Option<Range<u64>> {
+    for span in covered {
+        if span.start > range.start {
+            return Some(range.start..span.start);
+        }
+        range.start = range.start.max(span.end);
+        if range.start >= range.end {
+            return None;
+        }
+    }
+    Some(range)
+}
+
 struct State {
     entries: LruCache<Key, Block>,
     index: BTreeMap<Key, usize>,
@@ -166,6 +184,43 @@ impl ReadCache {
     /// Release one cache owner; caller views retain their complete backing charge.
     pub(crate) fn evict_lru(&self) -> bool {
         self.state.lock().unwrap().evict_lru()
+    }
+
+    /// Speculation cannot fund itself by evicting this reader's unconsumed data.
+    pub(crate) fn evict_consumed_lru(&self, inode: u64, generation: u64, consumed: u64) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if state
+            .entries
+            .peek_lru()
+            .is_some_and(|(&(ino, entry_generation, start), block)| {
+                ino == inode
+                    && entry_generation == generation
+                    && start.saturating_add(block.as_slice().len() as u64) > consumed
+            })
+        {
+            return false;
+        }
+        state.evict_lru()
+    }
+
+    pub(crate) fn contains(&self, inode: u64, generation: u64, offset: u64) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .index
+            .range((inode, generation, 0)..=(inode, generation, offset))
+            .rev()
+            .any(|(&(_, _, start), &length)| offset - start < length as u64)
+    }
+
+    /// Locate only the first missing interval without cloning or touching owners.
+    pub(crate) fn gap(&self, inode: u64, generation: u64, range: Range<u64>) -> Option<Range<u64>> {
+        let state = self.state.lock().unwrap();
+        let covered = state
+            .index
+            .range((inode, generation, 0)..(inode, generation, range.end))
+            .map(|(&(_, _, start), &length)| start..start.saturating_add(length as u64));
+        first_gap(range, covered)
     }
 
     pub fn clear(&self) {

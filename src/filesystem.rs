@@ -800,10 +800,142 @@ impl Filesystem {
             .read_inner(ino, offset, length, borrow_reply, &mut ready)
             .await;
         if let Some(ready) = ready {
+            let cached_length = result
+                .as_ref()
+                .ok()
+                .and_then(Option::as_ref)
+                .map_or(0, |block| block.as_slice().len());
             ready(result.map(|block| block.expect("unpublished read owns its result")));
-            None
+            if cached_length == 0 {
+                None
+            } else {
+                self.refill_after_hit(ino, offset + cached_length as u64)
+                    .await
+                    .err()
+            }
         } else {
             result.err()
+        }
+    }
+
+    /// Keep optional refill in the same admitted, cancellable reply future. Ready
+    /// bytes have already been published and no reply owner is held across admission.
+    async fn refill_after_hit(&self, ino: u64, consumed: u64) -> Result<()> {
+        let node = self.node(ino)?;
+        let Some((size, generation, version)) = read::refill_state(&node, consumed) else {
+            return Ok(());
+        };
+        let budgets = self.effective_budgets();
+        let window = node
+            .pattern
+            .lock()
+            .unwrap()
+            .window(&self.config)
+            .min(budgets.max_effective_window_bytes);
+        if window == 0 {
+            return Ok(());
+        }
+        let Some(range) = self.refill_range(&node, generation, consumed, size, window) else {
+            return Ok(());
+        };
+        let length = (range.end - range.start) as usize;
+        let read::FillAdmission::Leader(fill) =
+            read::start_fill(&node, generation, range.start, range.end)
+        else {
+            return Ok(());
+        };
+        // A concurrent fill may have published and relinquished its interval
+        // between planning and ownership. Retry speculation on a later read.
+        if self
+            .cache
+            .lock()
+            .unwrap()
+            .gap(ino, generation, range.clone())
+            != Some(range.clone())
+        {
+            return Ok(());
+        }
+        let Some(charge) = self.try_refill_admission(ino, generation, consumed, length) else {
+            return Ok(());
+        };
+        let snapshot = read::snapshot(&node)?;
+        if snapshot.version != version
+            || read::generation(snapshot.version, snapshot.remote.as_ref()) != generation
+            || !write::remote_only(&snapshot, range.start, length)
+        {
+            return Ok(());
+        }
+        let start = range.start;
+        self.load_window(
+            read::Window {
+                snapshot: Arc::new(snapshot),
+                range,
+                charge,
+                single_buffer: true,
+                cache_key: Some((ino, generation)),
+                fill,
+            },
+            start,
+            0,
+            false,
+            &mut None::<fn(Result<Block>)>,
+        )
+        .await?;
+        Ok(())
+    }
+
+    fn refill_range(
+        &self,
+        node: &Inode,
+        generation: u64,
+        consumed: u64,
+        size: u64,
+        window: usize,
+    ) -> Option<std::ops::Range<u64>> {
+        let trigger = consumed.saturating_add((window / 2) as u64).min(size - 1);
+        if read::fill_covers(node, generation, trigger)
+            || self
+                .cache
+                .lock()
+                .unwrap()
+                .contains(node.ino, generation, trigger)
+        {
+            return None;
+        }
+        let mut cursor = consumed;
+        loop {
+            let gap = self
+                .cache
+                .lock()
+                .unwrap()
+                .gap(node.ino, generation, cursor..size)?;
+            cursor = gap.end;
+            if let Some(range) = read::unfilled(node, generation, gap) {
+                return Some(range.start..range.end.min(range.start.saturating_add(window as u64)));
+            }
+            if cursor == size {
+                return None;
+            }
+        }
+    }
+
+    fn try_refill_admission(
+        &self,
+        ino: u64,
+        generation: u64,
+        consumed: u64,
+        length: usize,
+    ) -> Option<crate::budget::Reservation> {
+        // No waiting, flushing, or bypassing FIFO for speculative bytes. Reclaim
+        // old owners only while the still-needed current backing stays intact.
+        let cache = self.cache.lock().unwrap();
+        loop {
+            if let Ok(charge) = self.data.try_reserve(length) {
+                return Some(charge);
+            }
+            if !cache.evict_consumed_lru(ino, generation, consumed) {
+                return None;
+            }
         }
     }
 
@@ -828,14 +960,10 @@ impl Filesystem {
         let node = self.node(ino)?;
         let (size, clean, generation, version, etag, mut single_buffer) = {
             let state = node.state.lock().unwrap();
-            use std::hash::{Hash, Hasher};
-            let mut hash = std::collections::hash_map::DefaultHasher::new();
-            state.remote.as_ref().map(|r| &r.etag).hash(&mut hash);
-            state.version.hash(&mut hash);
             (
                 state.size,
                 state.version == state.durable,
-                hash.finish(),
+                read::generation(state.version, state.remote.as_ref()),
                 state.version,
                 state.remote.as_ref().map(|remote| remote.etag.clone()),
                 state.version == state.durable
@@ -930,7 +1058,7 @@ impl Filesystem {
         };
         // Atomically admit all payload/GET/output buffers before the first
         // allocation; otherwise competing readers could each pin half a lane.
-        let (mut charge, snapshot) = loop {
+        let (charge, snapshot) = loop {
             let charge = self
                 .admit((if single_buffer { 1 } else { 2 }) * prefetch + length)
                 .await?;
@@ -950,10 +1078,44 @@ impl Filesystem {
             }
             break (charge, Arc::new(snapshot));
         };
-        let mut output = charge.split(length);
         let cacheable = clean
             && snapshot.version == version
             && snapshot.remote.as_ref().map(|head| head.etag.clone()) == etag;
+        self.load_window(
+            read::Window {
+                snapshot,
+                range: start..start + prefetch as u64,
+                charge,
+                single_buffer,
+                cache_key: cacheable.then_some((ino, generation)),
+                fill,
+            },
+            offset,
+            length,
+            borrow_reply,
+            ready,
+        )
+        .await
+    }
+
+    async fn load_window(
+        &self,
+        window: read::Window,
+        offset: u64,
+        length: usize,
+        borrow_reply: bool,
+        ready: &mut Option<impl FnOnce(Result<Block>) + Send>,
+    ) -> Result<Option<Block>> {
+        let read::Window {
+            snapshot,
+            range,
+            mut charge,
+            single_buffer,
+            cache_key,
+            fill,
+        } = window;
+        let chunk = self.effective_budgets().read_parallel_chunk_bytes.max(1);
+        let mut output = charge.split(length);
         // The snapshot may have shrunk while admission flushed another generation.
         let available = length.min(snapshot.size.saturating_sub(offset) as usize);
         let mut reply = Some(output.split(available));
@@ -969,10 +1131,10 @@ impl Filesystem {
         {
             ready(Ok(result.take().expect("empty requested result")));
         }
-        let end = (start + prefetch as u64).min(snapshot.size);
+        let end = range.end.min(snapshot.size);
         let mut tasks = tokio::task::JoinSet::new();
         let (sender, mut chunks) = tokio::sync::mpsc::channel(self.config.max_requests);
-        let mut next = start;
+        let mut next = range.start;
         let mut prefetch_error = None;
         while next < end || !tasks.is_empty() || !chunks.is_empty() {
             while next < end && tasks.len() < self.config.max_requests {
@@ -1067,7 +1229,7 @@ impl Filesystem {
             {
                 ready(Ok(result.take().expect("completed requested result")));
             }
-            if cacheable {
+            if let Some((ino, generation)) = cache_key {
                 // Publish into the cache followers inspect, including after
                 // pressure reclamation while the GET was in flight.
                 self.cache

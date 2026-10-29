@@ -1,11 +1,46 @@
 use crate::{
-    backend::Store,
-    budget::{Block, Budget},
+    backend::{Store, s3::ObjectHead},
+    budget::{Block, Budget, Reservation},
     error::{Error, Result},
     inode::Inode,
     write::{Snapshot, materialize},
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, ops::Range, sync::Arc};
+
+pub(crate) struct Window {
+    pub snapshot: Arc<Snapshot>,
+    pub range: Range<u64>,
+    pub charge: Reservation,
+    pub single_buffer: bool,
+    pub cache_key: Option<(u64, u64)>,
+    pub fill: FillGuard,
+}
+
+pub(crate) fn generation(version: u64, remote: Option<&ObjectHead>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    remote.map(|head| &head.etag).hash(&mut hash);
+    version.hash(&mut hash);
+    hash.finish()
+}
+
+pub(crate) fn refill_state(node: &Inode, consumed: u64) -> Option<(u64, u64, u64)> {
+    let state = node.state.lock().unwrap();
+    if state.deleted
+        || state.version != state.durable
+        || state.remote.is_none()
+        || !state.extents.is_empty()
+        || state.visible_remote_size < state.size
+        || consumed >= state.size
+    {
+        return None;
+    }
+    Some((
+        state.size,
+        generation(state.version, state.remote.as_ref()),
+        state.version,
+    ))
+}
 
 pub(crate) struct Fill {
     end: u64,
@@ -46,6 +81,23 @@ pub(crate) fn start_fill(
     })
 }
 
+pub(crate) fn fill_covers(node: &Inode, generation: u64, offset: u64) -> bool {
+    node.read_fills
+        .lock()
+        .unwrap()
+        .range((generation, 0)..=(generation, offset))
+        .next_back()
+        .is_some_and(|(_, fill)| offset < fill.end)
+}
+
+pub(crate) fn unfilled(node: &Inode, generation: u64, range: Range<u64>) -> Option<Range<u64>> {
+    let fills = node.read_fills.lock().unwrap();
+    let covered = fills
+        .range((generation, 0)..(generation, range.end))
+        .map(|(&(_, start), fill)| start..fill.end);
+    crate::cache::first_gap(range, covered)
+}
+
 impl FillGuard {
     pub(crate) fn published(&self) {
         if let Some(fill) = self.node.read_fills.lock().unwrap().get(&self.key) {
@@ -68,14 +120,7 @@ pub struct Pattern {
     recent: std::collections::VecDeque<u64>,
 }
 impl Pattern {
-    pub fn prefetch(
-        &mut self,
-        offset: u64,
-        length: usize,
-        config: &crate::config::Config,
-    ) -> usize {
-        // Public Go getReadAhead/trackRead chooses from the preceding history,
-        // then tracks this nonempty request regardless of cache hit or miss.
+    pub(crate) fn window(&self, config: &crate::config::Config) -> usize {
         let average = (u128::from(self.sequential)
             + self.recent.iter().copied().map(u128::from).sum::<u128>())
             / (1 + self.recent.len() as u128);
@@ -86,6 +131,18 @@ impl Pattern {
         } else {
             config.read_ahead
         };
+        kb.saturating_mul(1024)
+    }
+
+    pub fn prefetch(
+        &mut self,
+        offset: u64,
+        length: usize,
+        config: &crate::config::Config,
+    ) -> usize {
+        // Public Go getReadAhead/trackRead chooses from the preceding history,
+        // then tracks this nonempty request regardless of cache hit or miss.
+        let window = self.window(config);
         if length > 0 {
             if offset == self.end {
                 self.sequential = self.sequential.saturating_add(length as u64);
@@ -100,7 +157,7 @@ impl Pattern {
             }
             self.end = offset.saturating_add(length as u64);
         }
-        length.max(kb.saturating_mul(1024))
+        length.max(window)
     }
 }
 

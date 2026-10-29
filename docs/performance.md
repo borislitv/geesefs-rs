@@ -1,5 +1,10 @@
 # Performance acceptance: UNACCEPTED
 
+The [bounded cache-hit refill candidate](read-ahead-refill.md) passes its
+failure-sensitive behavior and full library checks. Its matched native
+performance verification is in progress; the measurements below describe
+the frozen prior implementation rather than an unmeasured candidate win.
+
 The latest [read-ahead refill diagnosis](read-ahead-refill-causality.md) confirms
 that Rust's cache-hit early return postpones the next window's GET until a demand
 miss. Direct socket/FUSE joins and selective noninitial-GET delay independently

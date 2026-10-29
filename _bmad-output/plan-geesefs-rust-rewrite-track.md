@@ -67,8 +67,11 @@ window before demand. All 72 controlled phases / 216,000 file checks and six
 network-profile phases / 18,000 checks pass; 961 raw artifact hashes and all
 25 frozen inputs are verified. Increasing backend GOMAXPROCS does not remove
 the remaining tail gap. The causal prerequisite for a bounded refill repair is
-now met, but no runtime fix has been implemented. Initial-object waits, the
-representative matrix and compatibility remain open; the fuser fork stays paused.
+now met. The [bounded refill candidate](../docs/read-ahead-refill.md) adds nine
+public regressions, kills eight independent faults and a selected boundary
+mutant, and passes 201 Rust /37 Python cases plus formatting, Clippy and source
+audit. Mounted and matched performance verification is in progress. Initial-object
+waits, the representative matrix and compatibility remain open; the fuser fork stays paused.
 
 Status format: [ ] - incomplete, [X] - completed. Updated: 2026-10-29.
 The parent owns BMAD orchestration, final review and all VCS delivery.

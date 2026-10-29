@@ -2,6 +2,23 @@
 
 ## Public provenance and selection
 
+### Read-history lifetime across closed streams (2026-10-29)
+
+The same pinned public Go `core/file.go:30-51` creates zeroed access history in
+`NewFileHandle`; `core/handles.go:862-873` calls it for every open. Rust currently
+retains `Pattern` on the inode, so a new open after the last release can start
+with the previous stream's promoted window. A public open/read/release/reopen
+regression confirms this on `d0d7b99`: the new first GET is 4 MiB instead of the
+configured 1 MiB. Direct mounted captures independently show the corresponding
+100 MiB burst versus Go's 5 MiB initial window for large-file revisits.
+
+Reuse `Pattern::default()` when the existing open count transitions from zero to
+one, under the existing inode-state lock. Preserve history when another handle
+is still open and preserve retained payload. This is a bounded stream-lifetime
+correction, not complete per-handle history isolation: concurrent handles of one
+inode still share the existing policy. Its effect on p99 needs a new comparison;
+the observed initial-header waits alone do not prove the performance hypothesis.
+
 ### Cross-reader speculative eviction (2026-10-29)
 
 A public two-reader pressure regression against `6e16525` demonstrates that

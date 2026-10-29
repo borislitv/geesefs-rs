@@ -668,6 +668,9 @@ impl Filesystem {
         if state.deleted {
             return Err(Error::Fs(libc::ENOENT));
         }
+        if state.opens == 0 {
+            *node.pattern.lock().unwrap() = read::Pattern::default();
+        }
         state.opens += 1;
         Ok(())
     }

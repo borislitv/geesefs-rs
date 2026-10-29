@@ -71,7 +71,57 @@ ordinary_mounted_passed=false. Owned mounts, daemons and integration helpers are
 gone afterward. One local launch-directory setup error occurred before the
 workload started and is not a filesystem failure.
 
-A repeated same-budget comparison is next. Do not infer lower RSS, faster
-operation or full compatibility from the local pressure case. Preserve random/
-hot-set tradeoffs, counter/CPU window scope and every adverse result. Overall
-acceptance remains open.
+## Matched comparison
+
+Source `3016433370e9d2ea7daee495106572012a70228f` completes all forty phases,
+repetitions 150–154, in 832.687 s. All 120,000 file checks, native before/after
+hashes, 97 listings, 280 CPU windows, forty backend-counter windows and 460
+artifact hashes pass. Rust variants use the same System instrumentation; the
+four compiled-input changes and immutable dataset are independently verified.
+
+The [numeric receipt](selective-pressure-eviction-results-20261028.json) retains
+all selected memory/CPU/counter scopes and dispersion. Five-phase means, decimal
+MB; RSS is peak / final-fifth mean, not proof of a stationary plateau.
+
+| Implementation/state | Read MB/s | Daemon RSS peak / final-fifth MB | Whole cgroup CPU s | Read p99 ms | Listing s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Go experimental fresh | 464.164 | 1290.811 / 1200.484 | 37.911 | 16.244 | 0.545 |
+| Go experimental warm-revisit | 479.125 | 1278.407 / 1203.145 | 36.118 | 15.599 | 0.040 |
+| Go packaged fresh | 455.624 | 1301.918 / 1200.441 | 38.871 | 16.254 | 0.581 |
+| Go packaged warm-revisit | 452.854 | 1316.224 / 1211.306 | 37.580 | 16.365 | 0.036 |
+| Rust selective eviction fresh | 495.758 | 603.774 / 603.751 | 35.550 | 15.689 | 1.910 |
+| Rust selective eviction warm-revisit | 474.407 | 626.632 / 626.632 | 35.664 | 16.714 | 0.025 |
+| Rust fragment-owner prior fresh | 506.083 | 571.915 / 556.837 | 35.026 | 15.491 | 1.784 |
+| Rust fragment-owner prior warm-revisit | 469.114 | 583.950 / 579.541 | 35.772 | 17.058 | 0.026 |
+
+Payload amplification is substantially reduced, but not erased:
+
+| Source/state | Extra object payload MB | Extra payload % | Range responses |
+| --- | ---: | ---: | ---: |
+| Candidate fresh | 35.967 | 0.433 | 3997.8 |
+| Prior fresh | 221.105 | 2.664 | 4008.2 |
+| Candidate warm-revisit | 27.368 | 0.330 | 3833.6 |
+| Prior warm-revisit | 491.179 | 5.919 | 3896.8 |
+
+Fresh/warm excess is about 84%/94% lower than prior. However, fresh mean throughput
+falls 2.04%, CPU rises 1.50% and p99 rises 1.28%; warm throughput improves 1.13%,
+CPU 0.30% and p99 2.02%. Retaining useful cache ownership increases peak RSS
+5.57%/7.31% and final-fifth RSS **8.43%/8.13%**, with no favorable memory pair.
+Throughput/CPU/p99 favorable pairs are 2/5 fresh and 3/5 warm. Candidate throughput
+population stdev is 42.131/16.011 MB/s, and p99 stdev is 1.683/0.552 ms. These
+tradeoffs remain visible; lower backend bytes do not establish a general win.
+
+Process RSS remains approximately half of Go's and fresh means improve on both
+Go references, but warm p99 loses to both and warm throughput loses to experimental
+Go. Cold listing still takes 1.910 s versus 0.545/0.581 s; LIST-labelled requests
+remain 213 versus seven. Whole-cgroup memory remains near its cap. Request/cost
+windows follow client phases, not forced quiescence; background read-ahead can
+cross the boundary. Keep the small 0.010 MB mean warm experimental-Go excess too.
+
+The pressure regression is fixed and amplification is reduced; all-metric and
+representative-workload acceptance remains open. In particular, fuser 0.18.0's
+public readdir API requires a concrete FileType and cannot express DT_UNKNOWN.
+Standard LIST lacks authoritative special-file metadata, so omitting those HEADs
+would require a supported unknown-type reply path rather than false regular-file
+hints. A dependency/API decision is needed for that cold-listing path; no unsafe
+encoding or source-audit exception has been introduced.

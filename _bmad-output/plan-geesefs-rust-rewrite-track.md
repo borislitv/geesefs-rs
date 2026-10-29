@@ -44,8 +44,10 @@ path to reproduce; see `docs/fragment-admission-transfer.md`.
 That filesystem pressure repro now fails with four GETs instead of three and is
 fixed using supported synchronous LRU victim removal. The candidate passes 192
 Rust cases, weighted/entry-limit/pinned/FIFO checks and the Rust-only mounted sweep
-with known hardlink EIO retained. Its repeated comparison remains pending; see
-`docs/selective-pressure-eviction.md`.
+with known hardlink EIO retained. Forty matched phases reduce excess payload by
+about 84%/94% fresh/warm, but raise final-fifth RSS against prior and retain mixed
+timing/Go deficits. The source/API constraint on unknown readdir types remains;
+see `docs/selective-pressure-eviction.md`. Overall acceptance stays incomplete.
 
 Status format: [ ] - incomplete, [X] - completed. Updated: 2026-10-28.
 The parent owns BMAD orchestration, final review and all VCS delivery.

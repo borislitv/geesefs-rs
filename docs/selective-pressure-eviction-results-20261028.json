@@ -1,0 +1,691 @@
+{
+  "schema": "selective-pressure-eviction-comparison-summary-v1",
+  "accepted": false,
+  "comparison_valid": true,
+  "source_commit": "3016433370e9d2ea7daee495106572012a70228f",
+  "scope": "additional explicit xattr/forced-stat/full-payload workload; plain-list/stat Go failure retained separately",
+  "runs": 40,
+  "file_checks_verified": 120000,
+  "cpu_windows_recomputed": 280,
+  "artifact_count_verified": 460,
+  "elapsed_seconds": 832.686781476019,
+  "raw_source_report_sha256": "e744698ea873b79f48e76e123f829c63d52919d31234c4d35ab9458fb5dd7728",
+  "evidence_index_sha256": "d1554a374bb48ba398674bbcd46e5835754c751b3ad64e2a2f6d6f17edc14f6d",
+  "compiled_inputs_verified_against_commits": true,
+  "fixture": {
+    "server": "SeaweedFS 4.51",
+    "files": 3000,
+    "bytes": 8298727528,
+    "listings": 97,
+    "manifest_sha256": "7bd537c12c702a614b51383a28ed167c86dbf2d964696525cdf8b4c2871555a1",
+    "native_full_hashes_before": 3000,
+    "native_full_hashes_after": 3000,
+    "native_exact_listings_after": 97,
+    "read_only_mutations_rejected": 4,
+    "wrong_if_match_rejected": true
+  },
+  "limits": {
+    "filesystem_cpu_quota": 2,
+    "filesystem_cgroup_memory_bytes": 4294967296,
+    "backend_cpu_quota": 4,
+    "backend_cgroup_memory_bytes": 6442450944,
+    "configured_payload_budget_MiB": 512,
+    "entry_limit": 100000,
+    "reader_threads": 4,
+    "read_chunk_bytes": 131072,
+    "allocator": "unchanged default; no candidate tuning",
+    "fresh": "new mount/process; host and backend caches not controlled or globally dropped",
+    "warm-revisit": "complete dataset revisited in the same mount; larger than daemon cache",
+    "metadata": "all stored xattrs checked, GNU stat --cached=never, ordinary stat and full payload; extra work included in whole CPU"
+  },
+  "provenance": {
+    "go-experimental": {
+      "source_revision": "5c0884c9e8799bbab93e2d4102fdc15e9c079e0d",
+      "binary_sha256": "7ad836e0bdd23ea279bb236627e9b130d11c174ae649c7582213a83e5d11a28b",
+      "toolchain": "go1.25.9"
+    },
+    "go-packaged": {
+      "source_revision": "80c214ef14f620d93407454fc76ca01dd71fa25f",
+      "binary_sha256": "e04492363d29985ab1f74521482a01a3c6f7fdeeed35ad1ba0faa991370f4683",
+      "toolchain": "go1.25.9"
+    },
+    "rust-owner-prior": {
+      "source_revision": "666bb2e7e03e797650c6fd0cd4119a3a9fd7b1c5",
+      "binary_sha256": "aeb8aed1fcc2f6a94bf3a993b45614baf5160754a2d7d583e75073448ea5609e",
+      "features": [
+        "system-allocator"
+      ]
+    },
+    "rust": {
+      "source_revision": "3016433370e9d2ea7daee495106572012a70228f",
+      "source_base": "666bb2e7e03e797650c6fd0cd4119a3a9fd7b1c5",
+      "compiled_input_tree_sha256": "5da8fa1337f10dc3a2935e981bcec159d5052faa4993ce8193ebda38467520db",
+      "binary_sha256": "46350f9c4c4f6db26a1fdbdea35a5ebb532e7fe7667380f88d77fe1e6a1d2cfd",
+      "features": [
+        "system-allocator"
+      ],
+      "allocator_metric_scope": "sampled net requested Rust-global bytes, including failed requests; not exact live heap or RSS"
+    }
+  },
+  "units": "decimal MB; CPU/elapsed seconds; syscall milliseconds; five-phase means rounded to 6 decimals",
+  "rss_scope": "observed peak and mean final fifth, not a stationary plateau; client Python and GNU stat child separately accounted",
+  "memory_scope": "filesystem cgroup includes controller/client/file/kernel memory; native backend has a separate cgroup; component peaks need not coincide",
+  "missing": [
+    "Go peak/steady heap time series"
+  ],
+  "mean_columns": [
+    "throughput_MB_second",
+    "daemon_rss_peak_MB",
+    "daemon_rss_steady_MB",
+    "cgroup_cpu_seconds",
+    "daemon_cpu_user_seconds",
+    "daemon_cpu_system_seconds",
+    "client_cpu_user_seconds",
+    "client_cpu_system_seconds",
+    "read_syscall_ms_p50",
+    "read_syscall_ms_p95",
+    "read_syscall_ms_p99",
+    "listing_seconds",
+    "metadata_roundtrip_seconds",
+    "whole_wall_seconds",
+    "read_seconds",
+    "client_rss_peak_MB",
+    "client_rss_steady_MB",
+    "daemon_client_rss_peak_MB",
+    "daemon_client_rss_steady_MB",
+    "allocator_peak_MB",
+    "allocator_steady_MB",
+    "cgroup_current_peak_MB",
+    "cgroup_current_steady_MB",
+    "cgroup_anon_peak_MB",
+    "cgroup_anon_steady_MB",
+    "cgroup_file_peak_MB",
+    "cgroup_file_steady_MB",
+    "cgroup_kernel_peak_MB",
+    "cgroup_kernel_steady_MB",
+    "backend_rss_peak_MB",
+    "backend_rss_steady_MB",
+    "backend_cgroup_current_peak_MB",
+    "backend_cgroup_current_steady_MB",
+    "backend_backend_cpu_seconds",
+    "backend_response_payload_MB",
+    "backend_response_excess_MB",
+    "backend_payload_excess_percent",
+    "backend_range_responses",
+    "backend_list_requests",
+    "backend_get_action_200",
+    "backend_get_action_404"
+  ],
+  "dispersion_columns": [
+    "throughput_MB_second",
+    "read_syscall_ms_p99",
+    "cgroup_cpu_seconds"
+  ],
+  "dispersion_values": [
+    "population_standard_deviation",
+    "minimum",
+    "maximum"
+  ],
+  "groups": [
+    {
+      "implementation": "go-experimental",
+      "state": "fresh",
+      "runs": 5,
+      "means": [
+        464.16354,
+        1290.810982,
+        1200.484186,
+        37.910538,
+        6.632,
+        11.964,
+        8.473554,
+        9.42022,
+        0.334854,
+        1.839487,
+        16.244339,
+        0.544662,
+        1.363414,
+        20.226797,
+        17.97723,
+        57.003213,
+        53.409991,
+        1343.362662,
+        1253.893836,
+        null,
+        null,
+        4297.080013,
+        4293.56292,
+        1364.909261,
+        1275.97924,
+        2961.350656,
+        2943.779238,
+        75.215667,
+        72.582475,
+        871.534592,
+        843.692377,
+        6442.469786,
+        6438.000328,
+        43.122,
+        8298.727528,
+        0.0,
+        0.0,
+        3884.2,
+        7,
+        3000,
+        0
+      ],
+      "dispersion": [
+        [
+          33.708897,
+          414.491275,
+          494.389444
+        ],
+        [
+          1.765056,
+          14.312275,
+          18.395237
+        ],
+        [
+          2.242884,
+          35.943248,
+          40.831723
+        ]
+      ]
+    },
+    {
+      "implementation": "go-experimental",
+      "state": "warm-revisit",
+      "runs": 5,
+      "means": [
+        479.125001,
+        1278.407475,
+        1203.145117,
+        36.117571,
+        5.696,
+        10.558,
+        7.96025,
+        10.517325,
+        0.328632,
+        1.812469,
+        15.598701,
+        0.040254,
+        0.847853,
+        18.670717,
+        17.458506,
+        56.836915,
+        53.71728,
+        1331.993805,
+        1256.878237,
+        null,
+        null,
+        4299.330355,
+        4293.663973,
+        1354.705306,
+        1279.483429,
+        2968.991334,
+        2938.189933,
+        74.880614,
+        74.804598,
+        891.333837,
+        873.428674,
+        6442.478797,
+        6438.563668,
+        38.488,
+        8298.737671,
+        0.010143,
+        0.000122,
+        3887.8,
+        0,
+        0,
+        0
+      ],
+      "dispersion": [
+        [
+          42.833934,
+          430.08604,
+          543.364532
+        ],
+        [
+          1.931129,
+          12.921226,
+          17.802363
+        ],
+        [
+          2.692394,
+          32.016716,
+          39.578311
+        ]
+      ]
+    },
+    {
+      "implementation": "go-packaged",
+      "state": "fresh",
+      "runs": 5,
+      "means": [
+        455.623837,
+        1301.917696,
+        1200.440885,
+        38.871395,
+        6.824,
+        12.292,
+        8.642003,
+        9.676231,
+        0.345446,
+        1.872457,
+        16.253863,
+        0.581291,
+        1.403359,
+        20.587217,
+        18.293558,
+        57.104794,
+        53.773696,
+        1354.591437,
+        1254.214581,
+        null,
+        null,
+        4297.18487,
+        4293.775539,
+        1377.247232,
+        1276.857953,
+        2958.362214,
+        2942.902682,
+        74.718413,
+        72.562889,
+        817.037312,
+        782.813139,
+        6442.481254,
+        6438.000677,
+        42.628,
+        8298.727528,
+        0.0,
+        0.0,
+        3885.2,
+        7,
+        3000,
+        0
+      ],
+      "dispersion": [
+        [
+          30.257175,
+          424.071304,
+          492.198882
+        ],
+        [
+          1.511628,
+          14.451014,
+          17.792833
+        ],
+        [
+          2.481621,
+          35.354722,
+          41.638445
+        ]
+      ]
+    },
+    {
+      "implementation": "go-packaged",
+      "state": "warm-revisit",
+      "runs": 5,
+      "means": [
+        452.853761,
+        1316.224205,
+        1211.306242,
+        37.580403,
+        6.04,
+        10.988,
+        8.25931,
+        10.80958,
+        0.33859,
+        1.862107,
+        16.3654,
+        0.036115,
+        0.762914,
+        19.48618,
+        18.369972,
+        56.88361,
+        53.699495,
+        1368.847155,
+        1265.005737,
+        null,
+        null,
+        4298.386637,
+        4293.702584,
+        1391.428403,
+        1287.497048,
+        2985.951232,
+        2930.086141,
+        74.862592,
+        74.792077,
+        909.235814,
+        888.152788,
+        6442.476339,
+        6438.3874,
+        40.436,
+        8298.727528,
+        0.0,
+        0.0,
+        3887.4,
+        0,
+        0,
+        0
+      ],
+      "dispersion": [
+        [
+          21.563247,
+          410.504676,
+          470.305025
+        ],
+        [
+          1.673157,
+          15.308939,
+          19.694775
+        ],
+        [
+          1.777812,
+          35.469492,
+          40.819354
+        ]
+      ]
+    },
+    {
+      "implementation": "rust",
+      "state": "fresh",
+      "runs": 5,
+      "means": [
+        495.757829,
+        603.774157,
+        603.750914,
+        35.549735,
+        5.656,
+        10.524,
+        8.741695,
+        9.431807,
+        0.123771,
+        2.359884,
+        15.688568,
+        1.910263,
+        0.764243,
+        19.860782,
+        16.865117,
+        57.400525,
+        53.526037,
+        661.174682,
+        657.276951,
+        524.877081,
+        518.357211,
+        4298.795418,
+        4293.765425,
+        702.313267,
+        698.533609,
+        3550.563533,
+        3522.864149,
+        73.059533,
+        70.902587,
+        867.698278,
+        793.655718,
+        6442.648371,
+        6434.960915,
+        44.46,
+        8334.694668,
+        35.96714,
+        0.433405,
+        3997.8,
+        213,
+        3096,
+        96
+      ],
+      "dispersion": [
+        [
+          42.130775,
+          441.312431,
+          537.970027
+        ],
+        [
+          1.683315,
+          14.147003,
+          18.555378
+        ],
+        [
+          2.34215,
+          33.214587,
+          39.370635
+        ]
+      ]
+    },
+    {
+      "implementation": "rust",
+      "state": "warm-revisit",
+      "runs": 5,
+      "means": [
+        474.406748,
+        626.632294,
+        626.632294,
+        35.664085,
+        4.602,
+        9.958,
+        8.702819,
+        11.141067,
+        0.125295,
+        2.191361,
+        16.714408,
+        0.025226,
+        0.751552,
+        18.617611,
+        17.513068,
+        56.988467,
+        53.932497,
+        683.620762,
+        680.564791,
+        525.642595,
+        518.981422,
+        4301.510246,
+        4293.520911,
+        724.970701,
+        721.52384,
+        3524.644864,
+        3497.36878,
+        73.190605,
+        73.138059,
+        878.444544,
+        839.542124,
+        6442.471424,
+        6437.310518,
+        41.892,
+        8326.095671,
+        27.368143,
+        0.329787,
+        3833.6,
+        0,
+        0,
+        0
+      ],
+      "dispersion": [
+        [
+          16.011306,
+          452.02819,
+          490.247608
+        ],
+        [
+          0.551951,
+          16.274396,
+          17.634622
+        ],
+        [
+          0.658713,
+          34.856486,
+          36.682669
+        ]
+      ]
+    },
+    {
+      "implementation": "rust-owner-prior",
+      "state": "fresh",
+      "runs": 5,
+      "means": [
+        506.082595,
+        571.915469,
+        556.837038,
+        35.026089,
+        5.716,
+        10.29,
+        8.617171,
+        9.293694,
+        0.122065,
+        2.311674,
+        15.490972,
+        1.783785,
+        0.772201,
+        19.283788,
+        16.408302,
+        57.376768,
+        53.583931,
+        627.27127,
+        610.420969,
+        518.249626,
+        286.981231,
+        4296.768717,
+        4293.553114,
+        666.889421,
+        650.163933,
+        3607.505306,
+        3571.06479,
+        72.971878,
+        70.833166,
+        883.522765,
+        845.260672,
+        6442.517299,
+        6434.875951,
+        42.246,
+        8519.832653,
+        221.105125,
+        2.664326,
+        4008.2,
+        213,
+        3096,
+        96
+      ],
+      "dispersion": [
+        [
+          12.729615,
+          488.693184,
+          526.114363
+        ],
+        [
+          0.672401,
+          14.632446,
+          16.224234
+        ],
+        [
+          0.628095,
+          34.153551,
+          35.803335
+        ]
+      ]
+    },
+    {
+      "implementation": "rust-owner-prior",
+      "state": "warm-revisit",
+      "runs": 5,
+      "means": [
+        469.113841,
+        583.949517,
+        579.540864,
+        35.772365,
+        5.0,
+        10.148,
+        8.480938,
+        10.981651,
+        0.123629,
+        2.220319,
+        17.05829,
+        0.026218,
+        0.714031,
+        18.866758,
+        17.797784,
+        56.875418,
+        53.436347,
+        639.080858,
+        632.977211,
+        520.712408,
+        283.427168,
+        4301.843661,
+        4293.538877,
+        678.704742,
+        672.774194,
+        3573.683814,
+        3546.374438,
+        73.080013,
+        73.027575,
+        907.846451,
+        869.728443,
+        6442.493542,
+        6433.933679,
+        43.372,
+        8789.90646,
+        491.178932,
+        5.918726,
+        3896.8,
+        0,
+        0,
+        0
+      ],
+      "dispersion": [
+        [
+          36.099807,
+          419.071097,
+          510.919785
+        ],
+        [
+          2.158339,
+          14.645166,
+          20.400668
+        ],
+        [
+          2.037186,
+          33.122761,
+          38.212917
+        ]
+      ]
+    }
+  ],
+  "backend_counter_phases_verified": 40,
+  "fixture_source_sha256": "246e2c3994fa07e8357e8557d2c0fb770ea3ab54dac28ff1fc4971eb17a50150",
+  "backend_counter_semantics": "GET action includes HEAD; 206 identifies range responses; payload writes include partial writes and exclude LIST metadata/HTTP headers",
+  "paired_candidate_vs_owner_prior": {
+    "metric_order": [
+      "throughput",
+      "whole_cgroup_cpu",
+      "read_p99",
+      "peak_rss",
+      "final_fifth_rss"
+    ],
+    "fresh_mean_change_percent": [
+      -2.040134,
+      1.495018,
+      1.27555,
+      5.570524,
+      8.425064
+    ],
+    "fresh_favorable_repetitions_out_of_five": [
+      2,
+      2,
+      2,
+      0,
+      0
+    ],
+    "warm_mean_change_percent": [
+      1.128278,
+      -0.302691,
+      -2.01592,
+      7.309327,
+      8.125645
+    ],
+    "warm_favorable_repetitions_out_of_five": [
+      3,
+      3,
+      3,
+      0,
+      0
+    ]
+  }
+}

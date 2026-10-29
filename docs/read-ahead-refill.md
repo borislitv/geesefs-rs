@@ -73,8 +73,48 @@ same three prior duplicate candidates; full mutation coverage remains open.
 
 ## Performance and acceptance
 
-The System-feature release, actual mounted reader/writer checks, matched
-comparison against exact previous Rust and both Go references, and direct
-socket/FUSE confirmation are in progress. Unit success alone does not prove
-lower CPU/RSS or better p95/p99. Overall compatibility/performance acceptance
-remains **UNACCEPTED**; the fuser fork and production replacement stay deferred.
+The first candidate `6e165250e48bbf8f0f9e6c916fecc48f8586033b` was measured with
+System-feature binary SHA256
+`eb130f3eb61524b512d59be0401abeea2dcaa96746c37e9e3ea67043828f58c4`.
+The [numeric report](read-ahead-refill-results-20261029.json) retains all 96 native
+phases, resource windows, provenance, counters, allocator data and limitations.
+Four rotated mounts per executable each ran a fresh phase and five warm revisits:
+288,000 full-file checks, followed by 3,000 native hashes and 97 listings. Every
+phase passed correctness checks, with no measured CPU throttling or memory-event
+increments. Filesystem/client limits were 8 CPU / 16 GiB, backend 16 CPU / 12 GiB,
+and parent 24 CPU / 28 GiB; payload budget remained 512 MiB.
+
+Warm arithmetic means (20 phases per executable, four independent mounts):
+
+| Executable | MB/s | p50 ms | p95 ms | p99 ms | Whole filesystem/client cgroup CPU s | Daemon peak / final-fifth RSS MB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Rust refill `6e16525` | 1334.350 | 0.089432 | 1.198103 | 3.403519 | 28.603719 | 806.200 / 804.097 |
+| Prior Rust `3016433` | 1228.349 | 0.092999 | 1.423830 | 3.658706 | 29.298234 | 805.536 / 803.742 |
+| Go experimental `5c0884c` | 1049.420 | 0.212630 | 1.091975 | 3.163167 | 28.815647 | 1322.557 / 1228.448 |
+| Go packaged `80c214e` | 1007.693 | 0.223593 | 1.138923 | 3.310254 | 30.529088 | 1331.052 / 1225.851 |
+
+These are means of phase percentiles, not pooled percentiles. Final-fifth RSS is
+not a proven memory plateau. The report separately retains client/backend RSS,
+cgroup/file/kernel memory, daemon and client CPU, normalized costs and dispersion.
+The first refill improves prior-Rust throughput by about 8.6%, p95 by 15.9% and
+p99 by 7.0%, while RSS is essentially unchanged/slightly higher. It still loses
+p95/p99 to both Go references and does not win every CPU metric.
+
+The direct network diagnostic (four additional phases, 12,000 full checks) joins
+136,876 syscalls without unmatched reads. Among unambiguous noninitial GETs,
+prior Rust started 491 of 666 after consumer entry; the refill candidate started
+all 659 before entry. Socket-byte lead medians change from -1.676 ms to +3.761 ms.
+These instrumented timings confirm the repaired mechanism, not acceptance or an
+explanation of all waits.
+
+An adverse result remains: mean warm excess response payload increases from
+13.817834 MB to 88.796175 MB. Direct interval analysis finds 105.480429 MB of
+duplicate candidate payload, concentrated in two files. Cross-reader eviction is
+being investigated with a separate failure-sensitive regression and candidate;
+these first-candidate measurements must not be attributed to that later change.
+
+Actual mounted verification passes 17 ordinary reader/writer/failure checks but
+retains `hardlink-emulation:FAILED:errno=5`. The original export verifies 1,180
+artifacts and 25 compiled inputs; an independent check additionally verifies
+9,424 source-row/aggregate numeric cells and the resource intervals. Overall
+compatibility/performance acceptance remains **UNACCEPTED**.

@@ -51,6 +51,13 @@ corrected using the existing process tools; neither was a regression-test result
    retains the same three previous duplicates; unselected mutations remain open.
    Release and matched native measurements follow before any performance claim.
 
-Pending: native System-feature release, real mounted reader/writer verification,
-matched sustained comparison and socket/FUSE confirmation. Overall acceptance
+9. Built the exact System-feature release and completed mounted checks (17 pass,
+   known hardlink EIO retained), 96 matched native phases / 288,000 file checks,
+   and four direct socket/FUSE phases / 12,000 checks. The scheduling mechanism
+   is repaired, but both Go p95/p99 remain better and excess payload increases.
+10. Preserved 1,180 indexed artifacts and the numeric report. An independent
+    source-row/aggregate check verifies 9,424 numeric cells and resource windows.
+    Published the adverse traffic result alongside speed, CPU and memory metrics.
+
+Continue with `_bmad-output/refill-eviction-20261029.md`. Overall acceptance
 remains UNACCEPTED until the broader project gates are met.

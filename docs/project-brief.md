@@ -104,9 +104,11 @@ source-level mechanism: cache hits do not advance the next read-ahead window,
 exposing its GET latency at a later demand miss. Direct socket/FUSE tracing and
 selective-delay injection establish that repair target. The
 [bounded refill candidate](read-ahead-refill.md) now has failure-sensitive public
-regressions and full library checks; mounted and matched sustained-workload
-verification is in progress. Neither diagnosis nor unit success alone passes
-acceptance or explains every tail wait.
+regressions, full library checks and 96 matched native phases. It improves prior
+Rust throughput/tails but still loses p95/p99 to both Go references, and repeated
+payload increases. Cross-reader speculative eviction is the next regression
+target. Neither the repaired scheduling mechanism nor these measurements pass
+acceptance or explain every tail wait.
 
 The first-stage scope still excludes FUSE passthrough and disk-backed caching.
 No single profile proves that every possible optimization is exhausted; report

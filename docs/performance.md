@@ -30,6 +30,11 @@ compatibility remain open. Cold-start superiority is not required. See the
 
 ## Reproduction
 
+The release profile uses `lto = "thin"` and `codegen-units = 1`; retain these
+settings with executable provenance. Linking takes longer. The matched profile
+comparison uses the explicit System allocator; default builds still use jemalloc.
+Do not generalize one allocator/workload's gains to every configuration.
+
 Run these inside an isolated Linux/FUSE Kubernetes fixture with an explicitly
 owned CPU+memory subtree, disposable storage and the declared Python dependencies:
 

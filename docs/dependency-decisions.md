@@ -86,6 +86,15 @@ zero-to-one open without discarding payload or active-reader history.
 
 ## Investigation boundary
 
+The selected SDK already contains [interceptor optimizations #4597](https://github.com/smithy-lang/smithy-rs/pull/4597)
+and [BDD endpoint improvements #4595](https://github.com/smithy-lang/smithy-rs/pull/4595),
+including a default resolver cache. Endpoint params include operation-specific
+key/prefix values; do not invent a bucket-only cache or remove auth properties.
+Client-wide SDK hooks and a transparent default-resolver timing adapter isolate
+parts of the observed cost without replacing signing, transport or endpoint logic.
+The measured setup/signing/deserialization work persists without external
+perf/BPF observers; no single applicable upstream defect is established.
+
 Extra initial-read client time is not yet an attributed library defect. Check
 exact versions, profiles, upstream issue applicability and supported APIs before
 another workaround. Do not remove integrity, freshness, ownership or durability

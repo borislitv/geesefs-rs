@@ -62,3 +62,7 @@ debug = 0
 
 [profile.test]
 debug = 0
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

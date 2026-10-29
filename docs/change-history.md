@@ -64,10 +64,21 @@ Overall compatibility and comparative performance remain **UNACCEPTED**.
 
 ## Current work and open gates
 
+Release builds now use ThinLTO and one codegen unit to optimize across the SDK
+and application crate boundaries. With unchanged runtime sources, four rotated
+mount pairs improve throughput, p50/p95/p99 and CPU versus the former Rust build
+in the selected System-allocator fixture. Small RSS/cgroup increases are retained;
+both Go p99 values still win. Default jemalloc builds and release-mode backend
+contracts also pass, but this is not representative-workload acceptance.
+
 Initial-read joins find additional Rust client work before GET write and after
-required socket bytes; similar header wait does not establish an SDK or backend
-defect. Attribute scheduler/admission/SDK/body-to-reply stages, research exact
-upstream versions/issues, reproduce a reachable problem and make a narrow fix.
+required socket bytes. Internal SDK hooks retain the setup/signing/response work
+with external observers removed and with client-wide rather than per-request
+instrumentation. Default endpoint resolution is only part of that work; its two
+calls correspond to auth selection and request endpoint orchestration. These
+boundaries do not establish an SDK defect or a causal contribution to global p99.
+Keep instrumentation outside the runtime and validate a targeted change before
+claiming an improvement.
 
 Hardlink EIO, optional actual-service/CLI/imported-layout compatibility, the full
 representative performance matrix, Go heap series and long-lived memory behavior

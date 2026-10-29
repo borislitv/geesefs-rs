@@ -44,5 +44,17 @@ cargo test --locked --offline --test read_stream_history -- --nocapture
    coverage/CRAP remain N/A, three previous duplicates and broad mutations remain
    open. The System-feature release is being built for exact-source comparison.
 
-Pending: release and exact-source native comparison. Overall UNACCEPTED; this
-policy regression does not yet establish its effect on p99.
+6. Completed the exact System-feature release, 96 native phases /288,000 checks,
+   eight socket/FUSE phases including both Go references, and mounted checks.
+   Warm excess bytes are zero in all twenty candidate phases and the direct
+   range union, but p99 still loses to both Go means. Relative to prior Rust,
+   p95 and CPU regress slightly; these results are retained explicitly.
+7. Verified 3655 artifacts, 25 compiled inputs and 9424 independent numeric cells.
+   Rejoined all 3000 initial reads per executable without exclusions, rather than
+   compare different tail-selected populations. The observed remaining mean gap
+   is primarily before request write and after required socket bytes. Investigate
+   those internal stages before another fix; do not attribute them to server wait.
+
+See `docs/read-stream-history.md` and its numeric report. Overall UNACCEPTED;
+remaining p99, representative workloads and long-term compatibility gates stay
+open. No production replacement or universal performance claim follows.

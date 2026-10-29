@@ -110,3 +110,6 @@ reopens can therefore start a promoted 100 MiB Rust window while Go starts at
 its effect on tails must be measured, not inferred from these stage sums. Full
 representative random/hot-set/writer/metadata and long-term compatibility gates
 also remain outstanding.
+
+The subsequent [read-history lifetime comparison](read-stream-history.md) retains
+this candidate as its exact baseline and reports the next measured tradeoffs.

@@ -1232,10 +1232,17 @@ impl Filesystem {
             if let Some((ino, generation)) = cache_key {
                 // Publish into the cache followers inspect, including after
                 // pressure reclamation while the GET was in flight.
-                self.cache
-                    .lock()
-                    .unwrap()
-                    .insert(ino, generation, at, block);
+                let cache = self.cache.lock().unwrap();
+                cache.insert(ino, generation, at, block);
+                if right > left {
+                    cache.consumed(
+                        ino,
+                        generation,
+                        at,
+                        (left - at) as usize,
+                        (right - left) as usize,
+                    );
+                }
                 fill.published();
             }
         }

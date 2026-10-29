@@ -28,9 +28,14 @@ pub(crate) fn first_gap(
     Some(range)
 }
 
+struct Span {
+    length: usize,
+    consumed: usize,
+}
+
 struct State {
     entries: LruCache<Key, Block>,
-    index: BTreeMap<Key, usize>,
+    index: BTreeMap<Key, Span>,
     weight: u64,
 }
 
@@ -103,8 +108,8 @@ impl ReadCache {
                 .rev()
                 // Reject unusable spans without updating recency or cloning
                 // payload owners. An older overlapping span may still cover it.
-                .find(|&(&(_, _, start), span_length)| {
-                    span_length
+                .find(|&(&(_, _, start), span)| {
+                    span.length
                         .checked_sub((offset - start) as usize)
                         .is_some_and(|available| available >= length)
                 })
@@ -141,12 +146,26 @@ impl ReadCache {
     ) -> Option<Block> {
         let (mut block, mut relative) = self.covering(inode, generation, offset, 1)?;
         if block.as_slice().len() - relative >= length {
+            self.consumed(
+                inode,
+                generation,
+                offset - relative as u64,
+                relative,
+                length,
+            );
             return Some(block.slice(relative..relative + length));
         }
         let mut result = reply.zeroed();
         let mut filled = 0;
         loop {
             let amount = (block.as_slice().len() - relative).min(length - filled);
+            self.consumed(
+                inode,
+                generation,
+                offset + filled as u64 - relative as u64,
+                relative,
+                amount,
+            );
             result.as_mut_slice()[filled..filled + amount]
                 .copy_from_slice(&block.as_slice()[relative..relative + amount]);
             filled += amount;
@@ -178,7 +197,37 @@ impl ReadCache {
             state.removed(key, victim);
         }
         state.weight += weight;
-        state.index.insert(key, length);
+        state.index.insert(
+            key,
+            Span {
+                length,
+                consumed: 0,
+            },
+        );
+    }
+
+    /// A bounded eviction hint, not a pin: disjoint tail reads cannot advance an
+    /// unread prefix, and required admission may still reclaim any LRU owner.
+    pub(crate) fn consumed(
+        &self,
+        inode: u64,
+        generation: u64,
+        start: u64,
+        relative: usize,
+        length: usize,
+    ) {
+        if let Some(span) = self
+            .state
+            .lock()
+            .unwrap()
+            .index
+            .get_mut(&(inode, generation, start))
+            && relative <= span.consumed
+        {
+            span.consumed = span
+                .consumed
+                .max(relative.saturating_add(length).min(span.length));
+        }
     }
 
     /// Release one cache owner; caller views retain their complete backing charge.
@@ -186,16 +235,19 @@ impl ReadCache {
         self.state.lock().unwrap().evict_lru()
     }
 
-    /// Speculation cannot fund itself by evicting this reader's unconsumed data.
+    /// Speculation cannot fund itself with another reader's unconsumed data.
     pub(crate) fn evict_consumed_lru(&self, inode: u64, generation: u64, consumed: u64) -> bool {
         let mut state = self.state.lock().unwrap();
         if state
             .entries
             .peek_lru()
             .is_some_and(|(&(ino, entry_generation, start), block)| {
-                ino == inode
-                    && entry_generation == generation
-                    && start.saturating_add(block.as_slice().len() as u64) > consumed
+                if ino == inode && entry_generation == generation {
+                    start.saturating_add(block.as_slice().len() as u64) > consumed
+                } else {
+                    let span = &state.index[&(ino, entry_generation, start)];
+                    span.consumed < span.length
+                }
             })
         {
             return false;
@@ -210,7 +262,7 @@ impl ReadCache {
             .index
             .range((inode, generation, 0)..=(inode, generation, offset))
             .rev()
-            .any(|(&(_, _, start), &length)| offset - start < length as u64)
+            .any(|(&(_, _, start), span)| offset - start < span.length as u64)
     }
 
     /// Locate only the first missing interval without cloning or touching owners.
@@ -219,7 +271,7 @@ impl ReadCache {
         let covered = state
             .index
             .range((inode, generation, 0)..(inode, generation, range.end))
-            .map(|(&(_, _, start), &length)| start..start.saturating_add(length as u64));
+            .map(|(&(_, _, start), span)| start..start.saturating_add(span.length as u64));
         first_gap(range, covered)
     }
 

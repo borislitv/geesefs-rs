@@ -237,6 +237,85 @@ async fn optional_refill_never_evicts_the_unconsumed_current_backing_to_admit_it
 }
 
 #[tokio::test]
+async fn optional_refill_preserves_another_readers_unconsumed_backing() {
+    let (store, fs, bytes) = fixture(16, 2 * MIB);
+    store.seed("other", &bytes);
+    let other = fs.lookup(1, "other").await.unwrap().ino;
+    let ino = fs.lookup(1, "file").await.unwrap().ino;
+    drop(fs.read(other, 0, STEP).await.unwrap());
+    drop(fs.read(ino, 0, STEP).await.unwrap());
+    assert_eq!(fs.effective_budgets().data_shared_bytes, 5 * MIB);
+    let (load, reply) = cached_load(fs.clone(), ino, MIB).await;
+    assert_eq!(reply, bytes[MIB..MIB + STEP]);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), load)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    let before = store.read_calls.load(Ordering::Relaxed);
+    let next = fs.read(other, STEP as u64, STEP).await.unwrap();
+    assert_eq!(next.as_slice(), &bytes[STEP..2 * STEP]);
+    assert_eq!(
+        store.read_calls.load(Ordering::Relaxed),
+        before,
+        "optional refill must not force another reader to fetch its unconsumed backing again"
+    );
+}
+
+#[tokio::test]
+async fn optional_refill_can_reclaim_a_fully_consumed_foreign_backing() {
+    let (store, fs, bytes) = fixture(16, 2 * MIB);
+    store.seed("other", &bytes);
+    let other = fs.lookup(1, "other").await.unwrap().ino;
+    let ino = fs.lookup(1, "file").await.unwrap().ino;
+    for offset in (0..2 * MIB).step_by(STEP) {
+        let block = fs.read(other, offset as u64, STEP).await.unwrap();
+        assert_eq!(block.as_slice(), &bytes[offset..offset + STEP]);
+    }
+    drop(fs.read(ino, 0, STEP).await.unwrap());
+    let (load, reply) = cached_load(fs.clone(), ino, MIB).await;
+    assert_eq!(reply, bytes[MIB..MIB + STEP]);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), load)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(store.read_calls.load(Ordering::Relaxed), 3);
+    let boundary = fs.read(ino, (2 * MIB) as u64, STEP).await.unwrap();
+    assert_eq!(boundary.as_slice(), &bytes[2 * MIB..2 * MIB + STEP]);
+    assert_eq!(store.read_calls.load(Ordering::Relaxed), 3);
+}
+
+#[tokio::test]
+async fn reading_a_foreign_backings_tail_does_not_mark_its_gap_consumed() {
+    let (store, fs, bytes) = fixture(16, 2 * MIB);
+    store.seed("other", &bytes);
+    let other = fs.lookup(1, "other").await.unwrap().ino;
+    let ino = fs.lookup(1, "file").await.unwrap().ino;
+    drop(fs.read(other, 0, STEP).await.unwrap());
+    let tail = fs.read(other, (2 * MIB - STEP) as u64, STEP).await.unwrap();
+    assert_eq!(tail.as_slice(), &bytes[2 * MIB - STEP..2 * MIB]);
+    drop(tail);
+    drop(fs.read(ino, 0, STEP).await.unwrap());
+    let (load, reply) = cached_load(fs.clone(), ino, MIB).await;
+    assert_eq!(reply, bytes[MIB..MIB + STEP]);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), load)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    let next = fs.read(other, STEP as u64, STEP).await.unwrap();
+    assert_eq!(next.as_slice(), &bytes[STEP..2 * STEP]);
+    assert_eq!(store.read_calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
 async fn refill_stops_at_an_already_cached_future_range() {
     let (store, fs, bytes) = fixture(32, 2 * MIB);
     let ino = fs.lookup(1, "file").await.unwrap().ino;

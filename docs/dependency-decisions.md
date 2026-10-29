@@ -2,6 +2,28 @@
 
 ## Public provenance and selection
 
+### Cross-reader speculative eviction (2026-10-29)
+
+A public two-reader pressure regression against `6e16525` demonstrates that
+optional refill can evict a different inode's partially consumed backing and
+cause another GET for its next sequential demand. This is distinct from proving
+that every repeated GET in the mounted trace has the same cause.
+
+The pinned public Go reference's `core/file.go:453-485,586-588` guards active
+requested ranges; `core/buffer_queue.go:28-63` uses an insertion-ordered queue.
+It does not establish a guarantee for all future unread bytes. The previously
+researched Mountpoint request-local prefetch queues avoid this shared-LRU
+ownership arrangement, but replacing the cache with that architecture would be
+a larger change. Three targeted public searches did not establish a directly
+applicable delivered upstream fix for this shared-cache admission defect.
+
+Retain `lru` 0.19.0 and its existing `peek_lru`/`pop_lru` operations, with bounded
+consumption metadata alongside each existing span index entry. An optional
+refill may reclaim a foreign backing only after its contiguous prefix has been
+consumed completely; a read of just the tail is insufficient. Required admission
+keeps its existing LRU/FIFO behavior, so this hint cannot pin memory or deadlock
+required work. No new queue, dependency, per-reader registry, or task is needed.
+
 The reference checkout was verified clean at
 `5c0884c9e8799bbab93e2d4102fdc15e9c079e0d`, public upstream
 <https://github.com/yandex-cloud/geesefs> (Apache-2.0). Its contracts inform

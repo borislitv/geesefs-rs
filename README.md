@@ -52,9 +52,20 @@ See the [glossary](docs/glossary.md) for ownership and measurement terminology.
 
 ## Status
 
-Latest checkpoint: [steady-state tail diagnosis](docs/steady-state-tail-diagnosis.md)
-and [CPU/off-CPU flamegraphs](docs/flamegraphs-20261029/README.md). Fixed-binary
-experiments remove CPU throttling and cgroup memory-limit reclaim using an
+Latest checkpoint: [read-ahead refill causality](docs/read-ahead-refill-causality.md).
+Rust's cache-hit return skips planning the next window; its GET starts only
+after demand reaches missing bytes. Direct socket/FUSE tracing finds 484/659
+unambiguous noninitial Rust GETs sent after consumption begins, versus 0/884 for
+each Go reference. Selectively delaying noninitial GETs exposes 5.829 seconds of
+summed inserted wait inside Rust reads and zero inside the joined Go reads.
+The new 72 controlled phases pass 216,000 full-file checks; separate network
+profiles add 18,000. This confirms a repair target, not an implemented fix or
+whole-workload acceptance. Backend-worker controls and all adverse results are
+retained in the [numeric receipt](docs/read-ahead-refill-causality-20261029.json).
+
+The preceding [steady-state tail diagnosis](docs/steady-state-tail-diagnosis.md)
+and [CPU/off-CPU flamegraphs](docs/flamegraphs-20261029/README.md) document fixed-binary
+experiments that remove CPU throttling and cgroup memory-limit reclaim using an
 8 CPU / 16 GiB filesystem/client fixture and a 16 CPU / 12 GiB synthetic backend.
 At eight runtime workers, Rust averages 1256 MB/s versus Go 1070/1017, with daemon
 RSS peaks 803 MB versus 1310/1335; p95/p99 still lose to both Go references.

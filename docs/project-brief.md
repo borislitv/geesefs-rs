@@ -99,6 +99,13 @@ for each new fixture instead of assuming these numbers guarantee headroom.
 Keep the application payload budget and worker counts explicit and unchanged
 when comparing fixed-binary resource effects.
 
+The [refill investigation](read-ahead-refill-causality.md) now confirms one
+source-level mechanism: cache hits do not advance the next read-ahead window,
+exposing its GET latency at a later demand miss. Direct socket/FUSE tracing and
+selective-delay injection establish that repair target. A runtime fix still
+needs failure-sensitive regressions and a matched sustained-workload comparison;
+the diagnosis alone does not pass acceptance or explain every tail wait.
+
 The first-stage scope still excludes FUSE passthrough and disk-backed caching.
 No single profile proves that every possible optimization is exhausted; report
 covered workloads, unresolved attribution and remaining compatibility gaps.

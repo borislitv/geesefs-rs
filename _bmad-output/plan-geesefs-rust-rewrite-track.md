@@ -57,9 +57,18 @@ zero phase CPU throttling and no filesystem/client memory-limit reclaim. At
 eight runtime workers Rust has higher throughput and lower RSS, but worse
 p95/p99 than both Go references. Eighteen CPU/off-CPU flamegraphs and the raw
 artifact hash index are retained. Remaining waits are localized to FUSE request
-service; their admission/fill/S3 join remains open. Cold-start superiority is
-no longer required. Stage 10 and overall acceptance remain incomplete; runtime
-changes and the fuser fork remain paused pending causal attribution.
+service. Cold-start superiority is no longer required. Stage 10 and overall
+acceptance remain incomplete.
+
+The subsequent [refill diagnosis](../docs/read-ahead-refill-causality.md) joins
+GET/socket-byte/FUSE events and injects delay only into noninitial GETs. It
+confirms the cache-hit early return prevents advancing the next read-ahead
+window before demand. All 72 controlled phases / 216,000 file checks and six
+network-profile phases / 18,000 checks pass; 961 raw artifact hashes and all
+25 frozen inputs are verified. Increasing backend GOMAXPROCS does not remove
+the remaining tail gap. The causal prerequisite for a bounded refill repair is
+now met, but no runtime fix has been implemented. Initial-object waits, the
+representative matrix and compatibility remain open; the fuser fork stays paused.
 
 Status format: [ ] - incomplete, [X] - completed. Updated: 2026-10-29.
 The parent owns BMAD orchestration, final review and all VCS delivery.

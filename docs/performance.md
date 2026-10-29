@@ -1,6 +1,15 @@
 # Performance acceptance: UNACCEPTED
 
-The latest [steady-state diagnosis](steady-state-tail-diagnosis.md) and
+The latest [read-ahead refill diagnosis](read-ahead-refill-causality.md) confirms
+that Rust's cache-hit early return postpones the next window's GET until a demand
+miss. Direct socket/FUSE joins and selective noninitial-GET delay independently
+establish avoidable refill waits. The [numeric receipt](read-ahead-refill-causality-20261029.json)
+retains 72 controlled phases / 216,000 full-file checks and separate network
+profiles / 18,000 checks, including backend-worker controls and explicit
+incomplete-data limits. This is source-level causal attribution, not a runtime
+repair, an estimate of every p99 cause or full performance acceptance.
+
+The preceding [steady-state diagnosis](steady-state-tail-diagnosis.md) and
 [numeric receipt](steady-state-headroom-results-20261029.json) supersede the
 historical measurements below for current resource-sensitivity findings. They
 retain 216 unprofiled phases, 648,000 full-file checks and eighteen separately

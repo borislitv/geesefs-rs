@@ -1,5 +1,12 @@
 # Attribute warm-read tails before changing the runtime
 
+The subsequent [read-ahead refill investigation](read-ahead-refill-causality.md)
+extends this historical checkpoint with GET/socket-byte/FUSE joins and selective
+delay injection. It confirms late next-window GETs caused by the cache-hit early
+return. That finding supersedes the unresolved-join statements below for this
+specific mechanism; initial-object and other waits remain separate. The earlier
+resource and CPU/off-CPU measurements remain unchanged.
+
 ## Acceptance scope
 
 The operator clarified the target on 2026-10-29: lower memory and CPU cost,

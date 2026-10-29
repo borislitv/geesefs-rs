@@ -7,8 +7,9 @@ performance acceptance matrix. Production acceptance remains **false**.
 ## Backend and oracle
 
 `bench/sealed_s3_fixture.py` reuses SeaweedFS 4.51 `weed mini` for S3 and storage,
-and boto3 for protocol requests. See the pinned public origin, license and archive
-hash in [dependency decisions](dependency-decisions.md).
+and boto3 for protocol requests. The public Apache-2.0 server revision is
+`153ab668c99731a6d29492bf6c61d0b4fa701101`; the Linux amd64 release archive SHA-256
+is `c03be37416a8ee672c77766e20b22a4e1430744c3af2668599a4b6eeaec14cee`.
 
 - Supply a JSON array of exactly 3,000 positive sizes, each at most 128 MiB,
   totaling at most 16 GiB. Only sizes are inputs; names and payloads are synthetic.
@@ -39,10 +40,11 @@ or service-account token are needed.
 
 - Filesystem container: `/dev/fuse`, ordinary `umount`, `fusermount3`, GNU `stat`
   (`gnustat` is selected when installed), Python 3.12+ and
-  `requirements-fixture.txt`; 2 CPU and 4 GiB memory limit.
+  `requirements-fixture.txt`; the current diagnostic uses 8 CPU / 16 GiB.
 - Backend container: separately accounted CPU/memory cgroup, the pinned native
-  server and boto3; 4 CPU and 6 GiB memory limit; sufficient disposable disk.
-- Supply `geesefs-rs`, `geesefs-rs-pre-coherence`, `geesefs-go-experimental` and
+  server and boto3; 16 CPU / 12 GiB; sufficient disposable disk. Parent limits
+  are 24 CPU / 28 GiB. Earlier smaller resource experiments are not interchangeable.
+- Supply current/prior Rust binaries, `geesefs-go-experimental` and
   `geesefs-go-packaged` in the filesystem `/work`, with exact source/executable
   SHA-256 values in `provenance.json`. The runner verifies executable hashes.
 - Mounts use the same read-only identity, standard V2 listing, 512 MiB payload

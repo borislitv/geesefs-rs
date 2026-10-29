@@ -23,12 +23,15 @@ rustc-ice-*.txt
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# Installed skills and generated BMAD runtime; keep lockfile, shared config and outputs.
+# Local agent setup and execution journals are not project source.
 /.agents/
-/_bmad/scripts/
-/_bmad/core-tools/
-/_bmad/method/
-/_bmad/render/
+/_bmad/
+/_bmad-output/
+/skills-lock.json
+
+# Detailed measurement exports and generated graphs stay outside source diffs.
+/docs/*-20??????.json
+/docs/flamegraphs*/
 
 # Local benchmark data, credentials and build-tool environments.
 /test-data/

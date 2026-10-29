@@ -1,490 +1,93 @@
 # Dependency decisions
 
-## Public provenance and selection
+Use public maintained crates and supported APIs before custom infrastructure.
+Cargo.lock pins exact public registry packages; no internal code is copied,
+translated, vendored or linked. This package forbids unsafe code in every target.
+License declarations are checked; the complete binary-distribution notice audit
+remains outstanding. See LICENSE and NOTICE for source attribution.
 
-### Read-history lifetime across closed streams (2026-10-29)
+## Selected mechanisms
 
-The same pinned public Go `core/file.go:30-51` creates zeroed access history in
-`NewFileHandle`; `core/handles.go:862-873` calls it for every open. Rust currently
-retains `Pattern` on the inode, so a new open after the last release can start
-with the previous stream's promoted window. A public open/read/release/reopen
-regression confirms this on `d0d7b99`: the new first GET is 4 MiB instead of the
-configured 1 MiB. Direct mounted captures independently show the corresponding
-100 MiB burst versus Go's 5 MiB initial window for large-file revisits.
+| Concern | Selection and reason |
+| --- | --- |
+| FUSE | [fuser 0.18.0](https://docs.rs/fuser/0.18.0/fuser/) (MIT): protocol, callbacks and replies; no custom syscall/protocol stack. |
+| S3 | [aws-sdk-s3 1.155.0](https://docs.rs/aws-sdk-s3/1.155.0/aws_sdk_s3/) and aws-config 1.13.0 (Apache-2.0): conditional ranges, streaming, retries, signing, profiles and multipart operations. Unneeded sigv4a is disabled. |
+| Runtime/admission | [Tokio 1.54.1](https://docs.rs/tokio/1.54.1/tokio/) (MIT): owned semaphores, JoinSet, watch/mpsc, runtime and I/O; no custom executor. |
+| Metadata cache | [Moka 0.12.16](https://docs.rs/moka/0.12.16/moka/) (MIT OR Apache-2.0): bounded weighted directory/preload caches with namespace/TTL validation. |
+| Payload cache | [lru 0.19.0](https://docs.rs/lru/0.19.0/lru/) (MIT): synchronous `pop_lru` releases backing before required admission. Moka maintenance/policy changes cannot provide that boundary. |
+| Streaming/owners | bytes 1.12.1, futures-util 0.3.34, tokio-util 0.7.20 (MIT OR Apache-2.0): immutable owners and maintained stream/I/O adapters. Small charged Block views retain complete backing permits. |
+| Parsing/configuration | quick-xml 0.42.0 (MIT), clap/serde/serde_json/percent-encoding/thiserror (MIT OR Apache-2.0): bounded schema and compatibility adapters, not new parsers. |
+| OS/allocator | rustix 1.1.5 (Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT) safe process APIs; tikv jemalloc 0.7 (MIT OR Apache-2.0) default allocator/statistics. No local unsafe/FFI. |
+| System comparison | stats_alloc 0.1.10 (MIT) delegates to System; six requested-allocation counters are not native heap/RSS. peak_alloc was rejected because its realloc/calloc implementation changes the measured behavior. |
+| Fixtures | tiny_http 0.12 (MIT OR Apache-2.0), rcgen/tempfile (MIT OR Apache-2.0), Moto and SeaweedFS (Apache-2.0); real HTTP/TLS boundaries plus faithful gated storage fakes. |
+| CPU accounting | psutil 7.2.2 (BSD-3-Clause) process counters and owned cgroup `cpu.stat`; wall time is not CPU consumed. |
 
-Reuse `Pattern::default()` when the existing open count transitions from zero to
-one, under the existing inode-state lock. Preserve history when another handle
-is still open and preserve retained payload. This is a bounded stream-lifetime
-correction, not complete per-handle history isolation: concurrent handles of one
-inode still share the existing policy. Its effect on p99 needs a new comparison;
-the observed initial-header waits alone do not prove the performance hypothesis.
+## Narrow application state
 
-### Cross-reader speculative eviction (2026-10-29)
+Inode lifetime, namespace bindings, dirty generations, flush ownership, sparse
+overlays and fsync barriers are filesystem state, not replacement infrastructure.
+Existing Tokio permits/watch/JoinSet bound work, coalesce overlapping fills and
+cancel/drain jobs. Disjoint windows remain concurrent. Required and optional
+admission differ: optional refill skips pressure, required FIFO must progress.
+Contiguous consumption hints protect foreign unread cache backing only during
+optional eviction; they never pin required admission. Reset adaptive Pattern on
+zero-to-one open without discarding payload or active-reader history.
 
-A public two-reader pressure regression against `6e16525` demonstrates that
-optional refill can evict a different inode's partially consumed backing and
-cause another GET for its next sequential demand. This is distinct from proving
-that every repeated GET in the mounted trace has the same cause.
+## Applicable read-path upstream findings
 
-The pinned public Go reference's `core/file.go:453-485,586-588` guards active
-requested ranges; `core/buffer_queue.go:28-63` uses an insertion-ordered queue.
-It does not establish a guarantee for all future unread bytes. The previously
-researched Mountpoint request-local prefetch queues avoid this shared-LRU
-ownership arrangement, but replacing the cache with that architecture would be
-a larger change. Three targeted public searches did not establish a directly
-applicable delivered upstream fix for this shared-cache admission defect.
+- [Mountpoint prefetch](https://github.com/awslabs/mountpoint-s3/blob/f58dbc52fec09394ee60d285bec1c3e082f06391/mountpoint-s3/src/prefetch.rs#L218-L289)
+  prepares future work before buffered return. Merged [#556](https://github.com/awslabs/mountpoint-s3/pull/556)
+  addresses [#488](https://github.com/awslabs/mountpoint-s3/issues/488) reordered
+  reads; merged [#505](https://github.com/awslabs/mountpoint-s3/pull/505) retains
+  cancellation handles. Reuse the scheduling principle, not an unbounded queue.
+- [Goofys #38](https://github.com/kahing/goofys/pull/38) and
+  [RocksDB #9674](https://github.com/meta/rocksdb/pull/9674) overlap consumption and
+  refill. [S3FS #214](https://github.com/s3fs-fuse/s3fs-fuse/issues/214) is merely
+  closed as a duplicate of [#95](https://github.com/s3fs-fuse/s3fs-fuse/issues/95),
+  not proof of a delivered fix. [RocksDB #13774](https://github.com/meta/rocksdb/issues/13774)
+  is a cancellation warning, not an applicable delivered solution.
+- [bytes #840](https://github.com/tokio-rs/bytes/issues/840) and
+  [#856](https://github.com/tokio-rs/bytes/pull/856) concern consumed shared-owner
+  retention. The selected Tokio StreamReader retains an empty Bytes until the
+  next poll. Use maintained futures `into_async_read` plus Tokio compat to release
+  fully consumed chunks promptly. No transport fork/pool is required.
+- Tokio `copy_buf`/`take` and Vec's writer initialize only copied bytes. Preserve
+  exact length/EOF and SDK whole-body checksum barriers when publishing fragments.
+  Split existing permits to actual backing allocations, not visible slices.
+- [Moka #498](https://github.com/moka-rs/moka/issues/498) is a maintenance/tail
+  report. [#412](https://github.com/moka-rs/moka/issues/412) concerns an async loop
+  fixed before selected sync 0.12.16; it is not this workload's diagnosis.
+- Public Go reference `5c0884c9e8799bbab93e2d4102fdc15e9c079e0d`
+  (Apache-2.0) initializes history in `core/file.go::NewFileHandle` on every open.
+  Its active requested ranges do not guarantee preservation of every future unread
+  byte. No Go SDK implementation is vendored.
 
-Retain `lru` 0.19.0 and its existing `peek_lru`/`pop_lru` operations, with bounded
-consumption metadata alongside each existing span index entry. An optional
-refill may reclaim a foreign backing only after its contiguous prefix has been
-consumed completely; a read of just the tail is insufficient. Required admission
-keeps its existing LRU/FIFO behavior, so this hint cannot pin memory or deadlock
-required work. No new queue, dependency, per-reader registry, or task is needed.
+## Backend adapters and rejected alternatives
 
-The reference checkout was verified clean at
-`5c0884c9e8799bbab93e2d4102fdc15e9c079e0d`, public upstream
-<https://github.com/yandex-cloud/geesefs> (Apache-2.0). Its contracts inform
-independent Rust implementation; no Go SDK implementation is vendored.
-The packaged `80c214ef14f620d93407454fc76ca01dd71fa25f` baseline was also built
-from its verified public source object and hashed. Both incomplete benchmark
-attempts stopped before reaching its mounted comparisons; see [performance](performance.md).
+- aws-smithy-runtime-api public identity/auth traits retain SDK request ownership
+  for metadata-token IAM. Reqwest 0.12 (MIT OR Apache-2.0) owns metadata HTTP/TLS
+  and the signed extended-list/PATCH adapter; serde_json/quick-xml own syntax.
+- [s3s-sigv2 0.17.0](https://docs.rs/s3s-sigv2/0.17.0/) (Apache-2.0) supplies
+  SigV2 canonicalization/HMAC. base64/md-5 provide SSE-C primitives. No handwritten
+  cryptography or second credential chain. Credentials-process is disabled because
+  the inspected SDK shell execution lacks the required bounded kill-on-drop.
+- For explicit no-verify-ssl only, a narrow Smithy public-trait adapter uses
+  reqwest streaming. Evaluated aws-smithy-http-client-reqwest 0.1 buffers complete
+  responses; smithy-transport-reqwest 0.1 lacks custom TLS configuration. Default
+  verification and IAM metadata TLS remain enabled.
+- MIME policy uses maintained `mime` syntax and a bounded Unix/default adapter;
+  mime_guess does not match Go's defaults/database precedence. Default associations
+  derive from public Go `mime/type.go` and `type_unix.go` (Go Authors, BSD-3-Clause).
+  unicode-general-category (Apache-2.0) supplies metadata printing categories.
+- http-body/Smithy retryable bodies frame configured large upload parts without
+  whole-part buffering. A narrow exact-length charged adapter is application
+  materialization; HTTP/retries/checksums stay library-owned. crc32fast independently
+  validates test wire trailers.
 
-Before implementation, `cargo info` verified these releases and licenses from
-the public crates.io registry (2026-10-26). APIs are linked below. All Cargo
-dependencies must resolve from crates.io; no internal source, registry, generated
-SDK, Arcadia code, or private dependency is permitted.
+## Investigation boundary
 
-| Component | Selected version / license | API and decision |
-| --- | --- | --- |
-| FUSE | fuser 0.18.0 / MIT | <https://docs.rs/fuser/0.18.0/fuser/>; owns protocol, callbacks, owned replies; integrated for actual foreground read/write mounts. Mountpoint's namespace/write limitations and oxfs's whole-file buffering/object layout do not meet this plan. |
-| S3 | aws-sdk-s3 1.155.0 / Apache-2.0 | <https://docs.rs/aws-sdk-s3/1.155.0/aws_sdk_s3/>; one client, conditional Range, streaming body, multipart upload/copy/completion/abort. Disable unneeded sigv4a; retain SDK TLS/signing/retry. |
-| Credentials | aws-config 1.13.0 / Apache-2.0 | <https://docs.rs/aws-config/1.13.0/aws_config/>; supported provider chain/profile, not custom credential parsing. Metadata-token IAM uses the separate public-trait adapter described below, not AWS IMDS equivalence. |
-| Runtime / admission | Tokio 1.54.1 / MIT | <https://docs.rs/tokio/1.54.1/tokio/sync/struct.Semaphore.html>; runtime, owned permits, async synchronization. No custom executor. |
-| XML | quick-xml 0.42.0 / MIT | <https://docs.rs/quick-xml/0.42.0/quick_xml/>; bounded ext-v1 schema adapter. Standard SDK object-list models drop per-object Metadata. XML syntax belongs to this parser. |
-| Retained cache | Moka 0.12.16 / MIT OR Apache-2.0, plus Apache-2.0 | <https://docs.rs/moka/0.12.16/moka/sync/struct.Cache.html>; weighted eviction, not hard admission. Allocation permits must survive eviction while pinned. |
-| CLI | clap 4 / MIT OR Apache-2.0 | <https://docs.rs/clap/4/clap/>; typed parsing and errors, unknown flags rejected. Small fstab argument normalization follows reference. |
-| Metadata escaping | percent-encoding 2 / MIT OR Apache-2.0 | <https://docs.rs/percent-encoding/2/percent_encoding/>; decode bytes; malformed escapes need explicit validation because the crate deliberately tolerates them. |
-| Errors | thiserror 2 / MIT OR Apache-2.0 | <https://docs.rs/thiserror/2/thiserror/>; typed actionable failures. |
-| Fixtures | tiny_http 0.12.0 / MIT OR Apache-2.0 | <https://docs.rs/tiny_http/0.12.0/tiny_http/>; cargo info verified public origin. Reuse HTTP server at SDK transport boundary; no live credentials or uncontrolled network. |
-| Timestamps | aws-smithy-types 1.9.0 / Apache-2.0 | <https://docs.rs/aws-smithy-types/1.9.0/aws_smithy_types/date_time/>; reuse SDK timestamp parser for ext-v1 LastModified; already an SDK dependency. |
-
-## Narrow custom state
-
-### Read-ahead refill scheduling (2026-10-29)
-
-The [causal diagnostic](read-ahead-refill-causality.md) establishes a scheduling
-problem in the filesystem adapter, not a missing SDK transport or cache package.
-Public upstream examples were read before implementation:
-
-- [Mountpoint S3](https://github.com/awslabs/mountpoint-s3/blob/f58dbc52fec09394ee60d285bec1c3e082f06391/mountpoint-s3/src/prefetch.rs#L218-L289)
-  prepares future requests before the single-buffer early return and refills at
-  half-window consumption. Its historical unbounded part queue is not suitable
-  for this project's hard byte-admission contract.
-- [Mountpoint #488](https://github.com/awslabs/mountpoint-s3/issues/488), fixed by
-  [#556](https://github.com/awslabs/mountpoint-s3/pull/556), preserves useful data
-  across bounded reordered reads. [#505](https://github.com/awslabs/mountpoint-s3/pull/505)
-  retains task handles so discarded GETs are cancelled. Both fixes are merged.
-- [Goofys #21](https://github.com/kahing/goofys/issues/21) and merged
-  [#38](https://github.com/kahing/goofys/pull/38) top up the remaining read-ahead
-  before consuming buffered data, with parallel Range GETs and handle cleanup.
-- [RocksDB #9674](https://github.com/meta/rocksdb/pull/9674), delivered as
-  [49a10fe](https://github.com/meta/rocksdb/commit/49a10feb21dc5c766bb272406136667e1d8a969e),
-  overlaps consumption with asynchronous filling of a second buffer.
-  [#13774](https://github.com/meta/rocksdb/issues/13774) remains an open report of
-  cancellation leaving other async readers blocked, not a verified delivered fix.
-- [S3FS #214](https://github.com/s3fs-fuse/s3fs-fuse/issues/214) proposes half-buffer
-  asynchronous refill but is closed only as a duplicate of still-open
-  [#95](https://github.com/s3fs-fuse/s3fs-fuse/issues/95).
-
-Reuse the existing Tokio-owned request future, JoinSet cancellation, bounded
-RangeSink channel, FIFO byte permits and synchronous LRU index. The callback read
-APIs already retain a caller-owned future after publishing required bytes; extend
-that same lifetime to optional cache-hit refill rather than detach another task
-or add an executor, allocator, cache, HTTP client or dependency. Speculation must
-skip unavailable admission and preserve still-unconsumed cached data. Ordinary
-block-returning reads retain their immediate cache-hit path because they provide
-no separately owned post-publication lifetime.
-
-The operator reaffirmed maximum reuse of maintained library mechanisms during
-the read-buffer continuation. The miss-reply optimization reuses the existing
-immutable `Block` view and Tokio-owned reservation lifetime; it adds no pool,
-allocator, stream protocol or cache implementation. AWS Smithy ByteStream 1.9.0
-already exposes `try_next() -> Result<Option<Bytes>, Error>` and
-`into_async_read() -> impl AsyncBufRead`; the initial body adapter used the latter.
-Direct transport `Bytes` adoption must account for a slice's complete retained
-allocation, not just its visible length, and preserve whole-body checksum/EOF
-barriers. That is a separate verified adapter change, not a reason to replace
-the maintained SDK or introduce a second transport.
-
-For the subsequent full-overwrite fragment path, Tokio 1.54.1 already supplies
-[`copy_buf`](https://docs.rs/tokio/1.54.1/tokio/io/fn.copy_buf.html),
-[`AsyncReadExt::take`](https://docs.rs/tokio/1.54.1/tokio/io/trait.AsyncReadExt.html#method.take)
-and `AsyncWrite for Vec<u8>`. The SDK's `into_async_read` implements AsyncBufRead.
-Bound `copy_buf` with the admitted fragment length and preallocate a Vec of that
-capacity: initialized bytes extend directly from the SDK reader's existing
-buffer, without a second intermediate buffer or pre-zeroing the destination.
-Check the exact copied count before transferring the Vec into the existing
-charged Block. The standard/library implementations own buffer initialization;
-no local unsafe, manual polling, pool, BufMut implementation or new dependency
-is needed. The existing final EOF and whole-body checksum barriers remain.
-
-### Consumed transport-chunk lifetime (2026-10-28)
-
-The selected SDK reader uses `tokio-util` 0.7.20 `StreamReader<Bytes>`. Its
-`consume` calls `Bytes::advance`, leaving the empty handle stored until the next
-body poll finishes. In bytes 1.12.1 that handle still owns its shared allocation.
-[bytes #840](https://github.com/tokio-rs/bytes/issues/840) and the still-open
-[advance fix #856](https://github.com/tokio-rs/bytes/pull/856) describe this
-retention; the latest published release checked is still 1.12.1. The merged
-clear/truncate change #842 is not a released fix for advance. Hyper's shared
-`BytesMut::split_to(...).freeze()` receive path makes reuse sensitive to this
-lifetime. Header pinning in Hyper #4060 is a related mechanism but its HTTP/2
-proxy reproduction is not this workload; a transport replacement is unjustified.
-
-Reuse maintained `futures-util` 0.3.34 (MIT OR Apache-2.0) `try_unfold` and
-[`TryStreamExt::into_async_read`](https://docs.rs/futures-util/0.3.34/futures_util/stream/trait.TryStreamExt.html#method.into_async_read),
-whose AsyncBufRead `consume` drops the fully consumed chunk immediately. Enable
-its `io` feature, adding public futures-io 0.3.34 (MIT OR Apache-2.0), and use
-[`tokio-util::compat`](https://docs.rs/tokio-util/0.7.20/tokio_util/compat/index.html)
-(MIT) to retain the existing Tokio copy_buf/take/reservation path. Both adapters
-already have maintained implementations; no custom reader/pool, unsafe code,
-dependency fork, retained transport payload cache or protocol replacement is
-needed. ByteStream remains responsible for SDK body/checksum errors. Verify
-exact payloads, partial/empty chunks, prompt owner release, EOF/errors and
-cancellation before measuring the same-budget native workload.
-
-### Standard allocator candidate and accounting (2026-10-28)
-
-The [same-source system allocator screen](system-allocator-screen.md) improves
-throughput/CPU/p99 but increases RSS and lacks heap telemetry. Keep default
-jemalloc while comparing an explicit `system-allocator` build. Reuse published
-stats_alloc 0.1.10 (MIT, <https://github.com/neoeinstein/stats_alloc>) around
-`std::alloc::System`; its stable release is from 2022, the repository is not
-archived, and the inspected implementation delegates alloc/calloc/realloc/free
-to System. No application GlobalAlloc implementation or unsafe exception.
-
-Report sampled net requested Rust-global bytes as allocated minus deallocated
-counters, preserving both raw counters. This is a non-atomic sampled difference,
-not native heap/retained/RSS or jemalloc size-class accounting. A transient
-inconsistent subtraction is missing, not zero. Native allocations bypassing
-Rust's global allocator and allocator metadata/retention remain outside that
-counter; requests are recorded before the underlying call, including failed
-allocations/reallocations, so it is not an exact live-allocation gauge even after
-quiescence. Preserve all six counters and label this limitation in each sample;
-RSS/cgroup/backend metrics remain necessary. Counter overhead is part of the
-candidate measurement.
-
-Reject peak_alloc 0.3.1 for this comparison: its inspected implementation replaces
-system realloc with alloc/copy/free and calloc with alloc/zeroing, changing the
-allocator behavior under investigation. The small stats_alloc wrapper preserves
-those platform operations; its six counters and scope are explicit. No force GC,
-malloc tuning, buffer pool, cache reduction or concurrency change is introduced.
-
-### Streaming cache admission investigation (2026-10-28)
-
-With the native fixture's metrics listener corrected, a full-file request
-inventory observes more response payload bytes in Rust than in either Go, despite
-identical logical file checks. This is an additional measured actor, not yet an
-attributed cache-policy regression. Keep the raw byte/listing counts and their
-single-pass diagnostic scope separate from repeated timing acceptance.
-
-Inspect Moka 0.12.16's maintained
-[`EvictionPolicy`](https://docs.rs/moka/0.12.16/moka/policy/struct.EvictionPolicy.html)
-API before implementing another cache mechanism. Its default TinyLFU admission
-can reject a newly prefetched fragment in favor of previously used keys. Its
-built-in LRU policy is explicitly intended for strongly recency-biased streaming.
-An isolated ReadCache case reproduces rejection, but its cache capacity was below
-its payload budget. The filesystem sets both limits equal and replaces the cache
-on failed byte admission before Moka reaches that policy limit. Do not treat the
-isolated case as a production reproduction or switch policy on that evidence.
-The trial and its failing assertion remain retained; no cache-policy change is
-selected.
-
-Instead trace existing admitted range ownership: RangeSink shares one reservation
-among independently allocated streamed fragments. One surviving fragment can
-retain the entire GET's reservation after other physical buffers are freed.
-Reuse the already-supported Tokio permit split operation to transfer admission
-to complete backing allocations, retaining unfilled admission with the producer.
-First verify the contract through a gated real SDK body and tiny retained views;
-keep full-backing/FIFO/cancellation/checksum invariants and unchanged byte limits.
-No new allocator, pool, reader or cache implementation is required. Whole-file
-amplification, throughput, RSS and tails still require matched measurements.
-
-### Synchronous pressure eviction (2026-10-28)
-
-A public Filesystem regression now reproduces whole-cache loss with the real
-equal cache/data budgets: three 2 MiB objects, a 5 MiB data lane, then revisiting
-the recent object causes a fourth backend GET although evicting the oldest object
-was sufficient. This is separate from the rejected cache-only TinyLFU example.
-
-The missing requirement is synchronous victim removal before payload admission.
-Moka 0.12.16 has no public pop-LRU API, and remove returns a clone while retaining
-its deferred maintenance model. Changing its admission policy alone cannot make
-permits available before allocating a new payload. Reuse maintained MIT-licensed
-[`lru`](https://github.com/jeromefroe/lru-rs) 0.19.0 instead for payload retention,
-using sparse to avoid preallocating the configured entry limit, push for bounded
-entry eviction, and pop_lru to release cache ownership synchronously. Keep Moka
-for metadata caches. The existing ordered range index and exact backing budget
-remain application state; do not implement a new replacement algorithm or pool.
-
-Inspected upstream 0.18.5 APIs and the 0.19.0 change at
-`3ed2e28cfc53059c5a29d6c4f73f5ddf26a29e98`: the latter corrects Send/Sync bounds for
-shared iterators. Select that maintained version; the SDK's existing 0.18.5 remains
-pinned rather than silently updating unrelated dependencies. Our cache accesses
-stay mutex-protected and do not expose shared iterators across threads. Verify
-weighted/entry limits, replacement/coverage, pinned views, FIFO and cancellation
-through public APIs before another matched comparison.
-
-The package forbids unsafe code for every target. rustix 1.1.5 (Apache-2.0 WITH
-LLVM-exception OR Apache-2.0 OR MIT,
-<https://docs.rs/rustix/1.1.5/rustix/process/>) provides safe uid/gid operations;
-it replaces direct libc calls. Public `cargo info` verified origin/license before
-integration. tikv-jemallocator 0.7.0 and tikv-jemalloc-ctl 0.7.0 (MIT OR
-Apache-2.0, <https://github.com/tikv/jemallocator>) provide the allocator and safe
-statistics APIs; these replace direct unsafe mallinfo2 inspection. Use this same
-allocator in ordinary and benchmark Rust builds, report its identity, and measure
-RSS separately: jemalloc allocated bytes do not include allocations made by other
-native libraries or kernel/transport buffers. No custom allocator/FFI is written.
-
-Continuation implementation uses fuser 0.18.0 directly (default pure-Rust mount
-support), bytes 1.12.1 (MIT, `Bytes::from_owner` retains byte permits without a
-copy), libc (MIT/Apache-2.0, Linux errno/mode constants), and reqwest 0.12
-(MIT/Apache-2.0, rustls/gzip) for the extension alone. The extension URL is
-presigned by the *same AWS SDK client* after supported request customization;
-no signing implementation or second credential chain is introduced. Standard
-object requests remain SDK-owned. Tokio owns scheduling. Short per-inode locks
-protect application generations; per-inode flush gates serialize remote commits.
-async-trait 0.1 (MIT/Apache-2.0, <https://docs.rs/async-trait/>) provides the
-object-store async testing boundary; it does not replace runtime or SDK behavior.
-unicode-general-category 1.1.0 (Apache-2.0, public cargo info verified,
-<https://docs.rs/unicode-general-category/1.1.0/>) supplies Unicode character
-categories for the reference's IsPrint metadata escaping rather than a new table.
-
-No existing crate establishes GeeseFS's inode lifetime, dirty generation and fsync
-contract. Those are application state, not replacement infrastructure. Charge
-allocation owners rather than slices; never use an Arc/Bytes subslice to conceal
-the retained parent allocation. Reserve flush capacity independently from dirty
-admission. Remote completion, not individual part acknowledgments, establishes
-durability. Standard S3 operations remain SDK-owned. An ext-v1 network adapter
-must preserve the same credential source, endpoint, retry and cancellation
-policy; parser-only support is not backend compatibility.
-
-## Audit status
-
-Directory-page reuse uses the already selected Moka 0.12.16 synchronous weighted
-cache, not a new cache implementation. Its capacity counts returned names against
-the configured entry limit; pages also check the existing namespace mutation epoch,
-inode retention and stat TTL before reuse. Only bounded returned pages are retained,
-not a full remote tree. This addresses repeated warm READDIR network calls without
-changing freshness, reducing the workload or adding a dependency.
-
-Extended-metadata lookup preloading reuses the existing bounded `Store::list`,
-Moka cache for per-directory attempt timestamps and Tokio's per-inode mutex.
-One first page can install authoritative immediate file metadata into the existing
-entry-limited namespace. No listing graph, negative-range index or second inode
-cache is introduced. Unknown/standard metadata and paths outside the first page
-retain the ordinary HEAD/directory probes; speculative failure is not a negative
-lookup. This follows the public Go reference's batch-lookup approach with a smaller
-scope and preserves the package's public-source/unsafe boundaries.
-
-Benchmark CPU counters use public `psutil` 7.2.2 (BSD-3-Clause,
-https://github.com/giampaolo/psutil) for process identity and user/system time,
-rather than a new `/proc/PID/stat` parser. The existing Linux cgroup adapter reads
-`cpu.stat` for complete owned-workload usage and throttling, which process CPU
-counters cannot provide. Standard monotonic clocks define the measurement window;
-no sampled percent-CPU estimate or sum of parent/child cumulative CPU is substituted
-for counter deltas. This Python dependency is test/benchmark-only.
-
-The immutable Kubernetes diagnostic reuses the native, maintained SeaweedFS
-4.51 S3 server (Apache-2.0, public
-https://github.com/seaweedfs/seaweedfs/tree/153ab668c99731a6d29492bf6c61d0b4fa701101).
-Its upstream `weed mini` command owns S3, conditional/range reads, storage and
-identity permissions. The Linux amd64 release archive is pinned to SHA-256
-`c03be37416a8ee672c77766e20b22a4e1430744c3af2668599a4b6eeaec14cee`.
-No new S3 protocol implementation or production storage deployment is introduced.
-Existing Moto 5.1.17 remains the disposable fault-injection fixture; a separately
-accounted native backend avoids conflating its Python service with filesystem
-daemon CPU in the multi-gigabyte diagnostic. The controller uses public boto3
-for seeding, full-byte checks and read-only permission probes. It removes the
-seed identity and restarts the persistent disposable server before measurement;
-both filesystems use the same read-only identity and standard S3 listing. This
-fixture does not establish actual-service extended-metadata compatibility or
-performance. Its backend CPU/cache scope is reported separately from clients.
-
-Cargo.lock is reviewed for public registry origins and CI for public actions.
-`cargo metadata --locked --format-version 1` reported 336 packages (including
-this root package), with no non-public source: every dependency resolves from
-the public crates.io index. All packages declare a license or license file; the declarations
-include permissive alternatives and Unicode data licenses. This is a source/
-declaration audit, not a completed binary-distribution notice bundle.
-There is no vendored/generated/internal code. License for this repository remains
-in LICENSE. Each dependency's license is retained in its public crate package;
-redistribution of binary distributions must include the corresponding notices.
-The complete transitive license/binary distribution audit remains outstanding.
-
-## Backend continuation: public adapters (2026-10-26)
-
-The public Go contracts in `core/backend_s3.go`, `core/cfg/conf_s3.go` and
-`core/ycs3ext` require metadata-service IAM tokens, SSE request headers and the
-PATCH operation absent from the standard S3 model. AWS SDK 1.155.0 exposes
-`push_auth_scheme`/`auth_scheme_resolver`, asynchronous identity resolution and
-header-only token authentication: use that supported boundary, not a second S3
-client or handwritten cryptographic signing. `aws-smithy-runtime-api` 1.19.1
-(Apache-2.0) supplies those public traits. Reqwest 0.12 owns metadata HTTP/TLS,
-bounded timeouts and redirect policy; serde_json 1 (MIT/Apache-2.0) owns JSON.
-The narrow token schema/cache is application state; there is no AWS credential
-provider for the reference's GCP/custom IAM-header protocol.
-
-Existing public SDK dependencies base64 0.22 (MIT/Apache-2.0) and md-5 0.10
-(MIT/Apache-2.0, RustCrypto) supply SSE-C encoding and its protocol-mandated MD5
-digest; do not implement either primitive. Humantime 2 (MIT/Apache-2.0) supplies
-duration parsing; mime_guess 2 (MIT) was initially selected for filename guesses,
-then rejected for the specific policy mismatch recorded below. Primary APIs: <https://docs.rs/aws-sdk-s3/1.155.0/aws_sdk_s3/config/struct.Builder.html>,
-<https://docs.rs/aws-smithy-runtime-api/1.19.1/>, <https://docs.rs/base64/0.22/>,
-<https://docs.rs/md-5/0.10/>, <https://docs.rs/humantime/2/>,
-<https://docs.rs/mime_guess/2/>. AWS runtime's public payload override preserves
-SDK-owned SigV4 when optional payload checksums are disabled.
-
-Registry research found maintained `s3s-sigv2` 0.17.0 (Apache-2.0,
-<https://docs.rs/s3s-sigv2/0.17.0/>, <https://github.com/Nugine/s3s>). Reuse its
-canonicalization and HMAC signing through the SDK auth-scheme override; do not
-translate Go's cryptographic signer. Both available 0.16/0.17 releases require
-Rust 1.96, so this continuation raises the declared MSRV to 1.96 rather than
-vendoring or reimplementing signing. SDK no-auth support supplies anonymous
-requests. The compatibility adapter preserves the public Go subresource set and
-encoded query values while SDK endpoint resolution owns path/virtual-host style.
-`tempfile` 3.27.0 (MIT/Apache-2.0, <https://docs.rs/tempfile/3.27.0/>) owns isolated
-profile fixtures; Tokio's process support provides finite, kill-on-drop test
-children. AWS `credentials-process` is deliberately disabled: its current SDK
-implementation spawns a shell without a process deadline or kill-on-drop, which
-cannot meet the updated noninteractive/finite-subprocess requirement.
-
-For `--no-verify-ssl`, the stable Smithy HTTP TLS builder exposes trust stores,
-not a verification-disable switch. Evaluated public adapters:
-`aws-smithy-http-client-reqwest` 0.1.0 (Apache-2.0) collects every response with
-`resp.bytes()` and violates streaming ownership; `smithy-transport-reqwest` 0.1.0
-(MIT/Apache-2.0) streams correctly but has no supported custom-client/TLS builder.
-Use a narrow public-trait adapter around the already selected reqwest 0.12 only
-for this explicit option: HTTP/TLS, bodies and verification policy remain crate
-owned; no HTTP or TLS protocol is implemented. Preserve streaming response bodies,
-disable redirects/decompression and retain finite request/body deadlines.
-`http` 1 (MIT/Apache-2.0) supplies typed DTO conversions. TLS tests reuse tiny_http's
-existing rustls feature and public `rcgen` 0.14 (MIT/Apache-2.0,
-<https://docs.rs/rcgen/0.14.8/>) for disposable localhost certificates. Default
-verification remains enabled; IAM metadata TLS is not weakened by the S3 option.
-
-MIME policy correction: `mime_guess` was evaluated but its larger built-in table
-and lack of Unix database precedence do not implement public Go's
-`mime.TypeByExtension` contract (notably JavaScript/XML and local overrides).
-Use `mime` 0.3.17's maintained syntax parser (MIT/Apache-2.0,
-<https://docs.rs/mime/0.3.17/>, <https://github.com/hyperium/mime>) with a narrow Go compatibility/defaults
-and Unix database adapter instead. The 16 default MIME associations derive from
-the public Go standard library, copyright The Go Authors, BSD-3-Clause:
-<https://go.dev/src/mime/type.go>, <https://go.dev/src/mime/type_unix.go>.
-No Go parser implementation is copied; Rust adapters ingest bounded metadata
-using standard readers and the MIME parser. Binary notice aggregation remains
-the parent's final-distribution responsibility.
-
-## Streaming configured upload parts (2026-10-26)
-
-Re-evaluated public Smithy `SdkBody::retryable`/`from_body_1_x` and
-`http-body` 1 (MIT, <https://docs.rs/http-body/1/>) before lifting the fixed
-allocation-sized part limit. Reuse these APIs for retries and HTTP body framing.
-`http-body-util::Full` buffers the whole part; `StreamBody` lacks an exact byte
-hint and its async materialization future need not be Sync. Use a narrow safe
-Body adapter with an exact remaining length and a mutex-protected pending future;
-it materializes charged chunks, not whole configured parts. This does not
-implement HTTP, checksums, transport or retry machinery. The SDK owns those.
-Public Go part-size configuration is application scheduling data, not a protocol
-implementation; its bounded parser and range arithmetic are independently written.
-
-Streaming wire fixtures independently check SDK CRC32 trailers with maintained
-`crc32fast` 1 (MIT/Apache-2.0, <https://docs.rs/crc32fast/1/>), already used by
-the public compression dependency, rather than implementing checksum arithmetic.
-
-## Concurrent directory metadata resolution
-
-Reuse public `futures-util` 0.3.34 (MIT/Apache-2.0,
-<https://docs.rs/futures-util/0.3.34/>, <https://github.com/rust-lang/futures-rs>),
-already transitive in Cargo.lock, for FuturesUnordered/StreamExt. Unlike spawning
-borrowed filesystem operations, these futures can borrow the existing lookup
-path and cancel synchronously on drop. Acquire an existing Tokio semaphore's
-global owned job permit before adding each future, not inside per-page spawned
-tasks. This bounds admitted work across readdir calls and preserves the existing
-lookup metadata/type/generation checks without custom scheduling infrastructure.
-
-## Overlapping read-window coordination
-
-Reuse Tokio's maintained watch channel
-(<https://docs.rs/tokio/1.54.1/tokio/sync/watch/>) to notify read followers when
-an owned fill completes or is cancelled. Moka's identical-key get-with operation
-does not coalesce overlapping read-ahead ranges with different caller offsets.
-The small per-inode, generation-scoped interval registry is filesystem state,
-not a new generic single-flight framework. Its RAII owner removes the interval
-and closes the channel on every exit; followers retry the normal cache check
-under the existing request deadline. Disjoint windows still run concurrently.
-Publish completed blocks into the current cache policy, not a clone detached
-by a concurrent pressure eviction. Do not change payload/cache budgets.
-
-## Charged cached-read views
-
-Evaluated the already selected public `bytes::Bytes::slice` API before changing
-cache-hit reply ownership. `Block` also provides exclusive mutable fill access
-and carries allocation and optional outer-owner reservations; its live charge
-must describe the complete backing allocation, even for a small immutable view.
-Replacing that mutable owner with Bytes would introduce a second mutable/shared
-representation or a separate owner adapter. Use a narrow `Arc<Allocation>` plus
-standard-library `Range<usize>` view inside the existing charged Block. A public
-read regression first observed the redundant 4 KiB reply allocation; the view
-retains the complete backing charge through eviction and last-owner drop.
-This reuses the
-existing allocation, semaphore ownership, Moka policy and fuser borrowed reply;
-it is not a new allocator, cache or FUSE implementation. Measurement is required
-before claiming that removing this copy resolves the observed CPU/tail deficit.
-
-## Requested-range publication with owned read-ahead
-
-Reuse the existing Tokio JoinSet, watch notification and request semaphore for
-read-window scheduling, cancellation and admission. A one-shot Rust callback can
-consume the existing fuser reply when its requested bytes are complete; the
-already admitted FUSE task continues owning the remaining window and reports its
-error. No extra spawned job or per-read channel is needed. Tests alone use
-Tokio oneshot channels to observe the callback while independently gating backend
-ranges. The ordinary awaitable read retains its full-window completion/error
-contract. This is application-level reply timing, not a new runtime, queue or
-FUSE protocol implementation.
-
-## Incremental conditional-GET publication
-
-The public AWS SDK's ByteStream and Tokio AsyncRead adapter already own body
-framing, errors and cancellation. Reuse them for bounded 128 KiB completed body
-buffers, with a bounded Tokio mpsc channel to the existing window owner. The
-configured conditional GET ranges and request concurrency remain unchanged;
-do not add a small duplicate GET or implement an HTTP/S3 protocol. A shared Arc
-reservation must retain the complete admitted GET charge through producer,
-queued fragments, cache and last borrower. The existing charged Block owns each
-immutable completed buffer. Retain complete-body SDK validation before exposing
-any prefix when the response advertises a whole-body checksum, rather than
-publishing bytes before that integrity check can finish. Existing whole-range
-reads and writer materialization keep their full validation contract.
-
-## Range-index filtering before cache access (2026-10-28)
-
-Re-inspected Moka 0.12.16's supported `sync::Cache::get`, `contains_key`,
-eviction listener and maintenance APIs. `get` clones its value and records a read;
-`contains_key` avoids popularity updates but does not expose the block length.
-Neither operation provides interval coverage. Keep Moka for retention and add
-the immutable block length to the existing bounded BTreeMap index. One standard
-`BTreeMap::range` iterator can reject non-covering predecessors without repeated
-hash lookups, block-owner clones or popularity updates for unusable blocks.
-Validate the returned block's actual bounds after the Moka lookup as before.
-The index stores no payload owner, and replacement stamps still protect new
-entries from deferred eviction callbacks. No dependency or cache budget changes.
-
-Related upstream findings are evidence to investigate, not a diagnosis by name:
-[Moka #498](https://github.com/moka-rs/moka/issues/498) describes maintenance and
-blocking rehash tail latency; [#412](https://github.com/moka-rs/moka/issues/412)
-was an async-cache busy loop fixed in 0.12.6, before the selected sync 0.12.16.
-The selected version is already the latest published release checked on this
-date. Do not import an experimental cache fork or disable reclamation to hide
-costs. Compare the candidate with exact frozen `e000ecf` and both Go references.
+Extra initial-read client time is not yet an attributed library defect. Check
+exact versions, profiles, upstream issue applicability and supported APIs before
+another workaround. Do not remove integrity, freshness, ownership or durability
+contracts for speed. [FUSE passthrough](fuse-passthrough.md) and disk caching remain
+deferred. Keep new findings concise; detailed profiles/results stay untracked.

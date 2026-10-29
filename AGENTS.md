@@ -2,9 +2,10 @@
 
 ## Required development workflow
 
-- BMAD is optional by the user's updated instruction. Use its installed workflow
-  where useful, retaining the existing plan, verification evidence and real task
-  state; do not let orchestration replace implementation or verification.
+- BMAD is optional. Keep tracked context concise: change history explains the
+  problem, confirmed cause, correction and remaining gaps. Detailed results,
+  generated graphs and execution journals belong in ignored evidence directories,
+  not source diffs. Preserve raw verification evidence outside tracked source.
 - A delegated coding subagent executes its supplied plan and must not start a
   recursive build-auto run. The parent owns final review and VCS delivery.
 - Use explicit finite timeouts for commands, subprocesses and external operations.

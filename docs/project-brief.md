@@ -4,7 +4,8 @@
 
 Implement a Rust replacement for GeeseFS in the separate repository
 `borislitv/geesefs-rs`. BMAD was initially required; the user subsequently made
-its use optional. Preserve the plan and verification evidence. The primary
+its use optional. Keep concise history/reasons in source; retain detailed
+verification evidence in ignored result directories. The primary
 constraint is better memory behavior and faster operation than the Go reference,
 with preserved required behavior. Always look for suitable ready-made Rust
 crates before implementing a component; in particular, reuse an existing FUSE
@@ -99,20 +100,11 @@ for each new fixture instead of assuming these numbers guarantee headroom.
 Keep the application payload budget and worker counts explicit and unchanged
 when comparing fixed-binary resource effects.
 
-The [refill investigation](read-ahead-refill-causality.md) now confirms one
-source-level mechanism: cache hits do not advance the next read-ahead window,
-exposing its GET latency at a later demand miss. Direct socket/FUSE tracing and
-selective-delay injection establish that repair target. The
-[bounded refill candidate](read-ahead-refill.md) now has failure-sensitive public
-regressions, full library checks and 96 matched native phases. It improves prior
-Rust throughput/tails but still loses p95/p99 to both Go references, and repeated
-payload increases. The [cross-reader eviction fix](read-ahead-eviction.md) has a
-second complete 96-phase comparison: traffic and tails improve, but experimental
-Go p99 remains better. The [read-history lifetime correction](read-stream-history.md)
-has a third complete comparison: warm duplicate payload disappears and p99
-improves, but both Go mean p99 values remain lower. Matched initial-read stage
-joins now point to before-request and after-socket client work for further
-attribution. These measurements do not pass acceptance or explain every wait.
+The [change history](change-history.md) summarizes confirmed refill, cross-reader
+eviction and read-history lifetime corrections. Warm duplicate payload disappears
+in the selected comparison, but both Go mean p99 values remain lower. Initial-read
+joins point to before-request and after-socket client work for further attribution.
+These observations do not pass acceptance or explain every wait.
 
 The first-stage scope still excludes FUSE passthrough and disk-backed caching.
 No single profile proves that every possible optimization is exhausted; report

@@ -65,7 +65,7 @@ as a failure, not hardlink acceptance. Root directory fsync was exercised on bot
 | pressure | Pinned and queued allocations charged, reserved flush progress, bounded admission | Owner charging, reserved flush lane, full dirty-budget progress and cancelled multipart cleanup tests; not a whole-process RSS bound |
 | FUSE | Exactly-once owned replies, bounded scheduling, xattrs/fallocate/fsyncdir/mmap/RO/shutdown | fuser callbacks implemented; actual mount/unmount, mmap, fsyncdir exercised; full callback/failure matrix outstanding |
 | clients | rsync full/delta, nginx full/Range, concurrent writers, injected upload/copy/completion failures | Actual rsync and aiohttp full/Range checks on Rust/Go; Rust mounted fsync recovery passes; Go open-file recovery remains EAGAIN through 75-second deadline; no literal nginx or all-xfstests claim |
-| performance | Both verified Go baselines, unchanged budgets, cold/warm, five interleaved repetitions, all accounting and tails | Not measured; gate must fail closed |
+| performance | Both verified Go baselines, unchanged budgets, repeated cold/warm work, all accounting and tails | Selected read comparisons measured; representative matrix and p99 gate remain unaccepted |
 
 No atomic S3 rename or writable-unlinked POSIX behavior is promised by the
 reference. A failure of required optional behavior leaves overall compatibility

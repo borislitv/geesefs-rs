@@ -107,11 +107,11 @@ layouts remain unverified against the actual PATCH service.
   checks, with a filesystem-wide `--max-requests` job bound acquired before each
   future is queued. Errors/cancellation release all borrowed jobs synchronously.
   Effective budgets report the resolver capacity and admitted job count. See the
-  [bounded resolver and FIFO pressure evidence](bounded-metadata-pressure.md).
+  [change history](change-history.md).
 
 ## Core configuration and rename recovery
 
-The [inspection follow-up](review-follow-up.md) records clean getattr refresh,
+The implementation includes clean getattr refresh,
 namespace/delete/commit race fixes, caller-ownership API, root attribute rejection,
 safe standard-LIST type resolution, requester-pays on write/delete phases and
 HTTP property preservation during conditional metadata replacement. These are

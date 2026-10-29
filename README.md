@@ -1,176 +1,42 @@
 # geesefs-rs
 
-Experimental Rust replacement for GeeseFS. BMAD was used for planning,
-implementation delegation and independent review; continued use is optional.
+Experimental Linux/S3 GeeseFS replacement for readers and writers.
+**Not accepted for production:** compatibility and comparative performance remain
+incomplete. Do not replace a served mount with this implementation.
 
-## Acceptance contract
+The goal is preserved filesystem/S3 behavior with lower memory use and faster
+normal, sustained operation than both identified Go references. A language change,
+passing unit tests or one favorable workload does not satisfy that goal.
 
-The implementation must preserve the required Linux/S3 reader and writer
-behavior while using less memory and running faster than an identified Go
-reference under equivalent workloads and budgets. Rust alone is not evidence
-of either improvement. Full compatibility and performance acceptance remain
-pending until independently verified.
+## Development
 
-Read [the project brief](docs/project-brief.md) and [agent rules](AGENTS.md).
-The mandatory dependency policy is **reuse first**: evaluate maintained Rust
-crates before custom infrastructure, including using an existing FUSE crate.
-The package forbids unsafe code for all targets and CI rejects non-public Cargo
-dependency origins. No internal Arcadia libraries are copied, translated or linked.
-
-## Development setup
-
-Build with Rust 1.96.0 or newer, rustfmt/clippy and the native compiler required
-by the public allocator/TLS dependencies. Python 3.12+ runs the evidence checks;
-mounted comparison additionally needs Linux FUSE, rsync, Go and the test requirements.
-The initial environment uses Rust 1.99.1.
-
-Install the public Python benchmark dependencies in your selected virtual
-environment before the Python tests: `pip install -r requirements-fixture.txt`.
-
-Optional BMAD setup uses `uv` (initial version 0.13.5), Node.js and GitHub CLI.
-BMAD skills are project-local; `skills-lock.json` records their source hashes.
-Install the selected official skills:
+Use Rust 1.96.0 or newer with rustfmt/clippy and Python 3.12+ with dependencies
+from `requirements-fixture.txt`. Builds, tests and mounted benchmarks run in
+isolated Kubernetes fixtures. Dependencies are public crates; this package
+forbids unsafe code. Reuse maintained library APIs before custom infrastructure.
 
 ```bash
-npx --yes skills add bmad-code-org/BMAD-METHOD --skill bmad bmod-core-tools bmod-method bmad-build-auto bmad-build bmad-prd bmad-architecture bmad-code-review bmad-review bmad-project-context bmad-deep-recon bmad-agent-dev bmad-agent-architect bmad-agent-analyst bmad-agent-pm bmad-agent-po --agent opencode -y
-```
-
-Read the installed `.agents/skills/bmad/SKILL.md` and follow its setup procedure.
-After setup, read `.agents/skills/bmad-build-auto/SKILL.md` and invoke its
-renderer exactly as instructed from this project. Do not run workflow sources
-directly or claim the unattended loop is running when it has halted.
-
-The input is `docs/project-brief.md`; generated plans and actual run results
-belong under `_bmad-output/`. Commit initial configuration before starting a
-build iteration: BMAD requires a clean task branch.
-
-The requested [ub-mode workflow](https://github.com/unclebob/ub-mode) is applied
-to continued development. Its first [quality checkpoint](docs/quality-results-20261027.json)
-and [execution log](_bmad-output/ub-mode-20261027.md) retain complexity findings,
-duplicate candidates and a verified improvement to adjacent-read boundary tests.
-See the [glossary](docs/glossary.md) for ownership and measurement terminology.
-
-## Status
-
-Latest implementation: [bounded cache-hit refill](docs/read-ahead-refill.md).
-Nine new public regressions, eight independent fault checks and one selected
-boundary mutation verify early refill, cancellation, pressure, generations and
-EOF. Full Kubernetes checks pass 201 Rust / 37 Python cases, formatting, Clippy
-and the public-source audit. Native reader/writer and matched performance
-verification are in progress; overall acceptance remains UNACCEPTED.
-
-The preceding [read-ahead refill diagnosis](docs/read-ahead-refill-causality.md)
-established the mechanism on frozen executables.
-Rust's cache-hit return skips planning the next window; its GET starts only
-after demand reaches missing bytes. Direct socket/FUSE tracing finds 484/659
-unambiguous noninitial Rust GETs sent after consumption begins, versus 0/884 for
-each Go reference. Selectively delaying noninitial GETs exposes 5.829 seconds of
-summed inserted wait inside Rust reads and zero inside the joined Go reads.
-Those 72 controlled phases pass 216,000 full-file checks; separate network
-profiles add 18,000. They confirm the repair target, not the new candidate's
-performance or whole-workload acceptance. Backend-worker controls and all adverse results are
-retained in the [numeric receipt](docs/read-ahead-refill-causality-20261029.json).
-
-The preceding [steady-state tail diagnosis](docs/steady-state-tail-diagnosis.md)
-and [CPU/off-CPU flamegraphs](docs/flamegraphs-20261029/README.md) document fixed-binary
-experiments that remove CPU throttling and cgroup memory-limit reclaim using an
-8 CPU / 16 GiB filesystem/client fixture and a 16 CPU / 12 GiB synthetic backend.
-At eight runtime workers, Rust averages 1256 MB/s versus Go 1070/1017, with daemon
-RSS peaks 803 MB versus 1310/1335; p95/p99 still lose to both Go references.
-The 216 unprofiled phases retain 648,000 passing full-file checks and all adverse
-resource/worker results. Cold-start superiority is no longer required; normal
-long-lived operation, writer/reader compatibility and representative acceptance
-remain open. These are resource/configuration experiments, not a new runtime fix.
-The earlier checkpoints below remain historical evidence.
-
-**Experimental read/write mounts work; do not replace a served mount.** The
-foreground binary integrates fuser, SDK-backed S3, bounded payload ownership,
-paged namespace operations and versioned sparse/truncate/fsync writes. Actual
-disposable Rust/Go mounts exercised rsync, HTTP full/Range and writer paths.
-The compatibility runner still fails: actual-service optional paths, hardlink
-emulation and a Go failure-recovery check are unresolved. Actual FUSE tracing and
-clean-buffer repairs resolved the severe historical sequential slowdown. The
-latest selected local matrix completes all 80 results with correct bytes and
-higher group mean throughput, but some cold tail metrics still regress.
-An independent real-object Kubernetes diagnostic also completed all 18 phases
-correctly; Rust fresh throughput was **198–204 MB/s versus Go 225–262 MB/s**.
-Lower daemon RSS does not establish lower total cgroup memory when file cache
-fills the limit. [Bounded metadata reuse](docs/metadata-page-reuse.md) has library
-regressions; its whole-filesystem speed benefit remains unestablished. New test
-windows include separate daemon/client/cgroup user/system CPU cost, efficiency
-and throttling. All favorable and unfavorable results remain in
-[performance](docs/performance.md). Overall acceptance is
-**UNACCEPTED**. Owned cpu+memory cgroup execution works without changing the
-hosting service's controls.
-
-The [50-phase CPU-accounted diagnostic](docs/k8s-cpu-results-20261027.md)
-completed, but 214 objects disappeared during the run. It retained 5,522 file
-failures and 146 listing mismatches; its lower observed CPU costs do not prove
-a win on equivalent data. Six EAGAIN failures remain separately unresolved.
-The [metadata coherence follow-up](docs/metadata-coherence.md) reproduces and
-repairs unrelated-name EAGAIN plus response-publication ownership races with ten
-new behavior tests. Attribution of the six historical failures remains open.
-
-The [sealed native S3 diagnostic](docs/immutable-read-results-20261027.md) then
-completed forty equivalent explicit-metadata phases and 120,000 complete file
-checks on unchanged synthetic data. Rust still loses throughput, p99 and CPU,
-while retaining lower process RSS. Plain standard-listing Go metadata failures,
-owned profiles and an unchanged-binary allocator A/B are retained separately.
-This additional read workload does not complete the full acceptance matrix.
-
-The [matched charged-view comparison](docs/cached-read-views.md#matched-native-comparison)
-retains the prior copy executable and both Go references: another forty phases
-and 120,000 file checks pass, but overall performance remains unaccepted.
-The [requested-range reply follow-up](docs/requested-read-reply.md) gives ready
-bytes to FUSE before unrelated parallel read-ahead completes, while retaining the
-same bounded request owner, byte charges, deadline and observable tail errors.
-The [incremental conditional-GET follow-up](docs/streamed-read-body.md) separately
-publishes complete body fragments, preserving advertised whole-body checksum
-validation and full admitted ownership. Its forty-phase matched comparison
-improves p99 against prior Rust but loses throughput/CPU/steady RSS and p50/p95;
-the adverse result is retained, not presented as an unconditional speed fix.
-The [cached-fragment lookup follow-up](docs/cached-fragment-lookup.md) removes a
-redundant predecessor scan. Its matched forty-phase repeat improves mean
-throughput/CPU/p99 against exact prior Rust, but warm repetitions are mixed,
-RSS rises slightly and Go remains faster. Full acceptance stays incomplete.
-The [borrowed miss-reply follow-up](docs/borrowed-read-reply.md) removes a second
-payload allocation in the synchronous FUSE callback while retaining independent
-owned replies. Its matched forty-phase repeat is correct but shows no speed/RSS
-win against cache prior; the adverse result and remaining Go gap are retained.
-The [initialized-fragment follow-up](docs/initialized-read-fragment.md) uses
-Tokio's existing `copy_buf`/`take` and Vec writer APIs instead of pre-zeroing a
-fully overwritten fragment. Its matched repeat still has mixed throughput,
-CPU/RSS and tail results; neither local optimization establishes an overall win.
-The [range-index follow-up](docs/range-index-coverage.md) filters non-covering
-blocks before Moka access. Separate absolute profiles confirm reduced lookup CPU,
-but its forty-phase matched repeat retains worse warm throughput/CPU/p99. All
-120,000 file checks pass; this is not overall performance acceptance. Passthrough
-and disk-backed caching are deferred beyond the first stage.
-The [receive-buffer reuse follow-up](docs/receive-buffer-reuse.md) reproduces a
-consumed SDK chunk retaining shared transport storage. Maintained futures/Tokio
-adapters release it promptly. The matched repeat improves mean throughput/CPU/p99
-against exact prior Rust and separate profiles show fewer page faults, but
-final-fifth RSS and remaining warm Go deficits keep overall acceptance open.
-
-Backend IAM/profile authentication, signature discovery/SigV2, encryption and
-request options now have loopback HTTP/TLS coverage. See [backend options](docs/backend-options.md)
-for supported semantics and remaining limits; PATCH now has writer
-generation/conflict/recovery integration and deterministic tests. Configured
-multipart tiers, streamed large parts, bounded parallel copy/upload, effective
-read-ahead windows and bounded negative lookup caching are also covered by
-deterministic tests. Owner-budget reporting does not establish an RSS bound.
-These additions
-require Rust 1.96.0 or newer and do not
-establish actual-service or production acceptance.
-
-```bash
-cargo test --locked --all-targets --all-features
-cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets --all-features
 ```
 
-See [compatibility](docs/compatibility.md), [dependency decisions](docs/dependency-decisions.md),
-[testing](docs/testing.md) and [performance](docs/performance.md) for reproduction
-commands and exact failures. Full compatibility, writer/fsync durability and
-comparative performance acceptance remain incomplete. CI success covers
-deterministic library/contract/evidence-gate checks, not production acceptance.
+The foreground binary integrates fuser, SDK-backed S3, bounded payload ownership,
+paged namespace operations and generation-aware sparse/truncate/fsync writes.
+The latest runtime correction resets adaptive read history when a closed stream
+reopens, while retaining cached payload and active-reader history. Warm repeated
+payload disappeared in the selected comparison; mean p99 still loses to both Go
+references. Initial-read client work remains under investigation.
+
+## Project context
+
+- [Project brief](docs/project-brief.md) and [agent rules](AGENTS.md).
+- [Change history and reasons](docs/change-history.md).
+- [Compatibility inventory](docs/compatibility.md) and [backend options](docs/backend-options.md).
+- [Dependency decisions](docs/dependency-decisions.md).
+- [Testing](docs/testing.md), [performance methodology](docs/performance.md) and
+  [sealed read fixture](docs/immutable-read-dataset.md).
+
+Detailed measurements, generated graphs and execution logs belong in ignored
+`benchmark-results/private/`, not in source diffs. Keep a concise explanation of
+each confirmed mechanism, correction, tradeoff and remaining gap in the history.

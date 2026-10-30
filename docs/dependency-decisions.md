@@ -21,6 +21,14 @@ remains outstanding. See LICENSE and NOTICE for source attribution.
 | System comparison | stats_alloc 0.1.10 (MIT) delegates to System; six requested-allocation counters are not native heap/RSS. peak_alloc was rejected because its realloc/calloc implementation changes the measured behavior. |
 | Fixtures | tiny_http 0.12 (MIT OR Apache-2.0), rcgen/tempfile (MIT OR Apache-2.0), Moto and SeaweedFS (Apache-2.0); real HTTP/TLS boundaries plus faithful gated storage fakes. |
 | CPU accounting | psutil 7.2.2 (BSD-3-Clause) process counters and owned cgroup `cpu.stat`; wall time is not CPU consumed. |
+| Go heap accounting | Go's public `net/http/pprof` debug text exposes live `runtime.MemStats`. Python standard-library HTTP, response bounds and a narrow field adapter avoid implementing a heap-profile decoder or adding another runtime dependency. |
+
+The pinned Go 1.25.9 [heap writer](https://github.com/golang/go/blob/go1.25.9/src/runtime/pprof/pprof.go)
+prints `HeapAlloc` separately from sampled profile totals. Its
+[HTTP handler](https://github.com/golang/go/blob/go1.25.9/src/net/http/pprof/pprof.go)
+forces GC only when requested with a positive `gc` parameter; the benchmark never
+sets it. Repeated bounded observations replace the former final `go tool pprof`
+snapshot. Sampling overhead remains part of the observed server cost.
 
 ## Narrow application state
 

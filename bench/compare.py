@@ -28,6 +28,7 @@ import time
 import uuid
 
 from accounting import CpuWindow, cpu_efficiency
+from go_heap import GoHeapSampler
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -381,13 +382,6 @@ def workload(path, name, config, client, bucket, prefix, endpoint, local, expect
             "latency_variance_ms2": statistics.pvariance(latencies), "latencies_ms": latencies}
 
 
-def allocator_go(port, output):
-    result = integration.command(["go", "tool", "pprof", "-top", "-unit=bytes", "-sample_index=inuse_space", f"http://127.0.0.1:{port}/debug/pprof/heap"], capture_output=True, text=True, timeout=30)
-    output.write_text(result.stdout + result.stderr)
-    match = re.search(r"of\s+([0-9.]+)B\s+total", result.stdout)
-    return float(match.group(1)) if match else None
-
-
 def allocator_rust(path, started_ns, finished_ns):
     values = []
     effective = None
@@ -528,23 +522,22 @@ def main():
                                                 spec = {"path": str(path), "name": name, "config": config, "bucket": bucket,
                                                         "prefix": prefix, "endpoint": endpoint, "local": local, "expected_sha": expected_sha, "warmup": state == "warm"}
                                                 with worker(spec, environment, group, args.output / (label + "-client.log")) as consumer:
-                                                    with Sampler(process.pid, consumer.pid, group, args.output / (label + "-memory.jsonl")) as sampler:
-                                                        started_ns = time.time_ns()
-                                                        consumer.stdin.write("start\n")
-                                                        consumer.stdin.flush()
-                                                        message = read_message(consumer)
-                                                        if message.get("error"):
-                                                            raise RuntimeError(message["error"])
-                                                        metrics = message["metrics"]
-                                                        finished_ns = time.time_ns()
+                                                    heap_observer = GoHeapSampler(pprof, args.output / (label + "-heap.jsonl")) if implementation == "go" else contextlib.nullcontext()
+                                                    with heap_observer as heap:
+                                                        with Sampler(process.pid, consumer.pid, group, args.output / (label + "-memory.jsonl")) as sampler:
+                                                            started_ns = time.time_ns()
+                                                            consumer.stdin.write("start\n")
+                                                            consumer.stdin.flush()
+                                                            message = read_message(consumer)
+                                                            if message.get("error"):
+                                                                raise RuntimeError(message["error"])
+                                                            metrics = message["metrics"]
+                                                            finished_ns = time.time_ns()
                                                     metrics.update(cpu_efficiency(sampler.metrics(), transferred=metrics["bytes"], operations=metrics["operations"]))
                                                     record["cpu_counters"] = {"before": sampler.cpu.before, "after": sampler.cpu.after}
                                                     record["measurement_window_unix_ns"] = [started_ns, finished_ns]
-                                                    if implementation == "go":
-                                                        # Keep pprof outside the active timing/memory window.
-                                                        allocated = allocator_go(pprof, args.output / (label + "-heap.txt"))
-                                                        metrics.update(allocator_peak_bytes=None, allocator_steady_bytes=None,
-                                                                       allocator_end_snapshot_bytes=allocated)
+                                                    if heap is not None:
+                                                        metrics.update(heap.metrics(started_ns, finished_ns))
                                                     consumer.stdin.write("stop\n")
                                                     consumer.stdin.flush()
                                                 record["metrics"] = metrics
@@ -582,7 +575,7 @@ def main():
     gate["accepted"] = gate["accepted"] and not errors and not args.smoke and not args.diagnostic_workload and not args.allow_incomplete_accounting
     report = {"gate": gate, "provenance": provenance, "limits": config, "runs": runs,
                "diagnostic_workloads": args.diagnostic_workload or [],
-               "accounting_notes": ["RSS includes filesystem and client process", "raw memory traces retain daemon/client PSS separately", "RSS peak is sampled at 20ms; kernel cgroup memory.peak includes startup/warmup", "CPU is user/system counter delta over the active workload, with daemon/client separate and the owned cgroup including both; startup, warmup and end pprof are outside the CPU window", "CPU seconds/GiB or operation and average occupied cores are distinct from wall time; cgroup throttling is recorded without treating it as useful CPU work", "allocator sampling is restricted to the active workload; Go uses a separate end snapshot without gc=1 and cannot pass peak/steady heap acceptance", "cold means a new mount/process; warmup occurs in the owned client cgroup; never a global cache drop"]}
+               "accounting_notes": ["RSS includes filesystem and client process", "raw memory traces retain daemon/client PSS separately", "RSS peak is sampled at 20ms; kernel cgroup memory.peak includes startup/warmup", "CPU is user/system counter delta over the active workload, with daemon/client separate and the owned cgroup including both; startup and warmup are outside the CPU window", "CPU seconds/GiB or operation and average occupied cores are distinct from wall time; cgroup throttling is recorded without treating it as useful CPU work", "Go HeapAlloc is sampled at 1s via bounded pprof debug=1 requests without forced GC; request durations and raw MemStats are retained, server observer overhead remains charged to Go; fewer than two fully in-window samples are insufficient", "allocator peaks are sampled; late-half means are not proof of a memory plateau", "cold means a new mount/process; warmup occurs in the owned client cgroup; never a global cache drop"]}
     (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps({"accepted": gate["accepted"], "runs": len(runs), "errors": gate["errors"][:10]}, indent=2))
     return 0 if gate["accepted"] else 1

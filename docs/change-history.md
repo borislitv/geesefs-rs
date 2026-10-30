@@ -70,6 +70,12 @@ accounting checks, while comparative performance gates apply to warm work.
 The regression fails before the correction; adverse warm tails still fail.
 This aligns the runner with the contract and establishes no runtime improvement.
 
+Go allocator accounting no longer substitutes a final sampled pprof total for
+missing temporal data. A separate bounded observer records live `HeapAlloc`
+without requesting GC, retains failures and excludes boundary-crossing requests.
+Loopback HTTP/timeout tests and four injected faults verify the adapter; actual
+workload overhead and long-lived heap behavior still need measurement.
+
 ## Current work and open gates
 
 Release builds now use ThinLTO and one codegen unit to optimize across the SDK

@@ -19,19 +19,26 @@ client = boto3.client("s3", endpoint_url=spec["endpoint"], region_name="us-east-
                       aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
                       aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
                        config=Config(connect_timeout=3, read_timeout=30, retries={"max_attempts": 1}, s3={"addressing_style": "path"}))
-if spec.get("warmup"):
-    # The client was exec'd inside the same owned cgroup as the filesystem;
-    # warming here charges its FUSE page cache to the measured subtree.
-    if compare.integration.sha_file(Path(spec["path"]) / "payload") != spec["expected_sha"]:
-        raise RuntimeError("warm-up payload checksum mismatch")
-print(json.dumps({"ready": True}), flush=True)
-sys.stdin.readline()
+
+
+def run_workload(name):
+    return compare.workload(Path(spec["path"]), name, spec["config"], client,
+                            spec["bucket"], spec["prefix"], spec["endpoint"], spec["local"], spec["expected_sha"])
+
+
 try:
-    metrics = compare.workload(Path(spec["path"]), spec["name"], spec["config"], client,
-                               spec["bucket"], spec["prefix"], spec["endpoint"], spec["local"], spec["expected_sha"])
-    print(json.dumps({"metrics": metrics}), flush=True)
-except Exception as error:
-    print(json.dumps({"error": str(error)}), flush=True)
-finally:
+    if spec.get("warmup"):
+        # Warm the actual operation in the measured subtree, not an unrelated
+        # payload scan. Prime a healthy writer before injecting its measured fault.
+        run_workload("writer_fsync" if spec["name"] == "writer_failure" else spec["name"])
+    print(json.dumps({"ready": True}), flush=True)
     sys.stdin.readline()
+    try:
+        metrics = run_workload(spec["name"])
+        print(json.dumps({"metrics": metrics}), flush=True)
+    except Exception as error:
+        print(json.dumps({"error": str(error)}), flush=True)
+    finally:
+        sys.stdin.readline()
+finally:
     client.close()

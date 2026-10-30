@@ -79,6 +79,12 @@ Reference inspection also finds baseline-owned `debug.FreeOSMemory` calls. Their
 counter deltas are reported without rejecting the reference or changing its GC
 policy; the observer itself never requests collection.
 
+The worker also labelled metadata/random/writer runs warm after scanning only
+payload. Warmup now executes the matching checked operation; the failure case
+primes a healthy writer before injection. The client is closed even if warmup
+fails, and warmup receives the bounded workload deadline rather than the short
+cold-initialization timeout. Earlier screening evidence remains diagnostic.
+
 ## Current work and open gates
 
 Release builds now use ThinLTO and one codegen unit to optimize across the SDK

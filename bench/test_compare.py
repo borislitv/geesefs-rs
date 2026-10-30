@@ -53,6 +53,33 @@ class BaselineBuildTests(unittest.TestCase):
             self.build("")
 
 
+class WorkerDeadlineTests(unittest.TestCase):
+    def test_realistic_warmup_delay_uses_workload_deadline_but_cold_start_stays_bounded(self):
+        for warm in (False, True):
+            with self.subTest(warm=warm), tempfile.TemporaryDirectory() as temporary:
+                process = mock.Mock(stdin=io.StringIO(), stdout=io.StringIO('{"ready": true}\n'), returncode=None)
+
+                def exited(**_options):
+                    process.returncode = 0
+
+                def readiness(readers, _writers, _errors, timeout):
+                    # Model a child whose checked warm workload needs 35 seconds.
+                    return (readers, [], []) if timeout >= 35 else ([], [], [])
+
+                process.wait.side_effect = exited
+                with mock.patch.object(compare.subprocess, "Popen", return_value=process), \
+                     mock.patch.object(compare.select, "select", side_effect=readiness):
+                    if warm:
+                        with compare.worker({"warmup": True}, {}, None, Path(temporary) / "client.log"):
+                            pass
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "worker timed out"):
+                            with compare.worker({"warmup": False}, {}, None, Path(temporary) / "client.log"):
+                                self.fail("cold initialization must remain bounded")
+                self.assertTrue(process.stdin.closed)
+                self.assertTrue(process.stdout.closed)
+
+
 class GateTests(unittest.TestCase):
     def setUp(self):
         self.config = json.loads((Path(__file__).parent / "workloads.json").read_text())

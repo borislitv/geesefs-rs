@@ -415,7 +415,7 @@ def worker(spec, environment, group, log):
         try:
             process.stdin.write(json.dumps(spec) + "\n")
             process.stdin.flush()
-            if read_message(process, 30) != {"ready": True}:
+            if read_message(process, 600 if spec.get("warmup") else 30) != {"ready": True}:
                 raise RuntimeError("benchmark worker failed initialization")
             yield process
         finally:

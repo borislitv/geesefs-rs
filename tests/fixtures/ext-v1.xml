@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <IsTruncated>true</IsTruncated><NextContinuationToken>next&amp;token</NextContinuationToken>
+  <Contents><Key>pkgs/a%20b&amp;c</Key><Size>42</Size><ETag>&quot;etag&quot;</ETag>
+    <LastModified>2026-10-25T12:34:56.123Z</LastModified>
+    <Metadata><Name>mtime</Name><Value>123.456</Value></Metadata>
+    <Metadata><Name>empty</Name><Value></Value></Metadata>
+    <Metadata><Name>mtime</Name><Value>789</Value></Metadata>
+    <Future><Contents><Key>not-an-object</Key></Contents></Future>
+  </Contents>
+  <Contents><Key>pkgs/empty</Key><Size>0</Size></Contents>
+  <CommonPrefixes><Prefix>pkgs/sub/</Prefix></CommonPrefixes>
+</ListBucketResult>

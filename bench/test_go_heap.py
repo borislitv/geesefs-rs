@@ -74,6 +74,16 @@ class HeapHttpTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "profile.*limit"):
                 go_heap.read_go_heap(port)
 
+    def test_valid_profile_at_response_limit_is_accepted(self):
+        body = PROFILE + b" " * (go_heap.MAX_PROFILE_BYTES - len(PROFILE))
+        with server(body) as (port, _):
+            self.assertEqual(go_heap.read_go_heap(port)["response_bytes"], go_heap.MAX_PROFILE_BYTES)
+
+    def test_request_duration_is_elapsed_monotonic_time(self):
+        with server(PROFILE) as (port, _):
+            with mock.patch.object(go_heap.time, "monotonic", side_effect=[100, 100.125]):
+                self.assertEqual(go_heap.read_go_heap(port)["request_seconds"], 0.125)
+
     def test_unresponsive_endpoint_has_a_finite_request_timeout(self):
         with server(PROFILE, gate=threading.Event()) as (port, _):
             with self.assertRaises(TimeoutError):
@@ -110,9 +120,20 @@ class HeapSeriesTests(unittest.TestCase):
                 self.assertIsNone(result["allocator_steady_bytes"])
 
     def test_baseline_owned_gc_is_reported_without_changing_its_policy(self):
-        result = self.samples([(10, 20, 30, 0), (30, 40, 90, 1), (70, 80, 50, 1)])
+        result = self.samples([(10, 20, 30, 2), (30, 40, 90, 3), (70, 80, 50, 5)])
         self.assertEqual(result["allocator_peak_bytes"], 90)
-        self.assertEqual(result["allocator_forced_gc_count"], 1)
+        self.assertEqual(result["allocator_forced_gc_count"], 3)
+
+    def test_two_samples_including_window_boundaries_are_sufficient(self):
+        result = self.samples([(10, 20, 30, 0), (90, 100, 90, 0)])
+        self.assertEqual(result["allocator_samples"], 2)
+        self.assertEqual(result["allocator_peak_bytes"], 90)
+        self.assertEqual(result["allocator_steady_bytes"], 90)
+
+    def test_nonpositive_interval_cannot_start_a_busy_poll_loop(self):
+        for interval in (0, -1):
+            with self.subTest(interval=interval), self.assertRaises(ValueError):
+                go_heap.GoHeapSampler(12345, self.trace, interval=interval)
 
     def test_decreasing_gc_counter_invalidates_series(self):
         with self.assertRaisesRegex(RuntimeError, "counter decreased"):
@@ -143,3 +164,5 @@ class HeapSeriesTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertIn("fixture pprof unavailable", rows[0]["error"])
         self.assertNotIn("memstats", rows[0])
+        with self.assertRaisesRegex(RuntimeError, "fixture pprof unavailable"):
+            go_heap.GoHeapSampler(12345, self.trace).metrics(0, 10 ** 30)

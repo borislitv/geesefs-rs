@@ -10,6 +10,8 @@ Use Rust 1.96.0+ with rustfmt/clippy, Python 3.12+ and the public dependencies f
 `requirements-fixture.txt`. The idle flush-cache policy passes 211 Rust cases,
 formatting, all-target/all-feature warning-denying Clippy and the public-source
 audit in Kubernetes. The unchanged runner also passes 57 Python cases.
+Default and System-allocator ThinLTO builds pass; the default release passes
+30 backend-contract, cache-loan and read-view cases.
 These checks are not full reference parity or production acceptance.
 
 ```bash
@@ -66,3 +68,10 @@ Actual-service IAM/SSE/signing/PATCH, imported multipart layouts, full CLI parit
 and broader durability cases remain open. Aiohttp is not literal nginx; no
 all-xfstests pass is claimed. CI covers deterministic checks, not mounted or
 performance acceptance. See [compatibility](compatibility.md) for the inventory.
+
+The cache-policy release separately completes 120 healthy-warm four-binary records
+with 30 frozen generations verified, then 60 persistent mixed cycles per binary
+(1,440 checked passes). Independent raw-series analysis verifies fixed work,
+unchanged budgets and quota/memory counters. Rare successful 30-second Rust reads,
+other adverse metrics and unisolated observer cost keep performance unaccepted.
+These healthy runs do not close the known mounted compatibility/failure gaps.

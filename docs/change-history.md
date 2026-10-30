@@ -95,8 +95,11 @@ rather than increasing retries until a different state happens to pass.
 ## Idle flush-capacity cache policy, 2026-10-30
 
 Fixed-binary native controls confirm repeated warm random GETs in Rust while both
-Go references issue none. CPU profiles and complete FUSE/transport joins locate
-the corresponding waits without quota throttling or memory reclaim. Observers
+Go references issue none. These controls/profiles disable Go's allocation-triggered
+GC threshold with `--gc-interval 0`, retaining pressure GC; their scope is configured
+diagnosis rather than default-policy comparative acceptance. CPU profiles and
+complete FUSE/transport joins locate the corresponding waits without quota
+throttling or memory reclaim. Observers
 add measurable CPU/time, and the profiles do not identify a single SDK defect.
 Exact-version upstream discussions and supported Tokio APIs were checked first.
 
@@ -112,11 +115,37 @@ all-feature Clippy and the public-source audit. Five deliberate faults fail the
 intended assertions: disabled lending, exported loan owner, omitted revocation,
 dropped upload activity and omitted reopen reset. Sources are restored and tests
 rerun. The history test now forces cache eviction independently of its old cap.
+Default and System-allocator ThinLTO releases build successfully. The default
+release also passes 30 backend, cache-loan and read-view contract cases.
 Quality tools report complexity without Rust coverage; CRAP remains unavailable,
 and a mutation-site scan is not a whole-repository mutation score. Mounted
 comparative performance, sustained memory and compatibility remain separate gates.
 
-## Current work and open gates
+## Cache-policy measurement and remaining waits, 2026-10-30
+
+The versioned default-GC comparison completes 120 healthy-warm records on four
+binaries, with all byte checks and 30 frozen generations verified. Candidate warm
+random GETs are zero versus 3,380–3,389 for its predecessor. Random throughput
+improves, but tails, concurrency and memory still lose agreed gates. Mean writer
+p99 also hides an unfavorable independently pooled p99. The latest README uses
+total checked work / summed measured time for throughput, keeping mean rates,
+variance and every outlier in retained evidence.
+
+The first default-GC attempt had stopped after 47 records on memory pressure;
+backend working files outlived the paired workload. Scoped per-group bucket
+lifetime removes that imbalance in the new configuration without raising payload
+or weakening the resource gate. It is not a source optimization. The earlier
+GC-threshold-disabled diagnostic and incomplete/rejected attempts are retained.
+
+All four binaries also complete 60 mixed cycles / 360 passes each. Candidate Rust
+takes 709.11 seconds versus predecessor 873.78 and both Go at 600.00; its late RSS
+still exceeds experimental Go. Raw serial latencies expose 11/16 approximately
+30-second successful reads in candidate/predecessor and none in either Go. Quota,
+memory-pressure and reclaim counters are clean, but I/O waits are substantial.
+Their causal stage remains unproven. Independent whole-series accounting replaces
+bounded-tail means for this checkpoint; no plateau or overall acceptance follows.
+
+## Earlier measurements and open gates
 
 The completed 2026-10-30 native operation matrix retains all 210 records: 190
 correct and 20 Go open-file fsync-recovery failures. It exposes a severe warm

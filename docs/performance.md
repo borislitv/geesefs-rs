@@ -1,10 +1,10 @@
 # Performance acceptance: UNACCEPTED
 
-The last complete representative matrix and subsequent persistent mixed-mount
-observation are summarized in the [README](../README.md). Warm random reads lose
-substantially to both Go references; lower selected RSS/CPU does not compensate.
-The mixed run completes the same work more slowly and establishes no memory
-plateau. Full compatibility and comparative acceptance remain open. Cold-start
+The complete healthy-warm cache-policy comparison and persistent mixed-mount
+observation are summarized in the [README](../README.md). Repeated warm-random
+GETs disappear, but tails, concurrent reads, sustained rate and memory still lose
+selected gates against Go. The mixed run establishes no memory plateau.
+Full compatibility and comparative acceptance remain open. Cold-start
 superiority is not required. See [next work](next-work.md) for confirmed causes
 and [change history](change-history.md) for corrections.
 
@@ -24,12 +24,21 @@ and [change history](change-history.md) for corrections.
   backend throttling qualifies sequential/eviction results. Persistent/observer
   diagnostics raise backend/parent CPU to 16/32 without changing application or
   filesystem/client budgets. Verify actual limits and pressure on every fixture.
+  The latest four-binary comparison instead uses no CPU quota, eight runtime
+  workers and 16/12/32 GiB memory maxima for filesystem/client, backend and parent.
+  Backend data lives for one paired workload group, with full generation checks
+  before scoped bucket cleanup; no global caches are dropped.
 - Rotate implementation order and repeat fresh/warm phases on immutable data.
   Verify full bytes and listings before treating a phase as comparable.
 - Report throughput and p50/p95/p99, daemon/client user/system CPU, whole-cgroup
   CPU and throttling, peak/steady RSS, allocator accounting, cgroup/file/kernel
   memory separately. Missing metrics remain missing. RSS is not cgroup memory;
   final-fifth RSS is not proof of a plateau; wall time is not CPU cost.
+- Keep arithmetic mean rates separate from total work divided by total measured
+  time. The latest README uses the latter for throughput, but still reports mean
+  run percentiles. Rare 30-second successful reads make the distinction material:
+  candidate sequential mean rate is 238.84 MiB/s, whereas total-work/time is 115.93.
+  Preserve both, all repetitions, raw outliers and independently pooled tails.
 - Retain unfavorable samples, dependency failures and incomplete attempts outside
   source control. Instrumented profiles establish scoped observations, not
   acceptance timing or a percentage attribution of global p99.
@@ -60,6 +69,15 @@ use the separately described [fixture](immutable-read-dataset.md).
 
 ## Current attribution target
 
+The new comparison retains five rare approximately 30-second successful serial
+reads in candidate Rust and twelve in its predecessor, with none in Go. The
+persistent run retains eleven and sixteen respectively. P99 alone does not show
+these rare stalls. Filesystem/client I/O PSI-some is substantial despite zero
+quota throttling, memory pressure and reclaim; it is not proof of physical backend
+disk pressure. Correlate FUSE/SDK/body waits and allocation ownership before a
+runtime correction. `Filesystem::admit` has a 30-second admission timeout, but a
+matching duration alone does not establish it as the cause.
+
 Matched initial-read socket/FUSE joins locate extra Rust client work before GET
 write and after required socket bytes. Header wait is similar to experimental Go
 in that capture; this does not yet identify the responsible scheduler, admission,
@@ -73,24 +91,37 @@ Source documentation keeps conclusions and reasons. The operator-requested
 README checkpoint contains aggregate timing/RSS/CPU tables; per-run results,
 expanded JSON exports, generated flamegraphs and execution journals stay ignored.
 
-## Executable identity for the README checkpoint
+## Executable identities
 
-The Rust runtime is `2bf8184` with release profile `5d970ff`; later runner/docs
-commits do not change compiled inputs. These are exact retained SHA256 values:
+The predecessor runtime is `2bf8184` with release profile `5d970ff`. The candidate
+changes the cache policy at `35ee52c`; subsequent documentation changes do not
+change compiled inputs. These are exact retained SHA256 values:
 
 | Implementation | Executable SHA256 |
 | --- | --- |
 | Rust, default jemalloc / ThinLTO | `9ffb86df6efa84b989d8deeaff6fdce6789dee6af9a40478a938955a4b8b38c0` |
+| Rust, idle-flush cache policy / default jemalloc / ThinLTO | `b7d1ec6dfe850c829de7ce92d509940fe49f00512e85496081821ed0b881bdf8` |
 | Go experimental | `7ad836e0bdd23ea279bb236627e9b130d11c174ae649c7582213a83e5d11a28b` |
 | Go packaged | `e04492363d29985ab1f74521482a01a3c6f7fdeeed35ad1ba0faa991370f4683` |
 
 Retained reports are `profiles-acceptance-native-matrix-v4-headroom/report.json`
 and `profiles-acceptance-long-v1/report.json`, with whole-series memory analysis
-in `profiles-acceptance-long-v1/whole-series-memory-summary.json`. They include
+in `profiles-acceptance-long-v1/whole-series-memory-summary.json` for the older
+checkpoint. The new reports are
+`profiles-proven-compare-loans-v4-isolated/report.json` and
+`profiles-proven-long-loans-v1/report.json`; independent outputs are
+`comparison-summary.json`, `whole-series-memory-summary.json` and
+`final-analysis.json` in their respective result directories. They include
 source/build identities, raw latencies, interval resource counters, failures and
 sampled allocator/process/cgroup memory. Private fixture orchestration is not a
 committed portable reproduction command; `bench/compare.py` above provides the
 public runner, but is not a claim to reproduce the private mixed/ablation harness.
+
+The idle-flush candidate is source commit `35ee52c7713c2dd29e6787a81f6ced867de2c1b6`,
+built with Rust 1.99.1 / LLVM 23.1.1. All 25 compiled inputs match that commit.
+Its System-allocator comparison build has SHA256
+`f5e0273f8fe1b29e5f5f881c5915094c716e8d45b653734cc58258631e5f4c0b`;
+building that feature is not a mounted performance result.
 
 ## Heap observation boundary
 
@@ -106,3 +137,12 @@ The original Go buffer pool itself invokes `debug.FreeOSMemory` at its unchanged
 allocation threshold and under pressure. Retain the resulting `NumForcedGC` delta;
 the prohibition concerns benchmark-triggered collection, not changing the
 reference's own policy or rejecting an otherwise valid reference observation.
+
+The earlier native screening, CPU/off-CPU profiles and first partial cache-policy
+comparison passed Go `--gc-interval 0`. That disables its default 250 MiB
+allocation-triggered collection threshold, although pressure GC remains enabled.
+Those runs establish configured diagnostics, not default-policy comparative
+acceptance. The complete pre-loan operation matrix and persistent observation did
+not override that threshold. Subsequent candidate comparisons remove the override
+and require `GOGC` and `GOMEMLIMIT` to be unset. Observer-triggered collection and
+reference-owned collection remain distinct.

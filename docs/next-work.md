@@ -7,10 +7,10 @@ it separates confirmed mechanisms from hypotheses. See the latest
 
 ## 1. Warm random reads: cache working-set eviction
 
-**Observed:** the complete five-repeat warm matrix gives Rust 1.01 MiB/s versus
-7.90/8.33 MiB/s for experimental/packaged Go. Mean run p99 is 7.428 ms versus
-1.026/0.897 ms; independently pooled p99 is 7.680 versus 0.764/0.886 ms.
-Concurrent-reader throughput and RSS also do not beat both references.
+**Observed before the correction:** the earlier five-repeat warm matrix gives
+Rust 1.01 MiB/s versus 7.90/8.33 MiB/s for experimental/packaged Go. Mean run p99
+is 7.428 ms versus 1.026/0.897 ms; independently pooled p99 is 7.680 versus
+0.764/0.886 ms. These measurements describe the unchanged predecessor.
 
 **Confirmed contributing mechanism:** `Filesystem::new` reserves 10 MiB for flush
 and 4 MiB for ingress at a 64 MiB total, leaving 50 MiB for clean/dirty/pinned data.
@@ -25,6 +25,8 @@ that every millisecond of mounted latency comes from the cache.
 
 **Subsequent attribution:** three rotated fixed-binary native controls make
 3,381–3,389 Rust GETs per 4,096 warm random reads; both Go references make zero.
+These controls and CPU/off-CPU captures pass Go `--gc-interval 0`; they are
+configured diagnostics, not evidence of unchanged-default Go performance.
 PID-scoped CPU profiles and complete GET/FUSE lifecycle joins show no reported
 sample/event loss, quota throttling, memory reclaim or OOM. Instrumented times are
 kept separate; scheduler wait and instrumentation overhead remain measurable.
@@ -39,28 +41,46 @@ recovery and FIFO/pinned ownership are tested. Optional refill does not initiate
 loans. The reopened-history test now creates real independent cache pressure
 instead of depending on an incidental old cache capacity.
 
-**Next:** compare the new release against its unchanged predecessor and both Go
-references on the same native workload, then repeat long-lived mixed work. Keep
-CPU, memory and latency regressions visible; passing the policy diagnostic alone
-does not close the observed performance gap.
+**Measured outcome:** the default-GC four-binary comparison completes all 120
+records and verifies all 30 generations. Candidate warm-random GETs are zero in
+all five repeats, versus 3,380–3,389 for the predecessor. Total-work/time throughput
+is 9.07 MiB/s versus Go 8.80/8.88, but mean run p99 still loses: 0.926 ms versus
+0.714/0.650. Concurrent throughput is 4.09 versus 4.41/4.35 MiB/s and uses more
+RSS/cgroup memory. Writer pooled p99 is 348.573 versus Go 288.321/347.198 ms;
+the favorable mean-run-p99 column cannot override this loss.
+
+**Next:** attribute concurrent/admission ownership, writer-tail regressions and
+the rare serial stalls below before another change. Keep the additional retained
+cache's memory tradeoff visible; reducing GETs alone does not close acceptance.
 
 ## 2. Persistent mixed mount misses its target rate
 
-**Observed:** all three implementations complete 60 cycles / 360 checked passes.
-Rust takes 885.09 s and misses the 10-second cycle target 58 times; experimental
-Go takes 600.01 s with no late cycles, packaged Go 600.00 s with one. Rust uses
-less process RSS/CPU, but late-half cgroup memory is 314.7 MiB versus experimental
-Go's 298.0 MiB. Different durations do not establish an equal-rate memory win.
+**Latest observed:** all four binaries complete 60 cycles / 360 checked passes.
+Candidate Rust takes 709.11 s versus predecessor 873.78 s and 600.00 s for both
+Go references. Late cycles are 58/54/0/0 respectively. Candidate peak RSS is lower
+than Go, but its whole-series late-half RSS is 232.1 MiB versus experimental Go's
+226.9 MiB; cgroup late means are 296.0 versus Go 300.1/300.2 MiB. Different
+durations and one fixed-order observation do not establish an equal-rate memory
+win or repeatability. The earlier 885.09-second Rust run remains retained under
+its different resource configuration.
 
-**Cause boundary:** static cache pressure is independently reproduced, but its
-share of mixed-cycle delay has not been isolated. A sampled late-half mean,
+**Cause boundary:** candidate/predecessor have 11/16 approximately 30-second
+successful serial reads; both Go have zero. Candidate sequential/eviction active
+times total 164.23/252.35 s; experimental Go totals 118.57/113.41 s. Persistent
+metadata also totals 35.65 s versus Go 2.90/2.88 s despite the faster short warm
+metadata checkpoint. Memory/quota counters remain clean, while filesystem/client
+I/O PSI-some reaches 57.9%/63.3% for candidate/predecessor. This identifies waits,
+not their responsible SDK, admission, FUSE or backend stage. P99 and mean rates
+hide rare stalls; retain raw calls, maxima and total-work/time rates. A matching
+30-second admission timeout is a hypothesis, not a proven cause. A sampled mean,
 linear slope or one persistent run does not prove a memory plateau or leak.
 
 **Where:** `src/filesystem.rs` read/refill/admission, `src/read.rs`, `src/cache.rs`,
 `src/main.rs` allocator observation; `bench/accounting.py` measurement scopes.
 
-**Next:** retain per-operation mixed-cycle latency and backend traffic; repeat
-with sufficient backend headroom and controlled observer overhead. Compare the
+**Next:** correlate the retained slow offsets/calls with scoped FUSE events,
+SDK/body progress and permit owners; observe a behavioral RED before fixing the
+responsible wait. Keep observer overhead controlled. Compare the
 same fixed work and the same offered rate separately. Keep whole-series daemon,
 client, allocator, cgroup, file and kernel memory; extend duration and repeats
 before claiming a plateau. Preserve baseline-owned Go GC.
@@ -73,6 +93,14 @@ After raising the parent to 24 CPU, the completed matrix still records backend
 throttling in sequential/eviction runs. Subsequent persistent/observer experiments
 use 32 CPU parent, 16 CPU backend and unchanged 8 CPU daemon/client limits.
 Resource enlargement is not a source optimization.
+
+The first default-GC candidate attempt stops after 47 completed records on the
+strict memory-pressure gate. Backend working files persist for the whole shared
+bucket lifetime. Their footprint falls after scoped bucket deletion, motivating
+one bucket per paired workload group, not higher application budgets. All 120
+records in the versioned isolated comparison pass byte/generation and quota/memory
+checks. CPU and I/O waits remain measured; the resource change is not a source
+performance improvement. The partial/rejected attempt remains retained.
 
 **Where:** `bench/compare.py::{cgroup,Sampler}`, `bench/go_heap.py`,
 `src/main.rs` optional statistics writer; fixture parent/backend limits.
@@ -147,8 +175,8 @@ shared failure as compatibility or pretend it is a Rust-only regression.
 
 - `bench/compare.py::Sampler.metrics` computes its `steady` memory fields from
   the latter half of a `deque(maxlen=1000)`, not the whole measurement's late
-  half once that buffer wraps. The README operation table calls this a late
-  window; the persistent table uses independent whole-series analysis instead.
+  half once that buffer wraps. The older operation checkpoint labels this a late
+  window. Latest README tables use independent full-raw-series analysis instead.
   Before using long-run `steady` fields in acceptance, replace this bounded-tail
   aggregation with an explicit whole-window/time-window contract and a regression
   that exceeds 1,000 samples. Otherwise an earlier sustained high-memory interval

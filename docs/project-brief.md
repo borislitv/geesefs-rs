@@ -113,7 +113,12 @@ attribution. Subsequent fixed-binary native GET/FUSE profiles confirm the repeat
 warm cache misses without quota throttling or reclaim. Required admission can now
 use revocable idle flush capacity without changing the total payload limit;
 owned replies and active uploads retain their separate progress guarantees.
-Comparative acceptance of this policy still requires representative measurements.
+The subsequent 120-record healthy-warm comparison eliminates repeated random GETs
+but retains tail, concurrent-read and memory losses. All four binaries complete
+60 persistent mixed cycles; candidate Rust takes 709 seconds versus 600 for both
+Go references. Rare successful approximately 30-second Rust reads are a new
+attribution priority, not yet a proven SDK/admission defect. Full comparative and
+compatibility acceptance remains open; current numbers and scopes are in the README.
 
 The first-stage scope still excludes FUSE passthrough and disk-backed caching.
 No single profile proves that every possible optimization is exhausted; report

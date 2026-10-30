@@ -92,14 +92,39 @@ handle, `forceFlush` or memory pressure. Waiting past the retry interval does no
 by itself restore progress. Preserve those failures and the original workload
 rather than increasing retries until a different state happens to pass.
 
+## Idle flush-capacity cache policy, 2026-10-30
+
+Fixed-binary native controls confirm repeated warm random GETs in Rust while both
+Go references issue none. CPU profiles and complete FUSE/transport joins locate
+the corresponding waits without quota throttling or memory reclaim. Observers
+add measurable CPU/time, and the profiles do not identify a single SDK defect.
+Exact-version upstream discussions and supported Tokio APIs were checked first.
+
+The new public-behavior regression fails with 192 rather than 96 reads for a
+12 MiB clean working set at an unchanged 16 MiB payload limit. Required admission
+now transfers exclusive cache backings into idle flush permits instead of losing
+those bytes. Upload activity revokes loans and follows cloned budgets/bodies;
+owned replies copy loaned bytes into data admission. No total/dirty limit or
+durability barrier changes. Optional speculation keeps its previous policy.
+
+Kubernetes verification passes 211 Rust cases, 57 Python cases, fmt, all-target/
+all-feature Clippy and the public-source audit. Five deliberate faults fail the
+intended assertions: disabled lending, exported loan owner, omitted revocation,
+dropped upload activity and omitted reopen reset. Sources are restored and tests
+rerun. The history test now forces cache eviction independently of its old cap.
+Quality tools report complexity without Rust coverage; CRAP remains unavailable,
+and a mutation-site scan is not a whole-repository mutation score. Mounted
+comparative performance, sustained memory and compatibility remain separate gates.
+
 ## Current work and open gates
 
 The completed 2026-10-30 native operation matrix retains all 210 records: 190
 correct and 20 Go open-file fsync-recovery failures. It exposes a severe warm
 random loss despite selected sequential/writer gains. Deterministic traces
 confirm repeated backend reads under the static data-lane working-set pressure;
-they do not isolate all mounted latency. Idle-flush borrowing has only a
-diagnostic RED and is not implemented or included as a failing shipped test.
+they do not isolate all mounted latency. The idle-flush policy above now passes
+that diagnostic and the ownership regressions; these older operation/mixed
+measurements describe its unchanged predecessor, not the new release.
 
 A persistent mixed mount completes 60 cycles / 360 checked passes on each binary.
 Rust takes 885 seconds versus about 600 for both Go references, despite lower

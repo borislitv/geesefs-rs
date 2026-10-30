@@ -41,6 +41,18 @@ Contiguous consumption hints protect foreign unread cache backing only during
 optional eviction; they never pin required admission. Reset adaptive Pattern on
 zero-to-one open without discarding payload or active-reader history.
 
+The idle flush-reserve cache policy uses the selected Tokio 1.54.1
+[`RwLock`](https://github.com/tokio-rs/tokio/blob/tokio-1.54.1/tokio/src/sync/rwlock.rs)
+and existing owned semaphore permits, not a new priority allocator. Concurrent
+uploads hold shared `read_owned` activity guards; cache lending only attempts
+`try_write` synchronously. The owned guard follows cloned upload budgets into
+request bodies and child jobs. Lending must first acquire the unchanged flush
+byte permits and may move only an exclusively cache-owned complete allocation.
+An owned reply must copy loaned bytes into its already admitted data allocation;
+it cannot export a revocable flush owner. Required admission alone initiates
+loans; optional refill retains its nonblocking data-lane policy. Ownership tests
+and measured whole-filesystem acceptance remain separate gates.
+
 ## Applicable read-path upstream findings
 
 - [Mountpoint prefetch](https://github.com/awslabs/mountpoint-s3/blob/f58dbc52fec09394ee60d285bec1c3e082f06391/mountpoint-s3/src/prefetch.rs#L218-L289)
@@ -108,3 +120,19 @@ exact versions, profiles, upstream issue applicability and supported APIs before
 another workaround. Do not remove integrity, freshness, ownership or durability
 contracts for speed. [FUSE passthrough](fuse-passthrough.md) and disk caching remain
 deferred. Keep new findings concise; detailed profiles/results stay untracked.
+
+The subsequent fixed-binary warm-random controls and FUSE/GET joins show repeated
+Rust cache misses where both Go references issue no GET. This is an application
+capacity-policy difference, not evidence of a single SDK defect. GeeseFS
+[#70](https://github.com/yandex-cloud/geesefs/issues/70) explains that its payload
+limit excludes metadata/runtime overhead; lowering that limit is not a fix here.
+[#82](https://github.com/yandex-cloud/geesefs/issues/82)'s metadata-cache limit was
+delivered in 0.37.0. [#117](https://github.com/yandex-cloud/geesefs/issues/117)
+concerns deferred disk caching; closed
+[#172](https://github.com/yandex-cloud/geesefs/issues/172) has no maintainer
+diagnosis or delivered correction. SDK
+[#1349](https://github.com/awslabs/aws-sdk-rust/issues/1349)'s large-object/network
+concurrency discussion is not a ready-made small-random latency fix.
+[#958](https://github.com/awslabs/aws-sdk-rust/issues/958)'s TCP_NODELAY setting is
+already enabled by the selected transport. No dependency replacement follows
+from these discussions.

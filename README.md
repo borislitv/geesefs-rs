@@ -23,10 +23,11 @@ cargo test --locked --all-targets --all-features
 
 The foreground binary integrates fuser, SDK-backed S3, bounded payload ownership,
 paged namespace operations and generation-aware sparse/truncate/fsync writes.
-The latest runtime correction resets adaptive read history when a closed stream
-reopens, while retaining cached payload and active-reader history. Selected reads
-improve, but the representative warm random workload still loses substantially
-to both Go references. See [architecture](docs/architecture.md) and
+Required admission can retain exclusive clean cache backings in revocable idle
+flush capacity without increasing the payload limit; upload progress and owned
+reply charges remain protected. The completed pre-loan benchmark checkpoint below
+still loses substantially on warm random reads; the new policy is not a measured
+acceptance claim. See [architecture](docs/architecture.md) and
 [next work and confirmed causes](docs/next-work.md).
 
 ## Latest completed measurements — 2026-10-30

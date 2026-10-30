@@ -23,15 +23,26 @@ that every millisecond of mounted latency comes from the cache.
 **Where:** `src/filesystem.rs::{new,admit,try_refill_admission,load_window}`,
 `src/cache.rs::{insert,evict_lru}`, `src/read.rs::Pattern`.
 
-**Next:** correlate retained ranges, backing charges and real mounted GET counts;
-test a minimal policy change against the same trace and both Go references.
-A proposed idle-flush borrowing policy has an observed diagnostic RED: a 12 MiB
-clean working set at a 16 MiB total makes 192 rather than 96 backend calls across
-two passes. This is a desired new policy, not a broken existing guarantee; its
-test/source is retained privately, and no implementation is delivered.
-Before borrowing, prove writer progress, cancellation/loan release, full pinned
-backing charge and existing FIFO invariants. Do not simply enlarge the data lane
-or remove the reserve. Reuse the maintained permit/cache APIs first.
+**Subsequent attribution:** three rotated fixed-binary native controls make
+3,381–3,389 Rust GETs per 4,096 warm random reads; both Go references make zero.
+PID-scoped CPU profiles and complete GET/FUSE lifecycle joins show no reported
+sample/event loss, quota throttling, memory reclaim or OOM. Instrumented times are
+kept separate; scheduler wait and instrumentation overhead remain measurable.
+Transport timing is not proof of a single SDK defect or every internal await.
+
+**Correction:** the 12 MiB clean / 16 MiB total diagnostic first fails with 192
+rather than 96 backend calls. Required admission now transfers exclusive clean
+owners into idle flush capacity, using existing Tokio/lru ownership APIs. Total
+and lane limits remain unchanged; writers revoke loans, and owned replies cannot
+export a revocable backing. Cancellation, independent flush concurrency, failure
+recovery and FIFO/pinned ownership are tested. Optional refill does not initiate
+loans. The reopened-history test now creates real independent cache pressure
+instead of depending on an incidental old cache capacity.
+
+**Next:** compare the new release against its unchanged predecessor and both Go
+references on the same native workload, then repeat long-lived mixed work. Keep
+CPU, memory and latency regressions visible; passing the policy diagnostic alone
+does not close the observed performance gap.
 
 ## 2. Persistent mixed mount misses its target rate
 

@@ -355,7 +355,7 @@ async fn sequential_128_kib_reads_track_cache_hits_and_keep_adaptive_windows() {
         );
         let budgets = fs.effective_budgets();
         assert!(budgets.data_used_bytes <= budgets.data_shared_bytes);
-        assert_eq!(budgets.read_cache_policy_bytes, budgets.data_shared_bytes);
+        assert_eq!(budgets.read_cache_policy_bytes, 60 * MIB);
         assert_eq!(budgets.payload_limit_bytes, 64 * MIB);
     }
     assert!(
@@ -502,7 +502,7 @@ async fn requested_hundred_mib_window_is_fetched_in_configured_chunks_and_hits_f
     assert_eq!(budgets.read_parallel_chunk_bytes, 20 * MIB);
     assert!(budgets.max_effective_window_bytes >= 100 * MIB);
     assert!(budgets.data_used_bytes <= budgets.data_shared_bytes);
-    assert_eq!(budgets.read_cache_policy_bytes, budgets.data_shared_bytes);
+    assert_eq!(budgets.read_cache_policy_bytes, 240 * MIB);
     assert_eq!(budgets.payload_limit_bytes, 256 * MIB);
     serde_json::to_string(&budgets).unwrap();
 }

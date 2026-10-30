@@ -19,7 +19,7 @@ use crate::{
 };
 use fuser::{FileAttr, FileType};
 use futures_util::{StreamExt, stream::FuturesUnordered};
-use tokio::sync::Semaphore;
+use tokio::sync::{RwLock, Semaphore};
 
 pub struct Filesystem {
     pub config: Arc<Config>,
@@ -29,6 +29,7 @@ pub struct Filesystem {
     data: Budget,
     cache: Mutex<crate::cache::ReadCache>,
     flush_lane: Budget,
+    flush_activity: Arc<RwLock<()>>,
     flushers: Arc<Semaphore>,
     upload_admission: write::UploadAdmission,
     metadata_slots: Arc<Semaphore>,
@@ -50,12 +51,13 @@ pub struct DirEntry {
 }
 
 /// Effective owner budgets, not RSS or allocator measurements. The cache shares
-/// the full data lane with dirty/pinned/temporary bytes; no hidden half-cache cap.
+/// the data lane and can borrow revocable, idle flush capacity for clean owners.
 #[derive(Debug, serde::Serialize)]
 pub struct EffectiveBudgets {
     pub payload_limit_bytes: usize,
     pub data_shared_bytes: usize,
     pub read_cache_policy_bytes: usize,
+    pub read_cache_loaned_bytes: usize,
     pub ingress_bytes: usize,
     pub flush_bytes: usize,
     pub data_used_bytes: usize,
@@ -98,7 +100,8 @@ impl Filesystem {
         EffectiveBudgets {
             payload_limit_bytes: self.ingress.limit() + self.data.limit() + self.flush_lane.limit(),
             data_shared_bytes: self.data.limit(),
-            read_cache_policy_bytes: self.data.limit(),
+            read_cache_policy_bytes: self.data.limit() + self.flush_lane.limit(),
+            read_cache_loaned_bytes: self.cache.lock().unwrap().loaned_bytes(),
             ingress_bytes: self.ingress.limit(),
             flush_bytes: self.flush_lane.limit(),
             data_used_bytes: self.data.used(),
@@ -165,10 +168,11 @@ impl Filesystem {
             ingress: Budget::new(ingress_bytes)?,
             data: Budget::new(data_bytes)?,
             cache: Mutex::new(crate::cache::ReadCache::with_entry_limit(
-                data_bytes as u64,
+                (data_bytes + flush_bytes) as u64,
                 config.entry_limit as usize,
             )),
             flush_lane: Budget::new(flush_bytes)?,
+            flush_activity: Arc::new(RwLock::new(())),
             flushers: Arc::new(Semaphore::new(config.max_flushers)),
             upload_admission: write::UploadAdmission::new(&config),
             metadata_slots: Arc::new(Semaphore::new(config.max_requests)),
@@ -1263,7 +1267,7 @@ impl Filesystem {
                 // Pinned borrowers retain their permits; FIFO waiters stay ahead.
                 {
                     let cache = self.cache.lock().unwrap();
-                    while cache.evict_lru() {
+                    while self.try_cache_loan(&cache) || cache.evict_lru() {
                         if let Ok(reservation) = self.data.try_reserve(size) {
                             return Ok(reservation);
                         }
@@ -1282,6 +1286,14 @@ impl Filesystem {
             }
             Err(error) => Err(error),
         }
+    }
+
+    fn try_cache_loan(&self, cache: &crate::cache::ReadCache) -> bool {
+        // Never wait for optional capacity or lend while an upload/body owns it.
+        let Ok(_activity) = self.flush_activity.try_write() else {
+            return false;
+        };
+        cache.loan_lru(&self.flush_lane)
     }
 
     pub async fn write(&self, ino: u64, offset: u64, bytes: &[u8]) -> Result<usize> {
@@ -1396,10 +1408,16 @@ impl Filesystem {
             .acquire_owned()
             .await
             .map_err(|_| Error::Cancelled)?;
+        // Shared guards preserve independent flush concurrency. The budget carries
+        // activity into cloned SDK bodies and jobs, including cancellation cleanup.
+        let lane = self
+            .flush_lane
+            .with_activity(self.flush_activity.clone().read_owned().await);
+        self.cache.lock().unwrap().reclaim_loans();
         write::flush_locked(
             &self.store,
             node,
-            &self.flush_lane,
+            &lane,
             flusher,
             &self.config,
             &self.upload_admission,

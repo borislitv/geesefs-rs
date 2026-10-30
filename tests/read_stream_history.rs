@@ -36,12 +36,21 @@ async fn a_reopened_stream_does_not_inherit_the_previous_streams_large_window() 
         [(0, MIB), (MIB as u64, 4 * MIB)]
     );
     fs.release(ino);
+    // Force a real miss independently of whether idle flush capacity retains
+    // the original window. Reopen policy must not rely on a particular cache cap.
+    store.seed("pressure", &vec![b'p'; 16 * MIB]);
+    let pressure = fs.lookup(1, "pressure").await.unwrap().ino;
+    for offset in (0..16 * MIB).step_by(MIB) {
+        let block = fs.read(pressure, offset as u64, MIB).await.unwrap();
+        assert!(block.as_slice().iter().all(|&byte| byte == b'p'));
+    }
+    let before = store.read_ranges.lock().unwrap().len();
     fs.open(ino, false).unwrap();
     let first = fs.read(ino, 0, STEP).await.unwrap();
     assert_eq!(first.as_slice(), &bytes[..STEP]);
     assert_eq!(
-        *store.read_ranges.lock().unwrap(),
-        [(0, MIB), (MIB as u64, 4 * MIB), (0, MIB)],
+        store.read_ranges.lock().unwrap()[before..],
+        [(0, MIB)],
         "a new stream must start at the configured initial window, not the previous open's promoted window"
     );
     fs.release(ino);

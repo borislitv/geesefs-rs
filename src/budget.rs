@@ -1,6 +1,6 @@
 use std::{ops::Range, sync::Arc};
 
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedRwLockReadGuard, OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{Error, Result};
 
@@ -10,6 +10,7 @@ use crate::error::{Error, Result};
 pub struct Budget {
     semaphore: Arc<Semaphore>,
     limit: usize,
+    _activity: Option<Arc<OwnedRwLockReadGuard<()>>>,
 }
 
 impl Budget {
@@ -43,7 +44,15 @@ impl Budget {
         Ok(Self {
             semaphore: Arc::new(Semaphore::new(limit)),
             limit,
+            _activity: None,
         })
+    }
+
+    /// Keep upload activity alive in cloned bodies/jobs after caller cancellation.
+    pub(crate) fn with_activity(&self, activity: OwnedRwLockReadGuard<()>) -> Self {
+        let mut budget = self.clone();
+        budget._activity = Some(Arc::new(activity));
+        budget
     }
 
     pub async fn reserve(&self, size: usize) -> Result<Reservation> {
@@ -91,6 +100,7 @@ struct Allocation {
     data: Box<[u8]>,
     _reservation: Reservation,
     _owner: Option<Reservation>,
+    loaned: bool,
 }
 
 impl Reservation {
@@ -147,6 +157,7 @@ impl Block {
                 data,
                 _reservation: reservation,
                 _owner: None,
+                loaned: false,
             }),
             range,
         }
@@ -171,6 +182,30 @@ impl Block {
         assert_eq!(self.range, 0..allocation.data.len());
         allocation._owner = Some(owner);
         self
+    }
+
+    pub(crate) fn is_loaned(&self) -> bool {
+        self.allocation.loaned
+    }
+
+    /// Transfer a complete, exclusively cache-owned backing; never add capacity.
+    pub(crate) fn try_loan(&mut self, lane: &Budget) -> bool {
+        let Some(allocation) = Arc::get_mut(&mut self.allocation) else {
+            return false;
+        };
+        let Some(owner) = allocation._owner.as_mut() else {
+            return false;
+        };
+        if allocation.loaned || self.range != (0..allocation.data.len()) {
+            return false;
+        }
+        assert_eq!(owner.size(), allocation.data.len());
+        let Ok(loan) = lane.try_reserve(owner.size()) else {
+            return false;
+        };
+        *owner = loan;
+        allocation.loaned = true;
+        true
     }
     pub fn as_slice(&self) -> &[u8] {
         &self.allocation.data[self.range.clone()]

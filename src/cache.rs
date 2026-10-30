@@ -6,10 +6,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::budget::{Block, Reservation};
+use crate::budget::{Block, Budget, Reservation};
 
 /// Best-effort retained policy. Blocks remain charged to their allocation budget
-/// after eviction while any reader pins them. Cache admission never reserves bytes.
+/// after eviction while any reader pins them. Insertion never reserves bytes;
+/// idle-lane loans only transfer an exclusively owned allocation's existing charge.
 type Key = (u64, u64, u64);
 
 pub(crate) fn first_gap(
@@ -37,12 +38,16 @@ struct State {
     entries: LruCache<Key, Block>,
     index: BTreeMap<Key, Span>,
     weight: u64,
+    loaned: usize,
 }
 
 impl State {
     fn removed(&mut self, key: Key, block: Block) {
         self.index.remove(&key);
         self.weight -= block.as_slice().len() as u64;
+        if block.is_loaned() {
+            self.loaned -= block.as_slice().len();
+        }
     }
 
     fn evict_lru(&mut self) -> bool {
@@ -71,6 +76,7 @@ impl ReadCache {
                 entries: LruCache::sparse(NonZeroUsize::new(entry_limit.max(1)).unwrap()),
                 index: BTreeMap::new(),
                 weight: 0,
+                loaned: 0,
             })),
             capacity,
         }
@@ -145,7 +151,7 @@ impl ReadCache {
         reply: Reservation,
     ) -> Option<Block> {
         let (mut block, mut relative) = self.covering(inode, generation, offset, 1)?;
-        if block.as_slice().len() - relative >= length {
+        if block.as_slice().len() - relative >= length && !block.is_loaned() {
             self.consumed(
                 inode,
                 generation,
@@ -235,6 +241,45 @@ impl ReadCache {
         self.state.lock().unwrap().evict_lru()
     }
 
+    /// Keep LRU bytes by moving only their exclusive backing's existing charge.
+    pub(crate) fn loan_lru(&self, lane: &Budget) -> bool {
+        let mut state = self.state.lock().unwrap();
+        let loaned = state
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|(_, block)| !block.is_loaned())
+            .and_then(|(_, block)| block.try_loan(lane).then_some(block.as_slice().len()));
+        if let Some(length) = loaned {
+            state.loaned += length;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn loaned_bytes(&self) -> usize {
+        self.state.lock().unwrap().loaned
+    }
+
+    /// Filesystem serializes this with all cache reads and lending attempts.
+    pub(crate) fn reclaim_loans(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.loaned == 0 {
+            return;
+        }
+        let keys: Vec<_> = state
+            .entries
+            .iter()
+            .filter(|(_, block)| block.is_loaned())
+            .map(|(&key, _)| key)
+            .collect();
+        for key in keys {
+            let block = state.entries.pop(&key).expect("loaned cache owner");
+            state.removed(key, block);
+        }
+    }
+
     /// Speculation cannot fund itself with another reader's unconsumed data.
     pub(crate) fn evict_consumed_lru(&self, inode: u64, generation: u64, consumed: u64) -> bool {
         let mut state = self.state.lock().unwrap();
@@ -280,5 +325,6 @@ impl ReadCache {
         state.entries.clear();
         state.index.clear();
         state.weight = 0;
+        state.loaned = 0;
     }
 }

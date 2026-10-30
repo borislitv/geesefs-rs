@@ -7,9 +7,9 @@ served mounts or production credentials. Use finite subprocess/operation deadlin
 ## Library and contract checks
 
 Use Rust 1.96.0+ with rustfmt/clippy, Python 3.12+ and the public dependencies from
-`requirements-fixture.txt`. The latest verified runtime is `2bf8184`: 207 Rust
-cases, formatting, warning-denying Clippy and public-source audit passed.
-Runner corrections through `1ecc1b4` pass 57 Python cases and the source audit.
+`requirements-fixture.txt`. The idle flush-cache policy passes 211 Rust cases,
+formatting, all-target/all-feature warning-denying Clippy and the public-source
+audit in Kubernetes. The unchanged runner also passes 57 Python cases.
 These checks are not full reference parity or production acceptance.
 
 ```bash
@@ -29,9 +29,14 @@ selected faults/mutations verify sensitivity and must be restored before rerunni
 Broad mutation coverage, coverage/CRAP and three duplicate candidates remain open.
 
 Key read regressions live in `tests/read_windows.rs`, `read_reply.rs`,
-`read_refill.rs`, `read_stream_history.rs`, `receive_ownership.rs` and
+`read_refill.rs`, `read_stream_history.rs`, `cache_loans.rs`, `receive_ownership.rs` and
 `backend_contract.rs`. Keep FIFO progress, full backing charges, If-Match,
 generation, checksum, cancellation and caller-owned task lifetimes intact.
+The loan tests verify cache reuse without a higher total, owned reply isolation,
+writer/multipart progress, concurrent uploads, cancellation and failed-fsync retry.
+Five deliberate semantic faults trigger the intended assertions, including the
+history-reset regression after explicit independent cache pressure. These checks
+are not a whole-repository mutation or coverage/CRAP result.
 
 ## Disposable mounted verification
 

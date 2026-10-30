@@ -109,7 +109,11 @@ These observations do not pass acceptance or explain every wait. The subsequent
 read and sustained-rate losses. Current checkpoint tables are in the
 [README](../README.md); [architecture](architecture.md) describes the delivered
 design and [next work](next-work.md) records confirmed causes and unresolved
-attribution. The cache-loan proposal is not implemented.
+attribution. Subsequent fixed-binary native GET/FUSE profiles confirm the repeated
+warm cache misses without quota throttling or reclaim. Required admission can now
+use revocable idle flush capacity without changing the total payload limit;
+owned replies and active uploads retain their separate progress guarantees.
+Comparative acceptance of this policy still requires representative measurements.
 
 The first-stage scope still excludes FUSE passthrough and disk-backed caching.
 No single profile proves that every possible optimization is exhausted; report

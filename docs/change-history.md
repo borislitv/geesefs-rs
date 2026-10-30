@@ -94,6 +94,24 @@ rather than increasing retries until a different state happens to pass.
 
 ## Current work and open gates
 
+The completed 2026-10-30 native operation matrix retains all 210 records: 190
+correct and 20 Go open-file fsync-recovery failures. It exposes a severe warm
+random loss despite selected sequential/writer gains. Deterministic traces
+confirm repeated backend reads under the static data-lane working-set pressure;
+they do not isolate all mounted latency. Idle-flush borrowing has only a
+diagnostic RED and is not implemented or included as a failing shipped test.
+
+A persistent mixed mount completes 60 cycles / 360 checked passes on each binary.
+Rust takes 885 seconds versus about 600 for both Go references, despite lower
+process RSS and CPU. Whole-series cgroup/file/kernel accounting prevents calling
+that an all-metrics memory win or plateau. Parent/backend quota interference was
+measured and versioned separately; increased headroom is not a code improvement.
+The observer-on/off experiment stops at its bounded pre-mount deadline after 133
+correct records, rather than completing 180; it remains partial attribution.
+The [README](../README.md) contains the requested aggregate checkpoint; detailed
+evidence stays ignored. [Architecture](architecture.md) describes delivered
+ownership and [next work](next-work.md) separates confirmed causes from hypotheses.
+
 Release builds now use ThinLTO and one codegen unit to optimize across the SDK
 and application crate boundaries. With unchanged runtime sources, four rotated
 mount pairs improve throughput, p50/p95/p99 and CPU versus the former Rust build
@@ -110,8 +128,10 @@ boundaries do not establish an SDK defect or a causal contribution to global p99
 Keep instrumentation outside the runtime and validate a targeted change before
 claiming an improvement.
 
-Hardlink EIO, optional actual-service/CLI/imported-layout compatibility, the full
-representative performance matrix, Go heap series and long-lived memory behavior
-remain open. Lower daemon RSS and higher selected throughput do not close them.
+Hardlink EIO, optional actual-service/CLI/imported-layout compatibility,
+representative performance acceptance and long-lived memory behavior remain open.
+Go live heap series now exist for the persistent run; short phases can still
+lack two valid samples, and observer overhead is not eliminated. Lower daemon
+RSS and higher selected throughput do not close these gates.
 FUSE passthrough/disk caching remain deferred. Dependency rationale and applicable
 upstream links are in [dependency decisions](dependency-decisions.md).

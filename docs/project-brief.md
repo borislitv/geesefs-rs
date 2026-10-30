@@ -92,7 +92,7 @@ both Go references, report filesystem/client, backend and parent-group limits,
 and keep worker counts and memory budgets explicit. An improvement after adding
 CPU is a resource-sensitivity result, not evidence of a source-code optimization.
 
-The verified code-diagnosis fixture now uses 8 CPU / 16 GiB for filesystem plus
+The earlier verified code-diagnosis fixture uses 8 CPU / 16 GiB for filesystem plus
 client and 16 CPU / 12 GiB for the synthetic S3 backend, with parent ceilings of
 24 CPU / 28 GiB. An intermediate 8 GiB filesystem/client limit still caused
 page reclaim despite low daemon RSS. Verify actual limits and pressure counters
@@ -104,7 +104,12 @@ The [change history](change-history.md) summarizes confirmed refill, cross-reade
 eviction and read-history lifetime corrections. Warm duplicate payload disappears
 in the selected comparison, but both Go mean p99 values remain lower. Initial-read
 joins point to before-request and after-socket client work for further attribution.
-These observations do not pass acceptance or explain every wait.
+These observations do not pass acceptance or explain every wait. The subsequent
+64 MiB representative matrix and persistent mixed run expose substantial random
+read and sustained-rate losses. Current checkpoint tables are in the
+[README](../README.md); [architecture](architecture.md) describes the delivered
+design and [next work](next-work.md) records confirmed causes and unresolved
+attribution. The cache-loan proposal is not implemented.
 
 The first-stage scope still excludes FUSE passthrough and disk-backed caching.
 No single profile proves that every possible optimization is exhausted; report

@@ -134,6 +134,10 @@ def evaluate(config, runs, compatibility, provenance):
                             elif metric.endswith("_cpu_seconds") and left == 0:
                                 ratios[metric].append(1.0)
                 summaries["/".join(key)] = {metric: {"ratios": values, "mean": statistics.mean(values), "variance": statistics.pvariance(values)} for metric, values in ratios.items() if values}
+                # Cold runs remain required, byte-correct and fully accounted;
+                # comparative performance acceptance concerns sustained warm work.
+                if state == "cold":
+                    continue
                 # Require repeatable improvement, not one selected favorable run.
                 for metric in ["rss_peak_bytes", "rss_steady_bytes", "cgroup_peak_bytes", "cgroup_steady_bytes"]:
                     if len(ratios[metric]) != config["repetitions"] or any(ratio >= 1 for ratio in ratios[metric]):

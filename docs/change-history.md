@@ -62,6 +62,14 @@ Overall compatibility and comparative performance remain **UNACCEPTED**.
   P95/CPU regressions versus that prior remain part of the conclusion. Concurrent
   handles still share inode policy; full per-handle isolation is not implemented.
 
+## Benchmark contract correction, 2026-10-30
+
+The acceptance runner still required cold-start superiority after that requirement
+was removed. Cold runs now retain all ratios and correctness, provenance and
+accounting checks, while comparative performance gates apply to warm work.
+The regression fails before the correction; adverse warm tails still fail.
+This aligns the runner with the contract and establishes no runtime improvement.
+
 ## Current work and open gates
 
 Release builds now use ThinLTO and one codegen unit to optimize across the SDK

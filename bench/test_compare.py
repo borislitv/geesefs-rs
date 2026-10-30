@@ -80,6 +80,25 @@ class GateTests(unittest.TestCase):
     def test_complete_repeated_equivalent_evidence(self):
         self.assertTrue(self.gate()["accepted"])
 
+    def test_cold_only_performance_regressions_are_reported_without_blocking_warm_acceptance(self):
+        for run in self.runs:
+            if run["state"] == "cold" and run["implementation"] == "rust":
+                run["metrics"] = dict.fromkeys(compare.REQUIRED_METRICS, 12)
+                run["metrics"]["throughput"] = 8
+        result = self.gate()
+        self.assertTrue(result["accepted"], result["errors"])
+        cold = result["summaries"][compare.REVISIONS[0] + "/cold/sequential"]
+        self.assertEqual(cold["p99_ms"]["ratios"], [1.2] * 5)
+        self.assertEqual(cold["throughput"]["ratios"], [0.8] * 5)
+
+    def test_warm_tail_regression_still_blocks_acceptance(self):
+        for run in self.runs:
+            if run["state"] == "warm" and run["implementation"] == "rust":
+                run["metrics"]["p99_ms"] = 12
+        result = self.gate()
+        self.assertFalse(result["accepted"])
+        self.assertTrue(any("tail latency" in error and "p99_ms" in error for error in result["errors"]))
+
     def test_no_missing_results_can_pass(self):
         self.runs.pop()
         self.assertFalse(self.gate()["accepted"])
@@ -96,7 +115,8 @@ class GateTests(unittest.TestCase):
         self.assertFalse(self.gate()["accepted"])
 
     def test_one_unfavorable_sample_cannot_be_discarded(self):
-        self.runs[1]["metrics"]["rss_peak_bytes"] = 11
+        warm = next(run for run in self.runs if run["state"] == "warm" and run["implementation"] == "rust")
+        warm["metrics"]["rss_peak_bytes"] = 11
         self.assertFalse(self.gate()["accepted"])
 
     def test_changed_budget_baseline_or_tail_latency_blocks_acceptance(self):

@@ -41,9 +41,13 @@ acceptance. PATCH writer generation/conflict/retry integration now has determini
 tests; actual-service acceptance remains absent.
 These and all-reference CLI parity remain required optional Linux/S3 paths;
 see [backend options and exact limitations](backend-options.md).
-FIFO creation was exercised on both mounted implementations. Both returned EIO
-for the optional hardlink-as-symlink probe on this Linux kernel; this is recorded
-as a failure, not hardlink acceptance. Root directory fsync was exercised on both.
+FIFO creation and root directory fsync were exercised on mounted Rust and Go.
+Rust and both pinned Go binaries return EIO for hardlink-as-symlink on Linux 6.8,
+while the symlink becomes visible after the failed call. The kernel's
+[`fuse_link` / `create_new_entry`](https://github.com/torvalds/linux/blob/v6.8/fs/fuse/dir.c)
+requires the reply's file type to match the source inode; replying with a symlink
+for a regular source violates that contract. This shared reference limitation is
+not hardlink acceptance and must not be hidden by weakening the mounted probe.
 
 ## Reference contracts and acceptance status
 

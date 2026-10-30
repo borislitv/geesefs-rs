@@ -49,6 +49,14 @@ requires the reply's file type to match the source inode; replying with a symlin
 for a regular source violates that contract. This shared reference limitation is
 not hardlink acceptance and must not be hidden by weakening the mounted probe.
 
+Both pinned Go sources also explain the observed open-file fsync recovery gap:
+`Inode.SyncFile` clears `forceFlush` before returning a stored `flushError`, while
+`sendUpload` skips a small open file without `forceFlush` or memory pressure.
+The retry interval alone therefore does not guarantee progress on that handle.
+The mounted 75-second failures remain failures; increasing the deadline or
+closing/reopening the file would not establish recovery for the original workload.
+See the public [packaged reference source](https://github.com/yandex-cloud/geesefs/blob/80c214ef14f620d93407454fc76ca01dd71fa25f/core/file.go).
+
 ## Reference contracts and acceptance status
 
 | Contract | Reference requirement | Status |

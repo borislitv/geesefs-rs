@@ -8,8 +8,9 @@ served mounts or production credentials. Use finite subprocess/operation deadlin
 
 Use Rust 1.96.0+ with rustfmt/clippy, Python 3.12+ and the public dependencies from
 `requirements-fixture.txt`. The latest verified runtime is `2bf8184`: 207 Rust
-and 37 Python cases, formatting, warning-denying Clippy and public-source audit
-passed. These checks are not full reference parity or production acceptance.
+cases, formatting, warning-denying Clippy and public-source audit passed.
+Runner corrections through `1ecc1b4` pass 57 Python cases and the source audit.
+These checks are not full reference parity or production acceptance.
 
 ```bash
 cargo fmt --all -- --check

@@ -254,9 +254,12 @@ def fault(endpoint, mode=""):
 
 
 def recover_fsync(fd):
-    """Reference write failures are retryable EAGAIN until its configured flusher
-    retry interval expires. Observe recovery without changing that interval/GC.
-    Other errors remain failures; this is not a generic retry-until-green wrapper.
+    """Observe EAGAIN recovery through a fixed deadline without changing policy.
+
+    The pinned reference can retain flushError on an open small file after its
+    retry interval: SyncFile clears forceFlush before returning that error, while
+    background upload requires a closed handle, forceFlush or memory pressure.
+    Expiry alone is not a recovery guarantee. Other errors remain failures.
     """
     deadline = time.monotonic() + 75
     while True:

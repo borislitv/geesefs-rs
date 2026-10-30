@@ -85,6 +85,13 @@ primes a healthy writer before injection. The client is closed even if warmup
 fails, and warmup receives the bounded workload deadline rather than the short
 cold-initialization timeout. Earlier screening evidence remains diagnostic.
 
+Open-file fsync recovery failures in both pinned Go references are consistent
+with their shared flush state machine: `SyncFile` clears `forceFlush` before
+returning the retained error, and small-file background upload needs a closed
+handle, `forceFlush` or memory pressure. Waiting past the retry interval does not
+by itself restore progress. Preserve those failures and the original workload
+rather than increasing retries until a different state happens to pass.
+
 ## Current work and open gates
 
 Release builds now use ThinLTO and one codegen unit to optimize across the SDK

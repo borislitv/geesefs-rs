@@ -109,9 +109,14 @@ class HeapSeriesTests(unittest.TestCase):
                 self.assertIsNone(result["allocator_peak_bytes"])
                 self.assertIsNone(result["allocator_steady_bytes"])
 
-    def test_forced_gc_change_invalidates_series(self):
-        with self.assertRaisesRegex(RuntimeError, "forced GC"):
-            self.samples([(10, 20, 30, 0), (30, 40, 90, 1), (70, 80, 50, 1)])
+    def test_baseline_owned_gc_is_reported_without_changing_its_policy(self):
+        result = self.samples([(10, 20, 30, 0), (30, 40, 90, 1), (70, 80, 50, 1)])
+        self.assertEqual(result["allocator_peak_bytes"], 90)
+        self.assertEqual(result["allocator_forced_gc_count"], 1)
+
+    def test_decreasing_gc_counter_invalidates_series(self):
+        with self.assertRaisesRegex(RuntimeError, "counter decreased"):
+            self.samples([(10, 20, 30, 1), (30, 40, 90, 0), (70, 80, 50, 0)])
 
     def test_background_observations_survive_until_normal_shutdown(self):
         received = threading.Event()

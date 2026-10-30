@@ -75,6 +75,9 @@ missing temporal data. A separate bounded observer records live `HeapAlloc`
 without requesting GC, retains failures and excludes boundary-crossing requests.
 Loopback HTTP/timeout tests and four injected faults verify the adapter; actual
 workload overhead and long-lived heap behavior still need measurement.
+Reference inspection also finds baseline-owned `debug.FreeOSMemory` calls. Their
+counter deltas are reported without rejecting the reference or changing its GC
+policy; the observer itself never requests collection.
 
 ## Current work and open gates
 

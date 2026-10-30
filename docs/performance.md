@@ -76,3 +76,7 @@ samples leave peak/steady heap missing rather than substituting a final snapshot
 These are sampled peaks and late-half means, not exact peaks or plateau evidence.
 Very short workloads therefore still need longer representative measurements;
 observer overhead must be checked before interpreting a performance comparison.
+The original Go buffer pool itself invokes `debug.FreeOSMemory` at its unchanged
+allocation threshold and under pressure. Retain the resulting `NumForcedGC` delta;
+the prohibition concerns benchmark-triggered collection, not changing the
+reference's own policy or rejecting an otherwise valid reference observation.

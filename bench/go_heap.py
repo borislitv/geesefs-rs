@@ -74,14 +74,15 @@ class GoHeapSampler:
                     raise RuntimeError("Go heap accounting failed: " + item["error"])
                 if started_ns <= item["started_ns"] <= item["finished_ns"] <= finished_ns:
                     samples.append(item)
-        forced = {item["memstats"]["NumForcedGC"] for item in samples}
-        if len(forced) > 1:
-            raise RuntimeError("Go forced GC counter changed during measurement")
+        forced = [item["memstats"]["NumForcedGC"] for item in samples]
+        if any(right < left for left, right in zip(forced, forced[1:])):
+            raise RuntimeError("Go forced GC counter decreased during measurement")
         values = [item["memstats"]["HeapAlloc"] for item in samples]
         enough = len(values) >= 2
         return {"allocator_peak_bytes": max(values) if enough else None,
                 "allocator_steady_bytes": statistics.mean(values[len(values) // 2:]) if enough else None,
                 "allocator_samples": len(samples), "allocator_sampling_interval_seconds": self.interval,
+                "allocator_forced_gc_count": forced[-1] - forced[0] if enough else None,
                 "allocator_sampling_wall_seconds": sum(item["request_seconds"] for item in samples),
                 "allocator_peak_scope": "sampled-HeapAlloc-active-workload-not-an-exact-peak",
                 "allocator_steady_scope": "mean-of-last-half-of-active-samples-not-a-plateau"}

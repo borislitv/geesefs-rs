@@ -4,6 +4,41 @@ This is the concise engineering context for the experimental Linux/S3 rewrite.
 Detailed results and operational logs stay outside tracked source files.
 Overall compatibility and comparative performance remain **UNACCEPTED**.
 
+## Integrated freshness, handle and accounting correction, 2026-10-31
+
+- A frozen-baseline FUSE/HTTP join attributes late metadata tails to name pages
+  retaining older child attributes. Refresh authoritative extended LIST metadata
+  without replacing dirty state or a newer HEAD/commit; return remaining kernel
+  TTL rather than restarting it. Supported fuser READDIRPLUS provides attributes
+  with bounded page cursors and lookup ownership transferred only on success.
+  Unknown common prefixes still resolve marker permissions and ownership.
+- Adaptive history now belongs to each open handle; cache, fills and budgets stay
+  shared. Handles retain admitted readers and reserve capacity before create, so
+  EMFILE cannot leave a new dirty name. Validate the supported semaphore limit.
+  Clean fsync no longer reclaims cache loans when no generation needs uploading.
+- Native failures and restored semantic mutants verify TTL, listing generations,
+  cursor/lookup ownership, handle pressure, borrowed-read history and durability.
+  Linux hardlink emulation now fails EOPNOTSUPP before mutation; this is a safe
+  unsupported contract, not hardlink compatibility acceptance.
+- Memory accounting streams the complete temporal window and preserves missing
+  observations. Shared nearest-rank/raw-latency policy feeds both pooled gates and
+  summaries; daemon/client, allocator and file/kernel scopes remain separate.
+  Safe optional jemalloc page gauges add attribution without allocator tuning.
+  Local nginx/rsync and failure checks pass for the implemented Rust subset;
+  whole-file CRAP and actual-service gaps remain open.
+- A subsequent frozen-candidate trace shows repeated standard LIST prefix scans.
+  Supported V1 marker/V2 start-after avoids rescanning consumed bounded chunks;
+  opaque continuation and extended protocol semantics stay intact. Independent
+  lexical-boundary, malformed-response, pagination-limit and native cursor tests
+  protect accurate types and marker attributes. Separate default/System builds
+  pass 251 Rust cases and real instrumented clients; the locked notice bundle
+  retains complete dependency sources, including native/embedded attribution.
+- The joint [2026-11-01 measurements](performance-integrated.md) independently
+  verify 240 isolated healthy records and 2,880 mixed phases. Paced metadata p99
+  improves against prior Rust, but throughput and equal-rate/concurrent memory
+  retain losses. Missing accounting, original isolated-controller failures and
+  full required compatibility remain explicit acceptance gaps.
+
 ## Persistent admission and metadata correction, 2026-10-31
 
 - Native VM CPU profiles, scoped FUSE lifecycle events and temporary ownership

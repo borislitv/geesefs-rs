@@ -225,6 +225,70 @@ fn filesystem(store: S3) -> std::sync::Arc<geesefs_rs::filesystem::Filesystem> {
 }
 
 #[tokio::test]
+async fn standard_listing_resumes_from_an_exclusive_confined_name_on_the_wire() {
+    use geesefs_rs::config::ListType;
+    for mode in [ListType::V1, ListType::V2] {
+        let xml = b"<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>prefix/dir/z</Key><Size>7</Size></Contents></ListBucketResult>";
+        let (store, task) = server(200, &[], xml, None);
+        let result = store
+            .with_list_type(mode)
+            .list_after("dir/", Some("/"), None, Some("dir/a& space"))
+            .await;
+        let captured = task.join().unwrap();
+        let page = result.unwrap();
+        assert_eq!(page.objects.len(), 1);
+        assert_eq!(page.objects[0].key, "dir/z");
+        assert_eq!(page.objects[0].size, 7);
+        let url = reqwest::Url::parse(&format!("http://fixture{}", captured.url)).unwrap();
+        let query: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+        let bound = if mode == ListType::V1 {
+            "marker"
+        } else {
+            "start-after"
+        };
+        assert_eq!(query["prefix"], "prefix/dir/");
+        assert_eq!(query[bound], "prefix/dir/a& space");
+        assert!(!query.contains_key("continuation-token"));
+    }
+}
+
+#[tokio::test]
+async fn v2_and_extended_continuation_tokens_are_not_replaced_with_key_bounds() {
+    use geesefs_rs::config::ListType;
+    for mode in [ListType::V2, ListType::Extended] {
+        let xml = b"<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>prefix/dir/z</Key><Size>7</Size></Contents></ListBucketResult>";
+        let (store, task) = server(200, &[], xml, None);
+        let result = store
+            .with_list_type(mode)
+            .list_after("dir/", Some("/"), Some("opaque+/& token"), Some("dir/a"))
+            .await;
+        let captured = task.join().unwrap();
+        let page = result.unwrap();
+        assert_eq!(page.objects[0].key, "dir/z");
+        let url = reqwest::Url::parse(&format!("http://fixture{}", captured.url)).unwrap();
+        let query: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(query["continuation-token"], "opaque+/& token");
+        assert!(!query.contains_key("marker"));
+        assert!(!query.contains_key("start-after"));
+    }
+}
+
+#[tokio::test]
+async fn a_v1_resume_must_not_repeat_its_initial_marker() {
+    use geesefs_rs::config::ListType;
+    let xml = b"<ListBucketResult><IsTruncated>true</IsTruncated><NextMarker>prefix/dir/a</NextMarker></ListBucketResult>";
+    let (store, task) = server(200, &[], xml, None);
+    let result = store
+        .with_list_type(ListType::V1)
+        .list_after("dir/", Some("/"), None, Some("dir/a"))
+        .await;
+    task.join().unwrap();
+    assert!(
+        matches!(result, Err(Error::InvalidResponse(message)) if message.contains("missing/repeated listing token"))
+    );
+}
+
+#[tokio::test]
 async fn a_complete_body_prefix_is_visible_before_the_conditional_get_finishes() {
     const CHUNK: usize = 128 * 1024;
     let expected: Vec<u8> = (0..4 * CHUNK).map(|at| (at % 251) as u8).collect();
@@ -1271,6 +1335,114 @@ fn listing_server(responses: Vec<(u16, Vec<u8>, bool)>) -> (S3, JoinHandle<Vec<C
         S3::new(Client::from_conf(config), "bucket".into(), "prefix".into()).unwrap(),
         task,
     )
+}
+
+#[tokio::test]
+async fn standard_list_rejects_malformed_or_unconfined_pages_before_exposing_entries() {
+    use geesefs_rs::config::ListType;
+    for (contents, message) in [
+        ("<Contents><Size>1</Size></Contents>", "listing missing key"),
+        (
+            "<Contents><Key>prefix/dir/a</Key><Size>-1</Size></Contents>",
+            "listing invalid size",
+        ),
+        (
+            "<Contents><Key>prefix/outside</Key><Size>1</Size></Contents>",
+            "unordered/unconfined listing",
+        ),
+        (
+            "<Contents><Key>prefix/dir/z</Key><Size>1</Size></Contents><Contents><Key>prefix/dir/a</Key><Size>1</Size></Contents>",
+            "unordered/unconfined listing",
+        ),
+        ("<CommonPrefixes/>", "listing missing prefix"),
+        (
+            "<CommonPrefixes><Prefix>prefix/outside/</Prefix></CommonPrefixes>",
+            "unconfined prefix",
+        ),
+        (
+            "<CommonPrefixes><Prefix>prefix/dir/not-a-directory</Prefix></CommonPrefixes>",
+            "unconfined prefix",
+        ),
+        (
+            "<IsTruncated>true</IsTruncated>",
+            "missing/repeated listing token",
+        ),
+    ] {
+        let xml = format!("<ListBucketResult>{contents}</ListBucketResult>");
+        let (store, task) = server(200, &[], xml.as_bytes(), None);
+        let error = store
+            .with_list_type(ListType::V1)
+            .list("dir/", Some("/"), None)
+            .await
+            .unwrap_err();
+        task.join().unwrap();
+        assert!(
+            matches!(error, Error::InvalidResponse(ref value) if value == message),
+            "{contents}: {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn v1_prefix_only_pages_supply_their_last_key_as_a_marker_without_weakening_bounds() {
+    use geesefs_rs::config::ListType;
+    let first = b"<ListBucketResult><IsTruncated>true</IsTruncated><CommonPrefixes><Prefix>prefix/dir/a/</Prefix></CommonPrefixes></ListBucketResult>".to_vec();
+    let second = b"<ListBucketResult><IsTruncated>false</IsTruncated><NextMarker>ignored-after-final-page</NextMarker><Contents><Key>prefix/dir/z</Key><Size>7</Size></Contents></ListBucketResult>".to_vec();
+    let (store, task) = listing_server(vec![(200, first, false), (200, second, false)]);
+    let store = store.with_list_type(ListType::V1);
+    let page = store.list("dir/", Some("/"), None).await.unwrap();
+    assert!(page.objects.is_empty());
+    assert_eq!(page.common_prefixes, ["dir/a/"]);
+    assert_eq!(page.next_token.as_deref(), Some("prefix/dir/a/"));
+    let last = store
+        .list("dir/", Some("/"), page.next_token.as_deref())
+        .await
+        .unwrap();
+    assert_eq!((&*last.objects[0].key, last.objects[0].size), ("dir/z", 7));
+    assert_eq!(last.next_token, None);
+    let requests = task.join().unwrap();
+    let query: BTreeMap<String, String> =
+        reqwest::Url::parse(&format!("http://localhost{}", requests[1].url))
+            .unwrap()
+            .query_pairs()
+            .into_owned()
+            .collect();
+    assert_eq!(query["marker"], "prefix/dir/a/");
+}
+
+#[tokio::test]
+async fn standard_list_accepts_the_1000_entry_boundary_and_rejects_one_more() {
+    use geesefs_rs::config::ListType;
+    for mode in [ListType::V1, ListType::V2] {
+        for count in [1000, 1001] {
+            let contents: String = (0..count)
+                .map(|number| {
+                    format!(
+                        "<CommonPrefixes><Prefix>prefix/dir/{number:04}/</Prefix></CommonPrefixes>"
+                    )
+                })
+                .collect();
+            let xml = format!(
+                "<ListBucketResult><IsTruncated>false</IsTruncated>{contents}</ListBucketResult>"
+            );
+            let (store, task) = server(200, &[], xml.as_bytes(), None);
+            let result = store
+                .with_list_type(mode)
+                .list("dir/", Some("/"), None)
+                .await;
+            task.join().unwrap();
+            if count == 1000 {
+                let page = result.unwrap();
+                assert_eq!(page.common_prefixes.len(), 1000);
+                assert_eq!(page.common_prefixes.first().unwrap(), "dir/0000/");
+                assert_eq!(page.common_prefixes.last().unwrap(), "dir/0999/");
+            } else {
+                assert!(
+                    matches!(result, Err(Error::InvalidResponse(ref value)) if value == "listing entry limit")
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]

@@ -28,6 +28,12 @@ EINTR; saturation returns EAGAIN. A job owns its reply and permit until completi
 or the request deadline. Timeout drops the future and its reply; fuser supplies
 the failure reply. There is no unbounded application request queue.
 
+File-handle slots are reserved before create can mutate the namespace. A registry
+entry owns its slot and `Arc<OpenFile>`; admitted reads retain that open inode until
+their last owner finishes. Closing admission drains requests before clearing the
+registry. READDIRPLUS holds accepted inode owners until successful buffer delivery;
+error/cancellation transfers no lookup references, and dot entries acquire none.
+
 ## Namespace and metadata
 
 `src/namespace.rs` binds names to stable inodes; `src/inode.rs` owns generation,
@@ -46,6 +52,13 @@ and any moved/deleted cached subtree, preserving fresh pages elsewhere. Epochs
 are read and changed under the namespace lock, independently of refreshed inode
 metadata. In-flight listings validate both epoch and name-to-inode binding before
 publication; move/delete leases invalidate on entry and on every completion path.
+
+Cached pages also validate each child's binding, type and freshness. Authoritative
+extended LIST metadata can refresh an existing clean inode, preserving owners and
+local counters; a later HEAD or verified commit wins over the older request.
+Kernel replies carry the remaining metadata TTL. Common prefixes establish names,
+not authoritative directory-marker attributes. Basic READDIR remains available;
+kernel continuation resumes the same bounded backend page until it is consumed.
 
 ## Payload ownership and progress
 
@@ -106,11 +119,11 @@ backing uses admitted output. Required pressure may reclaim any LRU owner.
 Optional refill protects a foreign unread prefix using contiguous-consumption
 hints, not permanent pins.
 
-Adaptive `Pattern` currently belongs to the inode, not each open handle. The
-zero-to-one open transition resets history while preserving cached payload;
-concurrent handles still share history. Cache hits advance policy and can start
-next-window refill after publishing the reply, in the same owned future,
-request slot and deadline.
+Each FUSE `OpenFile` owns its adaptive `Pattern`, matching the reference handle
+lifetime. Concurrent and reopened handles share payload/fills but not stream
+history. Legacy inode-only APIs retain their separate inode pattern. Cache hits
+advance policy and can start next-window refill after publishing the reply, in
+the same owned future, request slot and deadline.
 
 The SDK range path preserves If-Match, exact range/EOF and body integrity.
 Unchecksummed responses can publish bounded fragments incrementally; a whole-body
@@ -125,6 +138,9 @@ inode's flush lock. Later writes retain their newer dirty state. The durable
 version advances only after successful backend completion and reconciliation.
 Errors retain dirty data for retry; fsync is a completion barrier, not enqueue
 acknowledgement.
+
+A clean fsync returns before upload admission and cache-loan revocation; dirty
+generations and deleted inodes retain their durability/error checks.
 
 `src/parts.rs` supplies configured multipart boundaries. Upload/copy/queue
 semaphores bound work. `src/upload_body.rs` builds retryable SDK bodies from

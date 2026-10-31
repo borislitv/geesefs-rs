@@ -1,6 +1,10 @@
 //! fuser owns the wire protocol and exactly-once replies. Admission and borrowed
 //! write ownership are acquired before detached work, never in an unbounded queue.
-use crate::{error::Error, filesystem::Filesystem as Core, write::MAX_IO};
+use crate::{
+    error::Error,
+    filesystem::{Filesystem as Core, OpenFile},
+    write::MAX_IO,
+};
 use fuser::*;
 use std::{
     collections::BTreeMap,
@@ -13,7 +17,10 @@ use std::{
     },
     time::SystemTime,
 };
-use tokio::{runtime::Handle, sync::Semaphore};
+use tokio::{
+    runtime::Handle,
+    sync::{OwnedSemaphorePermit, Semaphore},
+};
 
 pub fn errno(error: Error) -> Errno {
     match error {
@@ -46,6 +53,7 @@ failures!(
     ReplyEmpty,
     ReplyCreate,
     ReplyDirectory,
+    DirectoryReply,
     ReplyXattr
 );
 
@@ -53,9 +61,141 @@ struct Admission {
     closing: bool,
     semaphore: Arc<Semaphore>,
 }
+struct File {
+    file: Arc<OpenFile>,
+    _permit: OwnedSemaphorePermit,
+}
 struct Directory {
     last: String,
+    page_after: String,
     cookie: u64,
+}
+
+impl Directory {
+    fn seek(&mut self, offset: u64) {
+        if offset != self.cookie {
+            self.last.clear();
+            self.page_after.clear();
+            self.cookie = 0;
+        }
+    }
+
+    async fn dots(
+        &mut self,
+        fs: &Core,
+        ino: INodeNo,
+        offset: u64,
+        reply: &mut DirectoryReply,
+    ) -> crate::error::Result<bool> {
+        if self.cookie == 0 {
+            if offset == 0 && reply.add(fs, ino, 1, FileType::Directory, ".").await? {
+                return Ok(true);
+            }
+            self.cookie = 1;
+        }
+        if self.cookie == 1 {
+            if offset <= 1
+                && reply
+                    .add(
+                        fs,
+                        INodeNo(fs.parent_ino(ino.0)),
+                        2,
+                        FileType::Directory,
+                        "..",
+                    )
+                    .await?
+            {
+                return Ok(true);
+            }
+            self.cookie = 2;
+        }
+        Ok(false)
+    }
+
+    /// Return whether this reply has room to continue into another backend page.
+    async fn page(
+        &mut self,
+        fs: &Core,
+        ino: INodeNo,
+        offset: u64,
+        limit: usize,
+        reply: &mut DirectoryReply,
+    ) -> crate::error::Result<bool> {
+        let entries = fs.directory_chunk(ino.0, &self.page_after, limit).await?;
+        if entries.is_empty() {
+            return Ok(false);
+        }
+        for entry in entries {
+            if entry.name <= self.last {
+                continue;
+            }
+            let next = self.cookie + 1;
+            if self.cookie >= offset
+                && reply
+                    .add(fs, INodeNo(entry.ino), next, entry.kind, &entry.name)
+                    .await?
+            {
+                return Ok(false);
+            }
+            self.cookie = next;
+            self.last = entry.name;
+        }
+        // A full kernel frame resumes the same cached backend page; only a
+        // completely consumed backend page advances its exclusive start name.
+        self.page_after = self.last.clone();
+        Ok(true)
+    }
+}
+
+enum DirectoryReply {
+    Basic(ReplyDirectory),
+    Plus(ReplyDirectoryPlus, Vec<Arc<crate::inode::Inode>>),
+}
+
+impl DirectoryReply {
+    async fn add(
+        &mut self,
+        fs: &Core,
+        ino: INodeNo,
+        offset: u64,
+        kind: FileType,
+        name: &str,
+    ) -> crate::error::Result<bool> {
+        match self {
+            Self::Basic(reply) => Ok(reply.add(ino, offset, kind, name)),
+            Self::Plus(reply, entries) => {
+                let node = fs.refresh_inode_if_expired(ino.0).await?;
+                let (attr, ttl) = node.cached_attr(fs.config.stat_cache_ttl);
+                let full = reply.add(ino, offset, name, &ttl, &attr, Generation(0));
+                // Linux does not acquire lookup references for dot entries.
+                // Hold accepted inodes, but transfer references only when the
+                // complete buffer is sent, not on error or cancellation.
+                if !full && name != "." && name != ".." {
+                    entries.push(node);
+                }
+                Ok(full)
+            }
+        }
+    }
+
+    fn ok(self, fs: &Core) {
+        match self {
+            Self::Basic(reply) => reply.ok(),
+            Self::Plus(reply, entries) => {
+                for node in &entries {
+                    fs.reference(node);
+                }
+                reply.ok();
+            }
+        }
+    }
+
+    fn error(self, error: Errno) {
+        match self {
+            Self::Basic(reply) => reply.error(error),
+            Self::Plus(reply, _) => reply.error(error),
+        }
+    }
 }
 
 pub struct Fuse {
@@ -63,7 +203,9 @@ pub struct Fuse {
     runtime: Handle,
     admission: Mutex<Admission>,
     directories: Arc<Mutex<BTreeMap<u64, Arc<tokio::sync::Mutex<Directory>>>>>,
-    next_handle: AtomicU64,
+    files: Arc<Mutex<BTreeMap<u64, File>>>,
+    file_slots: Arc<Semaphore>,
+    next_handle: Arc<AtomicU64>,
     pub notifier: Arc<Mutex<Option<Notifier>>>,
     pub shutdown_error: Arc<Mutex<Option<String>>>,
 }
@@ -71,6 +213,7 @@ pub struct Fuse {
 impl Fuse {
     pub fn new(fs: Arc<Core>, runtime: Handle) -> Self {
         let slots = fs.config.max_requests;
+        let file_slots = Arc::new(Semaphore::new(fs.config.entry_limit as usize));
         Self {
             fs,
             runtime,
@@ -79,7 +222,9 @@ impl Fuse {
                 semaphore: Arc::new(Semaphore::new(slots)),
             }),
             directories: Arc::new(Mutex::new(BTreeMap::new())),
-            next_handle: AtomicU64::new(1),
+            files: Arc::new(Mutex::new(BTreeMap::new())),
+            file_slots,
+            next_handle: Arc::new(AtomicU64::new(1)),
             notifier: Arc::new(Mutex::new(None)),
             shutdown_error: Arc::new(Mutex::new(None)),
         }
@@ -123,6 +268,86 @@ impl Fuse {
             FopenFlags::empty()
         }
     }
+
+    fn reserve_file(&self) -> crate::error::Result<OwnedSemaphorePermit> {
+        self.file_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Error::Fs(libc::EMFILE))
+    }
+
+    fn remove_entry(&self, parent: INodeNo, name: &OsStr, directory: bool, reply: ReplyEmpty) {
+        let name = match text(name) {
+            Ok(name) => name,
+            Err(error) => {
+                reply.error(error);
+                return;
+            }
+        };
+        self.spawn(reply, move |fs, reply| async move {
+            match fs.unlink(parent.0, &name, directory).await {
+                Ok(()) => reply.ok(),
+                Err(error) => reply.error(errno(error)),
+            }
+        });
+    }
+
+    fn sync_file(&self, ino: INodeNo, reply: ReplyEmpty) {
+        self.spawn(reply, move |fs, reply| async move {
+            match fs.fsync(ino.0).await {
+                Ok(()) => reply.ok(),
+                Err(error) => reply.error(errno(error)),
+            }
+        });
+    }
+
+    fn read_directory(&self, ino: INodeNo, fh: FileHandle, offset: u64, reply: DirectoryReply) {
+        let cursor = match self.directories.lock().unwrap().get(&fh.0).cloned() {
+            Some(cursor) => cursor,
+            None => {
+                reply.error(Errno::EBADF);
+                return;
+            }
+        };
+        self.spawn(reply, move |fs, mut reply| async move {
+            let result = async {
+                let mut cursor = cursor.lock().await;
+                cursor.seek(offset);
+                if !cursor.dots(&fs, ino, offset, &mut reply).await? {
+                    let limit = (fs.config.entry_limit as usize)
+                        .saturating_sub(1)
+                        .clamp(1, 128);
+                    while cursor.page(&fs, ino, offset, limit, &mut reply).await? {}
+                }
+                Ok::<(), Error>(())
+            }
+            .await;
+            match result {
+                Ok(()) => reply.ok(&fs),
+                Err(error) => reply.error(errno(error)),
+            }
+        });
+    }
+}
+
+fn file_handle(
+    fs: &Arc<Core>,
+    files: &Mutex<BTreeMap<u64, File>>,
+    next: &AtomicU64,
+    ino: u64,
+    writable: bool,
+    permit: OwnedSemaphorePermit,
+) -> crate::error::Result<FileHandle> {
+    let file = fs.open_file(ino, writable)?;
+    let handle = next.fetch_add(1, Ordering::Relaxed);
+    files.lock().unwrap().insert(
+        handle,
+        File {
+            file,
+            _permit: permit,
+        },
+    );
+    Ok(FileHandle(handle))
 }
 
 fn text(value: &OsStr) -> std::result::Result<String, Errno> {
@@ -143,6 +368,17 @@ impl fuser::Filesystem for Fuse {
         config
             .set_max_write(MAX_IO as u32)
             .map_err(|_| std::io::Error::other("kernel does not accept bounded max_write"))?;
+        let plus = InitFlags::FUSE_DO_READDIRPLUS;
+        if config
+            .capabilities()
+            .contains(InitFlags::FUSE_DO_READDIRPLUS)
+        {
+            config
+                .add_capabilities(config.capabilities() & plus)
+                .map_err(|_| {
+                    std::io::Error::other("kernel rejected advertised READDIRPLUS support")
+                })?;
+        }
         Ok(())
     }
     fn destroy(&mut self) {
@@ -157,6 +393,7 @@ impl fuser::Filesystem for Fuse {
                     .acquire_many(self.fs.config.max_requests as u32)
                     .await
                     .map_err(|_| Error::Cancelled)?;
+                self.files.lock().unwrap().clear();
                 self.fs.shutdown().await
             })
             .await
@@ -178,7 +415,8 @@ impl fuser::Filesystem for Fuse {
             match fs.lookup(parent.0, &name).await {
                 Ok(node) => {
                     fs.reference(&node);
-                    reply.entry(&fs.config.stat_cache_ttl, &node.attr(), Generation(0));
+                    let (attr, ttl) = node.cached_attr(fs.config.stat_cache_ttl);
+                    reply.entry(&ttl, &attr, Generation(0));
                 }
                 Err(error) => reply.error(errno(error)),
             }
@@ -190,7 +428,10 @@ impl fuser::Filesystem for Fuse {
     fn getattr(&self, _: &Request, ino: INodeNo, _: Option<FileHandle>, reply: ReplyAttr) {
         self.spawn(reply, move |fs, reply| async move {
             match fs.refresh_inode_if_expired(ino.0).await {
-                Ok(node) => reply.attr(&fs.config.stat_cache_ttl, &node.attr()),
+                Ok(node) => {
+                    let (attr, ttl) = node.cached_attr(fs.config.stat_cache_ttl);
+                    reply.attr(&ttl, &attr);
+                }
                 Err(error) => reply.error(errno(error)),
             }
         });
@@ -229,16 +470,18 @@ impl fuser::Filesystem for Fuse {
         }
     }
     fn open(&self, _: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
-        let result = (|| {
-            let node = self.fs.node(ino.0)?;
-            if node.attr().kind == FileType::Directory {
-                return Err(Error::Fs(libc::EISDIR));
-            }
-            self.fs
-                .open(ino.0, flags.0 & libc::O_ACCMODE != libc::O_RDONLY)
-        })();
+        let result = self.reserve_file().and_then(|permit| {
+            file_handle(
+                &self.fs,
+                &self.files,
+                &self.next_handle,
+                ino.0,
+                flags.0 & libc::O_ACCMODE != libc::O_RDONLY,
+                permit,
+            )
+        });
         match result {
-            Ok(()) => reply.opened(FileHandle(ino.0), self.flags()),
+            Ok(handle) => reply.opened(handle, self.flags()),
             Err(error) => reply.error(errno(error)),
         }
     }
@@ -246,16 +489,29 @@ impl fuser::Filesystem for Fuse {
         &self,
         _: &Request,
         ino: INodeNo,
-        _: FileHandle,
+        fh: FileHandle,
         offset: u64,
         size: u32,
         _: OpenFlags,
         _: Option<LockOwner>,
         reply: ReplyData,
     ) {
-        self.spawn(reply, move |fs, reply| async move {
-            if let Some(error) = fs
-                .read_reply_data(ino.0, offset, size as usize, move |result| match result {
+        let file = match self
+            .files
+            .lock()
+            .unwrap()
+            .get(&fh.0)
+            .map(|entry| entry.file.clone())
+        {
+            Some(file) if file.ino() == ino.0 => file,
+            _ => {
+                reply.error(Errno::EBADF);
+                return;
+            }
+        };
+        self.spawn(reply, move |_fs, reply| async move {
+            if let Some(error) = file
+                .read_reply_data(offset, size as usize, move |result| match result {
                     Ok(data) => reply.data(data),
                     Err(error) => reply.error(errno(error)),
                 })
@@ -327,6 +583,17 @@ impl fuser::Filesystem for Fuse {
         };
         let flags = self.flags();
         let identity = (request.uid(), request.gid());
+        // Reserve capacity before the async create can mutate the namespace.
+        // Cancellation or an error returns the permit without a registry entry.
+        let permit = match self.reserve_file() {
+            Ok(permit) => permit,
+            Err(error) => {
+                reply.error(errno(error));
+                return;
+            }
+        };
+        let files = self.files.clone();
+        let next_handle = self.next_handle.clone();
         self.spawn(reply, move |fs, reply| async move {
             match fs
                 .create_with_identity(
@@ -339,17 +606,18 @@ impl fuser::Filesystem for Fuse {
                 )
                 .await
             {
-                Ok(node) => match fs.open(node.ino, open_flags & libc::O_ACCMODE != libc::O_RDONLY)
-                {
-                    Ok(()) => {
+                Ok(node) => match file_handle(
+                    &fs,
+                    &files,
+                    &next_handle,
+                    node.ino,
+                    open_flags & libc::O_ACCMODE != libc::O_RDONLY,
+                    permit,
+                ) {
+                    Ok(handle) => {
                         fs.reference(&node);
-                        reply.created(
-                            &fs.config.stat_cache_ttl,
-                            &node.attr(),
-                            Generation(0),
-                            FileHandle(node.ino),
-                            flags,
-                        );
+                        let (attr, ttl) = node.cached_attr(fs.config.stat_cache_ttl);
+                        reply.created(&ttl, &attr, Generation(0), handle, flags);
                     }
                     Err(error) => reply.error(errno(error)),
                 },
@@ -393,7 +661,8 @@ impl fuser::Filesystem for Fuse {
             match result {
                 Ok(node) => {
                     fs.reference(&node);
-                    reply.entry(&fs.config.stat_cache_ttl, &node.attr(), Generation(0));
+                    let (attr, ttl) = node.cached_attr(fs.config.stat_cache_ttl);
+                    reply.entry(&ttl, &attr, Generation(0));
                 }
                 Err(error) => reply.error(errno(error)),
             }
@@ -428,7 +697,8 @@ impl fuser::Filesystem for Fuse {
             {
                 Ok(node) => {
                     fs.reference(&node);
-                    reply.entry(&fs.config.stat_cache_ttl, &node.attr(), Generation(0));
+                    let (attr, ttl) = node.cached_attr(fs.config.stat_cache_ttl);
+                    reply.entry(&ttl, &attr, Generation(0));
                 }
                 Err(error) => reply.error(errno(error)),
             }
@@ -470,7 +740,8 @@ impl fuser::Filesystem for Fuse {
             {
                 Ok(node) => {
                     fs.reference(&node);
-                    reply.entry(&fs.config.stat_cache_ttl, &node.attr(), Generation(0));
+                    let (attr, ttl) = node.cached_attr(fs.config.stat_cache_ttl);
+                    reply.entry(&ttl, &attr, Generation(0));
                 }
                 Err(error) => reply.error(errno(error)),
             }
@@ -488,57 +759,16 @@ impl fuser::Filesystem for Fuse {
             Err(error) => reply.error(errno(error)),
         }
     }
-    fn link(&self, _: &Request, ino: INodeNo, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
-        if !self.fs.config.emulate_hardlinks_as_symlinks {
-            reply.error(Errno::EOPNOTSUPP);
-            return;
-        }
-        let name = match text(name) {
-            Ok(name) => name,
-            Err(error) => {
-                reply.error(error);
-                return;
-            }
-        };
-        self.spawn(reply, move |fs, reply| async move {
-            match fs.link(ino.0, parent.0, &name).await {
-                Ok(node) => {
-                    fs.reference(&node);
-                    reply.entry(&fs.config.stat_cache_ttl, &node.attr(), Generation(0));
-                }
-                Err(error) => reply.error(errno(error)),
-            }
-        });
+    fn link(&self, _: &Request, _: INodeNo, _: INodeNo, _: &OsStr, reply: ReplyEntry) {
+        // Linux FUSE LINK must return the source inode and file type. Creating
+        // a distinct symlink violates that contract and fails after mutation.
+        reply.error(Errno::EOPNOTSUPP);
     }
     fn unlink(&self, _: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
-        let name = match text(name) {
-            Ok(name) => name,
-            Err(error) => {
-                reply.error(error);
-                return;
-            }
-        };
-        self.spawn(reply, move |fs, reply| async move {
-            match fs.unlink(parent.0, &name, false).await {
-                Ok(()) => reply.ok(),
-                Err(error) => reply.error(errno(error)),
-            }
-        });
+        self.remove_entry(parent, name, false, reply);
     }
     fn rmdir(&self, _: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
-        let name = match text(name) {
-            Ok(name) => name,
-            Err(error) => {
-                reply.error(error);
-                return;
-            }
-        };
-        self.spawn(reply, move |fs, reply| async move {
-            match fs.unlink(parent.0, &name, true).await {
-                Ok(()) => reply.ok(),
-                Err(error) => reply.error(errno(error)),
-            }
-        });
+        self.remove_entry(parent, name, true, reply);
     }
     fn rename(
         &self,
@@ -576,12 +806,7 @@ impl fuser::Filesystem for Fuse {
         });
     }
     fn fsync(&self, _: &Request, ino: INodeNo, _: FileHandle, _: bool, reply: ReplyEmpty) {
-        self.spawn(reply, move |fs, reply| async move {
-            match fs.fsync(ino.0).await {
-                Ok(()) => reply.ok(),
-                Err(error) => reply.error(errno(error)),
-            }
-        });
+        self.sync_file(ino, reply);
     }
     fn fsyncdir(&self, _: &Request, _: INodeNo, _: FileHandle, _: bool, reply: ReplyEmpty) {
         self.spawn(reply, move |fs, reply| async move {
@@ -593,12 +818,7 @@ impl fuser::Filesystem for Fuse {
     }
     fn flush(&self, _: &Request, ino: INodeNo, _: FileHandle, _: LockOwner, reply: ReplyEmpty) {
         if self.fs.config.fsync_on_close {
-            self.spawn(reply, move |fs, reply| async move {
-                match fs.fsync(ino.0).await {
-                    Ok(()) => reply.ok(),
-                    Err(error) => reply.error(errno(error)),
-                }
-            });
+            self.sync_file(ino, reply);
         } else {
             reply.ok();
         }
@@ -607,14 +827,22 @@ impl fuser::Filesystem for Fuse {
         &self,
         _: &Request,
         ino: INodeNo,
-        _: FileHandle,
+        fh: FileHandle,
         _: OpenFlags,
         _: Option<LockOwner>,
         _: bool,
         reply: ReplyEmpty,
     ) {
-        self.fs.release(ino.0);
-        reply.ok();
+        let mut files = self.files.lock().unwrap();
+        if files
+            .get(&fh.0)
+            .is_some_and(|entry| entry.file.ino() == ino.0)
+        {
+            files.remove(&fh.0);
+            reply.ok();
+        } else {
+            reply.error(Errno::EBADF);
+        }
     }
     fn opendir(&self, _: &Request, ino: INodeNo, _: OpenFlags, reply: ReplyOpen) {
         match self.fs.node(ino.0) {
@@ -642,6 +870,7 @@ impl fuser::Filesystem for Fuse {
             handle,
             Arc::new(tokio::sync::Mutex::new(Directory {
                 last: String::new(),
+                page_after: String::new(),
                 cookie: 0,
             })),
         );
@@ -655,60 +884,17 @@ impl fuser::Filesystem for Fuse {
         offset: u64,
         reply: ReplyDirectory,
     ) {
-        let cursor = match self.directories.lock().unwrap().get(&fh.0).cloned() {
-            Some(cursor) => cursor,
-            None => {
-                reply.error(Errno::EBADF);
-                return;
-            }
-        };
-        self.spawn(reply, move |fs, mut reply| async move {
-            let mut cursor = cursor.lock().await;
-            if offset != cursor.cookie {
-                cursor.last.clear();
-                cursor.cookie = 0;
-            }
-            if cursor.cookie == 0 {
-                if offset == 0 && reply.add(ino, 1, FileType::Directory, ".") {
-                    reply.ok();
-                    return;
-                }
-                cursor.cookie = 1;
-            }
-            if cursor.cookie == 1 {
-                if offset <= 1
-                    && reply.add(INodeNo(fs.parent_ino(ino.0)), 2, FileType::Directory, "..")
-                {
-                    reply.ok();
-                    return;
-                }
-                cursor.cookie = 2;
-            }
-            loop {
-                let entries = match fs.directory_chunk(ino.0, &cursor.last, 128).await {
-                    Ok(entries) => entries,
-                    Err(error) => {
-                        reply.error(errno(error));
-                        return;
-                    }
-                };
-                if entries.is_empty() {
-                    break;
-                }
-                for entry in entries {
-                    let next = cursor.cookie + 1;
-                    if cursor.cookie >= offset
-                        && reply.add(INodeNo(entry.ino), next, entry.kind, &entry.name)
-                    {
-                        reply.ok();
-                        return;
-                    }
-                    cursor.cookie = next;
-                    cursor.last = entry.name;
-                }
-            }
-            reply.ok();
-        });
+        self.read_directory(ino, fh, offset, DirectoryReply::Basic(reply));
+    }
+    fn readdirplus(
+        &self,
+        _: &Request,
+        ino: INodeNo,
+        fh: FileHandle,
+        offset: u64,
+        reply: ReplyDirectoryPlus,
+    ) {
+        self.read_directory(ino, fh, offset, DirectoryReply::Plus(reply, Vec::new()));
     }
     fn releasedir(
         &self,

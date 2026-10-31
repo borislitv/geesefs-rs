@@ -33,7 +33,7 @@ s3s-sigv2 = "=0.17.0"
 bytes = "=1.12.1"
 fuser = "=0.18.0"
 libc = "0.2"
-rustix = { version = "=1.1.5", features = ["process"] }
+rustix = { version = "=1.1.5", features = ["process", "fs"] }
 tikv-jemallocator = { version = "=0.7.0", features = ["stats"] }
 tikv-jemalloc-ctl = { version = "=0.7.0", features = ["stats"] }
 stats_alloc = { version = "=0.1.10", optional = true }

@@ -31,6 +31,33 @@ but concurrent reads, tails, sustained rate and memory still fail the agreed
 all-metrics goal. See [architecture](docs/architecture.md) and
 [next work and confirmed causes](docs/next-work.md).
 
+The integrated correction adds remaining attribute TTL, bounded READDIRPLUS,
+per-open read history and clean-fsync cache preservation. Native writer/metadata,
+rsync/nginx and failure probes cover the implemented subset; hardlink emulation,
+actual-service paths and whole-file CRAP remain open. Its joint performance is
+reported in the new checkpoint below. Older tables retain their binary/source scope.
+
+## Integrated metadata/handle checkpoint — 2026-11-01
+
+The frozen integrated release has 240 independently verified healthy cold/warm
+records (five repetitions per workload/state/binary), 60 generation checks and
+2,880 persistent mixed phases with 16 further full-byte/generation checks. The
+two isolated controllers retain their original startup/bookkeeping failures;
+independent data validation does not turn them into a clean full acceptance run.
+
+In the 300-second paced control, metadata pooled p99 improves from prior Rust
+0.06678 to 0.02417 ms, but throughput is 23,110 ops/s versus Go 36,404/42,814.
+Candidate late cgroup memory is 395.21 MiB versus Go 357.86/370.08, despite lower
+sampled daemon RSS and CPU. Mixed writer throughput also loses. Isolated warm
+sequential/eviction rates beat Go, while random/concurrent and prior-Rust-relative
+metrics retain losses. Short-window allocator/late samples remain missing.
+
+Both allocator variants pass 251 Rust cases including nine native FUSE tests;
+75 bench and 14 fixture Python tests pass. The exact default release also passes
+available rw/ro rsync/nginx/failure contracts. Whole-file CRAP, required Linux LINK,
+actual-service compatibility, complete comparative accounting and memory plateau
+remain open. See [design, complete warm tables and sustained controls](docs/performance-integrated.md).
+
 ## Persistent admission correction — 2026-10-31
 
 Native FUSE/ownership diagnostics attribute the rare 30-second read to admission
@@ -40,7 +67,7 @@ Directory-local epochs also prevent unrelated writes from invalidating every
 fresh listing page. Gated regressions fail before correction; 218 all-feature
 Rust cases, Clippy, formatting and the public-source audit pass.
 
-The final release completes 60 persistent mixed cycles per implementation, with
+The `67f7aec` release completes 60 persistent mixed cycles per implementation, with
 1,440 checked passes and four full-byte/generation checks passing. The same work
 takes 200.89 s versus prior Rust 251.35 s and Go experimental/packaged
 288.61/379.29 s. Metadata active time drops 21.08 to 2.46 s; calls over 20 s drop
@@ -56,7 +83,7 @@ regresses to 1.26849 ms versus prior Rust 0.07488 and Go 0.02886/0.02510, includ
 late-run slow calls. This remains an open acceptance failure. See
 [method, CPU/memory/tails and qualifications](docs/performance.md#native-vm-admissiondirectory-checkpoint--2026-10-31).
 
-## Latest completed measurements — 2026-10-30
+## Earlier completed measurements — 2026-10-30
 
 This is the earlier idle-flush cache-policy checkpoint, retained independently
 from the subsequent admission/directory correction above.

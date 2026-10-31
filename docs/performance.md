@@ -1,11 +1,15 @@
 # Performance acceptance: UNACCEPTED
 
-The 2026-10-31 [native admission/directory checkpoint](#native-vm-admissiondirectory-checkpoint--2026-10-31)
-follows the earlier healthy-warm cache-policy comparison and persistent mixed-mount
-observation summarized in the [README](../README.md). Repeated warm-random GETs
-disappear and the new VM control meets its offered rate, but tails, throughput
-and memory still lose selected gates against Go. Neither checkpoint establishes
-a memory plateau.
+The latest [integrated metadata/handle checkpoint](performance-integrated.md)
+measures the combined freshness/PLUS/LIST, per-open history and clean-fsync fixes:
+240 independently verified healthy cold/warm records and 2,880 mixed phases.
+Metadata tails improve in sustained controls, but throughput, concurrent memory
+and equal-rate cgroup memory retain losses. Original controller failures and
+missing short-window measurements remain failures/gaps.
+
+The earlier [native admission/directory checkpoint](#native-vm-admissiondirectory-checkpoint--2026-10-31)
+and cache-policy observations retain their original scopes. None establishes
+a memory plateau or an all-metrics win.
 Full compatibility and comparative acceptance remain open. Cold-start
 superiority is not required. See [next work](next-work.md) for confirmed causes
 and [change history](change-history.md) for corrections.
@@ -26,10 +30,14 @@ and [change history](change-history.md) for corrections.
   backend throttling qualifies sequential/eviction results. Persistent/observer
   diagnostics raise backend/parent CPU to 16/32 without changing application or
   filesystem/client budgets. Verify actual limits and pressure on every fixture.
-  The latest four-binary comparison instead uses no CPU quota, eight runtime
+  The 2026-10-30 four-binary comparison instead uses no CPU quota, eight runtime
   workers and 16/12/32 GiB memory maxima for filesystem/client, backend and parent.
   Backend data lives for one paired workload group, with full generation checks
   before scoped bucket cleanup; no global caches are dropped.
+  The integrated isolated comparison applies eight CPU to filesystem/client and
+  no backend/parent CPU quota; its persistent controls use no CPU quota. Both
+  retain eight workers and 16/12/32 GiB maxima. Writer sizes are 16 MiB isolated
+  and 1 MiB mixed; the designs cannot be pooled as equivalent workloads.
 - Rotate implementation order and repeat fresh/warm phases on immutable data.
   Verify full bytes and listings before treating a phase as comparable.
 - Report throughput and p50/p95/p99, daemon/client user/system CPU, whole-cgroup

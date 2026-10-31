@@ -23,5 +23,6 @@ jobs:
       - run: timeout 60s cargo fmt --all -- --check
       - run: timeout 180s python3 scripts/audit_public_sources.py
       - run: timeout 30s python3 -m unittest discover -s tests -p 'test_*.py'
+      - run: timeout 60s python3 -m unittest discover -s bench -p 'test_*.py'
       - run: timeout 900s cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: timeout 300s cargo test --locked --all-targets --all-features

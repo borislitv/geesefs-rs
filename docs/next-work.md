@@ -1,8 +1,8 @@
-# Next work: observed problems and causes, 2026-10-31
+# Next work: observed problems and causes, 2026-11-01
 
-Overall status remains **UNACCEPTED**. This is the handoff for the next iteration;
+Overall status remains **UNACCEPTED**. This is the current working inventory;
 it separates confirmed mechanisms from hypotheses. See the latest
-[measurement tables](../README.md#latest-completed-measurements--2026-10-30),
+[measurement tables](performance-integrated.md),
 [architecture](architecture.md) and [comparison contract](performance.md).
 
 The subsequent [native VM checkpoint](performance.md#native-vm-admissiondirectory-checkpoint--2026-10-31)
@@ -11,6 +11,8 @@ below at `67f7aec`. Earlier measurements retain their original scope; the new
 fixed-work control improves total elapsed but not every tail or memory metric.
 The reverse-order offered-rate control adds a late-run metadata-tail regression
 and higher late cgroup memory than both Go references to the unresolved work.
+The later integrated checkpoint below corrects the demonstrated metadata
+mechanisms and measures them jointly, but retains throughput and memory losses.
 
 ## 1. Warm random reads: cache working-set eviction
 
@@ -104,13 +106,33 @@ operation concern, not only initial listing. Late cgroup memory is 389.8 MiB
 versus Go 350.6/371.4 despite lower sampled daemon RSS. Full tables and scope
 qualifiers are in [performance](performance.md#native-vm-admissiondirectory-checkpoint--2026-10-31).
 
-**Next:** attribute the late metadata calls, including page/attribute freshness and
-backend request lifetimes, before changing TTL or invalidation again; a causal
-explanation has not been established. Retain random/concurrent/writer regressions
-and both Go references. Control observer and shared-host effects; repeat each
-fixed-work/offered-rate design independently. Keep whole-series daemon, client,
-allocator, cgroup, file and kernel memory; extend duration and repetitions before
-claiming a plateau. Preserve baseline-owned Go GC.
+**Subsequent confirmed cause/correction:** a frozen-baseline FUSE/HTTP join places
+128/256/384 file HEADs inside serial LOOKUP in paced cycles 14/21/28. Cached name
+pages reused older child attributes; returning a new full kernel TTL compounds
+their differing ages. Child freshness/type/binding validation, authoritative clean
+LIST refresh, remaining TTL and supported bounded READDIRPLUS correct those
+mechanisms. Newer HEAD/commit observations and marker attributes remain protected.
+
+**Further confirmed cause/correction:** frozen-candidate HTTP traces show repeated
+standard LIST prefix scans for bounded chunks. Supported SDK V1 marker / V2
+start-after skip consumed names while opaque tokens retain priority. The extended
+protocol remains unchanged. Lexically adjacent directory/object names are not
+skipped, and native 8,192-name traversal now uses 65 bounded LIST calls including
+EOF. Standard LIST still resolves accurate types rather than assuming regular
+files from metadata-free listings.
+
+**Integrated outcome:** 240 healthy isolated cold/warm records and 2,880 mixed
+phases are independently verified with all generation/full-byte checks. Paced
+metadata p99 is 0.02417 ms versus prior Rust 0.06678, but metadata throughput is
+23,110 ops/s versus Go 36,404/42,814; 1 MiB writer throughput also loses. Late
+cgroup memory is 395.21 MiB versus Go 357.86/370.08, including file cache
+198.35 MiB versus Go 171.33/155.68. In isolated concurrent work, late cgroup is
+177.98 MiB versus Go 153.30/154.98. These owners/components, and the remaining
+SDK/scheduler/admission work, need causal attribution before another correction.
+Do not shrink budgets, remove exact metadata/durability or force reclamation.
+The [checkpoint](performance-integrated.md) retains missing metrics, original
+controller errors, observer controls and previous-Rust-relative losses. Extend
+duration and repeated offered-rate designs before claiming a memory plateau.
 
 ## 3. Resource and observer effects still qualify performance claims
 
@@ -144,6 +166,15 @@ concurrent groups have five pairs per implementation; eviction is partial and
 writer/fsync is unmeasured in this attempt. Its final generation check is not
 reached. Preserve these omissions and pair-level variance; do not call it a
 completed observer-overhead acceptance test.
+
+The integrated checkpoint adds complete fixed-work, paced and observer-off mixed
+controls. Recorded filesystem/client and backend interval counter deltas are zero;
+all owned mounts/processes stop. The single observer-off control preserves the
+metadata-tail improvement but still loses Go metadata/writer throughput. Its
+memory gauges are unobserved, and different orders/shared-host scheduling still
+prevent a claim of zero observation cost. Isolated sub-10 ms metadata windows
+also lack required late/allocator samples; original startup/budget observations
+must not be substituted for those missing in-window measurements.
 
 ## 4. Remaining initial-read/tail cost has no proven SDK defect
 
@@ -179,10 +210,11 @@ does not arrange another upload. This is not evidence of Rust data loss.
 **Where:** pinned Go `core/file.go::{SyncFile,sendUpload}`;
 `scripts/integration.py::recover_fsync`, writer-failure workload.
 
-**Next:** add a separate close/recovery boundary probe to characterize reference
-semantics, preserving the original failing open-handle workload. Do not lengthen
-timeouts or close the handle to relabel those failures as success. Clarify the
-required recovery contract independently of baseline weaknesses.
+**Separate close probe:** both references recover full backend bytes after close
+(43.37/43.44 seconds in the local fixture); Rust does so after 0.26 seconds.
+The unchanged open-handle probe still fails for Go through 75 seconds and passes
+for Rust. Clarify the required recovery contract independently of reference
+weaknesses; the close result is not recovery for the original workload.
 
 ## 6. Linux hardlink-as-symlink returns EIO after creating the alias
 
@@ -191,31 +223,34 @@ probe on Linux 6.8. The symlink is already visible after EIO. Linux
 `fuse_link/create_new_entry` requires reply/source file types to match; returning
 a symlink for a regular source violates that requirement.
 
-**Where:** `src/fuse.rs` link callback, `src/filesystem.rs` link emulation;
+**Where:** `src/fuse.rs` link callback and compatibility flag help;
 public kernel reference in [compatibility](compatibility.md).
 
-**Next:** choose an explicit supported Linux contract and add a mounted regression
-for both return status and post-error side effects. Do not silently accept the
-shared failure as compatibility or pretend it is a Rust-only regression.
+**Correction:** the Rust callback returns EOPNOTSUPP before mutation; the unused
+core alias constructor is removed. A native regression verifies errno, no alias
+and unchanged source/backend bytes. Both Go failures remain preserved. This
+closes unsafe post-error mutation, not required hardlink-emulation compatibility.
 
 ## Remaining acceptance and quality gates
 
-- `bench/compare.py::Sampler.metrics` computes its `steady` memory fields from
-  the latter half of a `deque(maxlen=1000)`, not the whole measurement's late
-  half once that buffer wraps. The older operation checkpoint labels this a late
-  window. Latest README tables use independent full-raw-series analysis instead.
-  Before using long-run `steady` fields in acceptance, replace this bounded-tail
-  aggregation with an explicit whole-window/time-window contract and a regression
-  that exceeds 1,000 samples. Otherwise an earlier sustained high-memory interval
-  can disappear from the reported mean. Raw JSONL and sampled peaks are retained.
+- Sampler and allocator accounting now stream the complete temporal latter half,
+  with >1,000-sample/irregular/missing/zero regressions. Shared validation and
+  nearest-rank pooling feed gates and summaries; daemon/client, heap and file/kernel
+  components cannot hide behind combined RSS. Late sample means still do not
+  establish a plateau; observer overhead needs repeated whole-workload controls.
 - Actual-service IAM, signing/encryption/PATCH, complete Linux CLI parity and
   imported multipart layouts remain incomplete; loopback tests do not replace
   those checks. See [backend options](backend-options.md).
-- Concurrent handles share inode adaptive history. Zero-to-one reopen reset is
-  implemented; per-handle policy isolation is not. Require an interleaved-reader
-  reproducer before introducing that change.
-- Heap-observer automatic mutation scope killed 24/25 mutants; one boundary
-  survivor remains. This is not whole-repository mutation success. Broader Rust
-  quality findings and binary redistribution notices remain open.
+- Per-open adaptive history now has interleaved/new-handle/borrowed-read proofs;
+  cache, fills, cancellation and budgets remain shared. Clean fsync preserves
+  reusable loans. Their combined measurements retain random/concurrent, mixed
+  writer/metadata and equal-rate cgroup losses; passing those proofs is insufficient.
+- Heap-observer automatic mutation kills 24/24 sites and shared metrics 30/30,
+  including the former exact-two-sample boundary survivor. Affected duplication
+  >= 0.8 is absent. Both allocators now have real entrypoint/native coverage, and
+  the locked native-notice/source bundle is verified. Whole affected-file CRAP
+  still fails; larger rename/lookup/write routines, benchmark orchestration and
+  broader mutation scope remain open. See [testing](testing.md) and
+  [distribution notices](distribution.md) for exact scopes.
 - A merge can preserve this experimental checkpoint, but does not establish the
   agreed all-workload speed/memory goal or authorize production replacement.

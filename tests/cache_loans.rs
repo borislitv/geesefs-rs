@@ -74,6 +74,28 @@ async fn idle_flush_capacity_retains_clean_data_without_increasing_the_payload_l
 }
 
 #[tokio::test]
+async fn clean_fsync_preserves_the_reusable_read_working_set() {
+    let (store, fs, bytes) = fixture();
+    store.seed("already-durable", b"unchanged");
+    let ino = fs.lookup(1, "file").await.unwrap().ino;
+    let other = fs.lookup(1, "already-durable").await.unwrap().ino;
+    revisit(&fs, ino, &bytes).await;
+    assert_eq!(store.read_calls.load(Ordering::Relaxed), 96);
+
+    for clean in [ino, other] {
+        fs.fsync(clean).await.unwrap();
+        revisit(&fs, ino, &bytes).await;
+        assert_eq!(
+            store.read_calls.load(Ordering::Relaxed),
+            96,
+            "fsync without a dirty generation must not discard reusable readers' data"
+        );
+    }
+    assert_eq!(store.put_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(store.bytes("already-durable"), b"unchanged");
+}
+
+#[tokio::test]
 async fn an_owned_cached_reply_cannot_pin_flush_capacity_or_change_after_fsync() {
     for callback in [false, true] {
         let (store, fs, bytes) = fixture();

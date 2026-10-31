@@ -17,92 +17,94 @@ static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[cfg(feature = "system-allocator")]
 static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::parse_from(normalize_fstab(std::env::args_os().collect()));
-    config.validate()?;
-    if !config.foreground {
-        return Err("background daemonization is unsupported; specify -f".into());
+#[cfg(not(feature = "system-allocator"))]
+fn jemalloc_snapshot() -> (Option<usize>, serde_json::Value) {
+    use tikv_jemalloc_ctl::{epoch, stats};
+
+    if epoch::advance().is_err() {
+        return (None, serde_json::Value::Null);
     }
-    if !config.mountpoint.is_dir() {
-        return Err("mountpoint must be an existing directory".into());
-    }
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    if config.no_verify_ssl {
-        eprintln!("WARNING: S3 TLS certificate verification is disabled by --no-verify-ssl");
-    }
-    let store =
-        Arc::new(runtime.block_on(async { S3::from_config(&config).await?.initialize().await })?);
-    // Match reference best-effort startup cleanup, confined to the mount prefix.
-    // Report permission/protocol/timeout failures rather than hiding them.
-    if let Err(error) = runtime.block_on(store.expire_multipart(std::time::SystemTime::now())) {
-        eprintln!("multipart startup cleanup failed: {error}");
-    }
-    let mountpoint = config.mountpoint.clone();
-    let fs = Filesystem::new(config, store.clone())?;
-    let stats = if let Some(path) = &fs.config.stats_file {
-        use std::{io::Write, os::unix::fs::OpenOptionsExt};
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)?;
-        let stats_fs = fs.clone();
-        Some(runtime.spawn(async move {
-            let mut timer = tokio::time::interval(Duration::from_millis(50));
-            loop {
-                timer.tick().await;
-                #[cfg(not(feature = "system-allocator"))]
-                let (allocator, allocated, scope, counters) = (
-                    "jemalloc",
-                    tikv_jemalloc_ctl::epoch::advance()
-                        .and_then(|_| tikv_jemalloc_ctl::stats::allocated::read())
-                        .ok(),
-                    "jemalloc allocated size classes; excludes retained/free pages and external allocators",
-                    serde_json::Value::Null,
-                );
-                #[cfg(feature = "system-allocator")]
-                let (allocator, allocated, scope, counters) = {
-                    let stats = ALLOCATOR.stats();
-                    (
-                        "system",
-                        stats.bytes_allocated.checked_sub(stats.bytes_deallocated),
-                        "sampled net requested Rust global bytes; includes failed requests; non-atomic snapshot; excludes native allocations, allocator overhead and retention",
-                        serde_json::json!({
-                            "provider": "stats_alloc 0.1.10",
-                            "bytes_allocated": stats.bytes_allocated,
-                            "bytes_deallocated": stats.bytes_deallocated,
-                            "allocations": stats.allocations,
-                            "deallocations": stats.deallocations,
-                            "reallocations": stats.reallocations,
-                            "bytes_reallocated": stats.bytes_reallocated,
-                        }),
-                    )
-                };
-                let sample = serde_json::json!({
-                    "unix_time_ns": std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos(),
-                    "monotonic_source": "interval-50ms",
-                    "allocator": allocator,
-                    "allocated_bytes": allocated,
-                    "allocated_bytes_scope": scope,
-                    "allocation_counters": counters,
-                    "effective_budgets": stats_fs.effective_budgets(),
-                });
-                if writeln!(file, "{sample}").is_err() {
-                    break;
-                }
-            }
-        }))
-    } else {
-        None
+    (
+        stats::allocated::read().ok(),
+        serde_json::json!({
+            "provider": "tikv-jemalloc-ctl 0.7.0",
+            "scope": "allocator page gauges, not process RSS; retained virtual mappings are not physical memory",
+            "active_bytes": stats::active::read().ok(),
+            "resident_bytes": stats::resident::read().ok(),
+            "mapped_bytes": stats::mapped::read().ok(),
+            "retained_virtual_bytes": stats::retained::read().ok(),
+            "metadata_bytes": stats::metadata::read().ok(),
+        }),
+    )
+}
+
+#[cfg(not(feature = "system-allocator"))]
+fn allocation_stats() -> serde_json::Value {
+    let (allocated, pages) = jemalloc_snapshot();
+    serde_json::json!({
+        "allocator": "jemalloc",
+        "allocated_bytes": allocated,
+        "allocated_bytes_scope": "jemalloc allocated size classes; excludes retained/free pages and external allocators",
+        "allocation_counters": serde_json::Value::Null,
+        "allocator_page_stats": pages,
+    })
+}
+
+#[cfg(feature = "system-allocator")]
+fn allocation_stats() -> serde_json::Value {
+    let stats = ALLOCATOR.stats();
+    serde_json::json!({
+        "allocator": "system",
+        "allocated_bytes": stats.bytes_allocated.checked_sub(stats.bytes_deallocated),
+        "allocated_bytes_scope": "sampled net requested Rust global bytes; includes failed requests; non-atomic snapshot; excludes native allocations, allocator overhead and retention",
+        "allocation_counters": {
+            "provider": "stats_alloc 0.1.10",
+            "bytes_allocated": stats.bytes_allocated,
+            "bytes_deallocated": stats.bytes_deallocated,
+            "allocations": stats.allocations,
+            "deallocations": stats.deallocations,
+            "reallocations": stats.reallocations,
+            "bytes_reallocated": stats.bytes_reallocated,
+        },
+        "allocator_page_stats": serde_json::Value::Null,
+    })
+}
+
+fn spawn_stats(
+    runtime: &tokio::runtime::Runtime,
+    fs: &Arc<Filesystem>,
+) -> std::io::Result<Option<tokio::task::JoinHandle<()>>> {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    let Some(path) = &fs.config.stats_file else {
+        return Ok(None);
     };
-    let adapter = Fuse::new(fs.clone(), runtime.handle().clone());
-    let notifier = adapter.notifier.clone();
-    let shutdown_error = adapter.shutdown_error.clone();
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    let fs = fs.clone();
+    Ok(Some(runtime.spawn(async move {
+        let mut timer = tokio::time::interval(Duration::from_millis(50));
+        loop {
+            timer.tick().await;
+            let mut sample = allocation_stats();
+            sample["unix_time_ns"] = serde_json::json!(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            );
+            sample["monotonic_source"] = "interval-50ms".into();
+            sample["effective_budgets"] = serde_json::json!(fs.effective_budgets());
+            if writeln!(file, "{sample}").is_err() {
+                break;
+            }
+        }
+    })))
+}
+
+fn mount_options(config: &Config) -> Result<fuser::Config, Box<dyn std::error::Error>> {
     let mut options = fuser::Config::default();
     options
         .mount_options
@@ -110,7 +112,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     options
         .mount_options
         .push(fuser::MountOption::DefaultPermissions);
-    for option in &fs.config.mount_options {
+    for option in &config.mount_options {
         options.mount_options.push(match option.as_str() {
             "ro" => fuser::MountOption::RO,
             "rw" => fuser::MountOption::RW,
@@ -121,17 +123,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             _ => return Err("unsupported mount option".into()),
         });
     }
-    let mut session = fuser::Session::new(adapter, &mountpoint, &options)?;
-    *notifier.lock().unwrap() = Some(session.notifier());
-    let mut unmounter = session.unmount_callable();
-    let signals = runtime.spawn(async move {
+    Ok(options)
+}
+
+fn spawn_signals(
+    runtime: &tokio::runtime::Runtime,
+    mut unmounter: fuser::SessionUnmounter,
+) -> tokio::task::JoinHandle<()> {
+    runtime.spawn(async move {
         let mut terminate =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                 .expect("SIGTERM registration");
         tokio::select! {_=tokio::signal::ctrl_c()=>{},_=terminate.recv()=>{}}
         let _ = tokio::task::spawn_blocking(move || unmounter.unmount()).await;
-    });
-    let background = runtime.spawn(async move {
+    })
+}
+
+fn spawn_flush(
+    runtime: &tokio::runtime::Runtime,
+    fs: Arc<Filesystem>,
+) -> tokio::task::JoinHandle<()> {
+    runtime.spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         loop {
             interval.tick().await;
@@ -142,7 +154,53 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("background flush failed (dirty data retained): {error}");
             }
         }
-    });
+    })
+}
+
+fn configuration() -> Result<Config, Box<dyn std::error::Error>> {
+    let config = Config::parse_from(normalize_fstab(std::env::args_os().collect()));
+    config.validate()?;
+    if !config.foreground {
+        return Err("background daemonization is unsupported; specify -f".into());
+    }
+    if !config.mountpoint.is_dir() {
+        return Err("mountpoint must be an existing directory".into());
+    }
+    Ok(config)
+}
+
+fn connect_store(
+    runtime: &tokio::runtime::Runtime,
+    config: &Config,
+) -> Result<Arc<S3>, Box<dyn std::error::Error>> {
+    if config.no_verify_ssl {
+        eprintln!("WARNING: S3 TLS certificate verification is disabled by --no-verify-ssl");
+    }
+    let store =
+        Arc::new(runtime.block_on(async { S3::from_config(config).await?.initialize().await })?);
+    // Match reference best-effort startup cleanup, confined to the mount prefix.
+    // Report permission/protocol/timeout failures rather than hiding them.
+    if let Err(error) = runtime.block_on(store.expire_multipart(std::time::SystemTime::now())) {
+        eprintln!("multipart startup cleanup failed: {error}");
+    }
+    Ok(store)
+}
+
+fn serve(
+    runtime: &tokio::runtime::Runtime,
+    fs: Arc<Filesystem>,
+    store: Arc<S3>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mountpoint = fs.config.mountpoint.clone();
+    let stats = spawn_stats(runtime, &fs)?;
+    let options = mount_options(&fs.config)?;
+    let adapter = Fuse::new(fs.clone(), runtime.handle().clone());
+    let notifier = adapter.notifier.clone();
+    let shutdown_error = adapter.shutdown_error.clone();
+    let mut session = fuser::Session::new(adapter, &mountpoint, &options)?;
+    *notifier.lock().unwrap() = Some(session.notifier());
+    let signals = spawn_signals(runtime, session.unmount_callable());
+    let background = spawn_flush(runtime, fs);
     eprintln!(
         "geesefs-rs: experimental read/write mount; compatibility/performance acceptance pending"
     );
@@ -162,6 +220,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err(error.into());
     }
     Ok(())
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let config = configuration()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let store = connect_store(&runtime, &config)?;
+    let fs = Filesystem::new(config, store.clone())?;
+    serve(&runtime, fs, store)
 }
 
 fn main() -> std::process::ExitCode {

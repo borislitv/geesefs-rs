@@ -1,0 +1,401 @@
+//! Explicit native tests: never silently pass when a requested FUSE mount fails.
+mod support;
+
+use geesefs_rs::{filesystem::Filesystem, fuse::Fuse};
+use std::{
+    path::Path,
+    sync::{Arc, atomic::Ordering},
+    time::{Duration, Instant},
+};
+use support::MemoryStore;
+
+fn mounted(fs: Arc<Filesystem>, check: impl FnOnce(&Path)) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Fuse::new(fs, runtime.handle().clone());
+    let shutdown_error = adapter.shutdown_error.clone();
+    let mut options = fuser::Config::default();
+    options
+        .mount_options
+        .push(fuser::MountOption::DefaultPermissions);
+    let session = fuser::Session::new(adapter, directory.path(), &options)
+        .expect("explicitly requested native FUSE mount must be available")
+        .spawn()
+        .unwrap();
+    let checked =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check(directory.path())));
+    session
+        .umount_and_join()
+        .expect("owned FUSE session must stop cleanly");
+    if let Err(panic) = checked {
+        std::panic::resume_unwind(panic);
+    }
+    assert!(shutdown_error.lock().unwrap().is_none());
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Linux FUSE fixture"]
+fn plus_pages_deliver_attributes_and_lookup_ownership_without_overlapping_lists() {
+    let store = MemoryStore::new();
+    for number in 0..8192 {
+        store.seed(&format!("{number:04}"), b"independent bytes");
+    }
+    let fs = store.filesystem(16);
+    mounted(fs.clone(), |path| {
+        let mut names = std::fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            (0..8192).map(|n| format!("{n:04}")).collect::<Vec<_>>()
+        );
+        let references = fs
+            .namespace
+            .lock()
+            .unwrap()
+            .nodes
+            .values()
+            .map(|node| (node.ino, node.state.lock().unwrap().lookups))
+            .collect::<Vec<_>>();
+        assert_eq!(references.iter().filter(|(ino, _)| *ino != 1).count(), 8192);
+        assert!(
+            references.iter().all(|(_, count)| *count == 1),
+            "READDIRPLUS must deliver exactly one lookup reference per entry"
+        );
+        assert_eq!(
+            fs.node(1).unwrap().state.lock().unwrap().lookups,
+            1,
+            "Linux does not acquire lookup references for dot entries"
+        );
+        assert_eq!(
+            store.list_calls.load(Ordering::Relaxed),
+            65, // 64 bounded chunks plus EOF; no rescanning from the prefix start.
+            "small kernel reply frames must resume the same bounded backend page"
+        );
+        for name in &names {
+            assert_eq!(std::fs::metadata(path.join(name)).unwrap().len(), 17);
+        }
+        assert_eq!(
+            store.head_starts.load(Ordering::Relaxed),
+            0,
+            "authoritative listing attributes must not cause per-name HEADs"
+        );
+    });
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Linux FUSE fixture"]
+fn failed_plus_buffer_does_not_transfer_unsent_lookup_references() {
+    let store = MemoryStore::new();
+    for number in 0..5 {
+        store.seed(&format!("{number:04}"), b"data");
+    }
+    store.seed("z-directory/child", b"data");
+    *store.failed_list_prefix.lock().unwrap() = Some("z-directory/".into());
+    let fs = store.filesystem(16);
+    mounted(fs.clone(), |path| {
+        let result = std::fs::read_dir(path)
+            .unwrap()
+            .collect::<std::io::Result<Vec<_>>>();
+        assert!(
+            result.is_err(),
+            "a failed metadata fetch must not publish a partial PLUS buffer"
+        );
+        let references = fs
+            .namespace
+            .lock()
+            .unwrap()
+            .nodes
+            .values()
+            .filter(|node| node.ino != 1)
+            .map(|node| node.state.lock().unwrap().lookups)
+            .collect::<Vec<_>>();
+        assert!(!references.is_empty());
+        assert!(
+            references.iter().all(|count| *count == 0),
+            "no reference may escape an errored reply, even for earlier buffered names"
+        );
+    });
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Linux FUSE fixture"]
+fn a_cached_lookup_does_not_restart_the_kernel_attribute_ttl() {
+    let store = MemoryStore::new();
+    store.seed("file", b"old");
+    let mut config = MemoryStore::config(16);
+    config.stat_cache_ttl = Duration::from_secs(4);
+    let fs = Filesystem::new(config, store.clone()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let node = runtime.block_on(fs.lookup(1, "file")).unwrap();
+    mounted(fs.clone(), |path| {
+        node.state.lock().unwrap().fetched = Instant::now() - Duration::from_secs(3);
+        let started = Instant::now();
+        assert_eq!(std::fs::metadata(path.join("file")).unwrap().len(), 3);
+        store.seed("file", b"new generation");
+        // The real kernel's cache cannot use a mocked Rust clock. Wait past its
+        // remaining 1s, but well before the former restarted 4s TTL would expire.
+        std::thread::sleep(Duration::from_millis(1100));
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "fixture scheduling exceeded the TTL discrimination window"
+        );
+        assert_eq!(std::fs::metadata(path.join("file")).unwrap().len(), 14);
+    });
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Linux FUSE fixture"]
+fn exhausted_file_handles_reject_create_before_namespace_mutation() {
+    let store = MemoryStore::new();
+    store.seed("source", b"original bytes");
+    let mut config = MemoryStore::config(16);
+    config.entry_limit = 8;
+    let fs = Filesystem::new(config, store.clone()).unwrap();
+    mounted(fs, |path| {
+        let mut files = (0..8)
+            .map(|_| std::fs::File::open(path.join("source")).unwrap())
+            .collect::<Vec<_>>();
+        let error = std::fs::File::create(path.join("new")).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EMFILE));
+        assert!(
+            !path.join("new").exists(),
+            "handle admission must precede creating a dirty namespace entry"
+        );
+        files.pop();
+        let mut created = std::fs::File::create(path.join("new")).unwrap();
+        std::io::Write::write_all(&mut created, b"committed after release").unwrap();
+        created.sync_all().unwrap();
+    });
+    assert_eq!(store.bytes("source"), b"original bytes");
+    assert_eq!(store.bytes("new"), b"committed after release");
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Linux FUSE fixture"]
+fn namespace_pressure_does_not_reclaim_or_reference_unsent_plus_entries() {
+    let store = MemoryStore::new();
+    for number in 0..12 {
+        store.seed(&format!("{number:04}"), b"data");
+    }
+    let mut config = MemoryStore::config(16);
+    config.entry_limit = 8;
+    let fs = Filesystem::new(config, store).unwrap();
+    mounted(fs.clone(), |path| {
+        let error = std::fs::read_dir(path)
+            .unwrap()
+            .collect::<std::io::Result<Vec<_>>>()
+            .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ENOMEM));
+        let namespace = fs.namespace.lock().unwrap();
+        assert!(namespace.nodes.len() <= 8);
+        assert!(
+            namespace
+                .nodes
+                .values()
+                .filter(|node| node.ino != 1)
+                .all(|node| node.state.lock().unwrap().lookups == 0),
+            "an unsent buffer must neither acquire references nor evade the inode bound"
+        );
+    });
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Linux FUSE fixture"]
+fn plus_common_prefixes_preserve_directory_marker_permissions_and_ownership() {
+    use std::os::unix::fs::MetadataExt;
+
+    let store = MemoryStore::new();
+    store.seed("directory/", b"");
+    store.seed("directory/child", b"data");
+    store
+        .objects
+        .lock()
+        .unwrap()
+        .get_mut("directory/")
+        .unwrap()
+        .metadata
+        .extend([
+            ("mode".into(), (libc::S_IFDIR | 0o750).to_string()),
+            ("uid".into(), "1234".into()),
+            ("gid".into(), "5678".into()),
+        ]);
+    let fs = store.filesystem(16);
+    mounted(fs, |path| {
+        let names = std::fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["directory"]);
+        let metadata = std::fs::metadata(path.join("directory")).unwrap();
+        assert_eq!(metadata.mode() & 0o7777, 0o750);
+        assert_eq!((metadata.uid(), metadata.gid()), (1234, 5678));
+    });
+    assert_eq!(store.head_starts.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Linux FUSE fixture"]
+fn unsupported_hardlink_emulation_fails_before_creating_an_alias() {
+    let store = MemoryStore::new();
+    store.seed("source", b"original bytes");
+    let mut config = MemoryStore::config(16);
+    config.emulate_hardlinks_as_symlinks = true;
+    let fs = Filesystem::new(config, store.clone()).unwrap();
+    mounted(fs, |path| {
+        let error = std::fs::hard_link(path.join("source"), path.join("alias")).unwrap_err();
+        assert_eq!(
+            std::fs::symlink_metadata(path.join("alias"))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound,
+            "a rejected Linux LINK must not leave a symlink behind"
+        );
+        assert_eq!(error.raw_os_error(), Some(libc::EOPNOTSUPP));
+        assert_eq!(
+            std::fs::read(path.join("source")).unwrap(),
+            b"original bytes"
+        );
+    });
+    assert!(!store.objects.lock().unwrap().contains_key("alias"));
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Linux FUSE fixture"]
+fn native_writer_metadata_xattrs_links_and_removal_preserve_committed_bytes() {
+    use rustix::fs::{FallocateFlags, Mode, XattrFlags};
+    use std::{
+        io::{Read, Seek, SeekFrom, Write},
+        os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
+        time::UNIX_EPOCH,
+    };
+
+    let store = MemoryStore::new();
+    let mut config = MemoryStore::config(16);
+    config.enable_specials = true;
+    config.fsync_on_close = true;
+    let fs = Filesystem::new(config, store.clone()).unwrap();
+    mounted(fs, |path| {
+        let directory = path.join("directory");
+        std::fs::create_dir(&directory).unwrap();
+        let source = directory.join("file");
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&source)
+            .unwrap();
+        file.write_all(b"independent full-byte proof").unwrap();
+        file.sync_all().unwrap();
+        assert_eq!(
+            store.bytes("directory/file"),
+            b"independent full-byte proof"
+        );
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::os::unix::fs::chown(&source, Some(1234), Some(5678)).unwrap();
+        let modified = UNIX_EPOCH + Duration::from_secs(1_700_000_123);
+        file.set_modified(modified).unwrap();
+        let metadata = file.metadata().unwrap();
+        assert_eq!(metadata.mode() & 0o7777, 0o640);
+        assert_eq!((metadata.uid(), metadata.gid()), (1234, 5678));
+        assert_eq!(metadata.modified().unwrap(), modified);
+
+        let attribute = [0, 255, 83];
+        rustix::fs::setxattr(&source, "user.fixture", &attribute, XattrFlags::CREATE).unwrap();
+        assert_eq!(
+            rustix::fs::setxattr(&source, "user.fixture", b"other", XattrFlags::CREATE),
+            Err(rustix::io::Errno::EXIST)
+        );
+        let mut short = [0_u8; 2];
+        assert_eq!(
+            rustix::fs::getxattr(&source, "user.fixture", &mut short[..]),
+            Err(rustix::io::Errno::RANGE)
+        );
+        let mut value = [0_u8; 16];
+        let length = rustix::fs::getxattr(&source, "user.fixture", &mut value[..]).unwrap();
+        assert_eq!(&value[..length], &attribute);
+        let mut names = [0_u8; 1024];
+        let length = rustix::fs::listxattr(&source, &mut names[..]).unwrap();
+        assert!(
+            names[..length]
+                .split(|&byte| byte == 0)
+                .any(|name| name == b"user.fixture")
+        );
+        rustix::fs::removexattr(&source, "user.fixture").unwrap();
+        assert_eq!(
+            rustix::fs::getxattr(&source, "user.fixture", &mut value[..]),
+            Err(rustix::io::Errno::NODATA)
+        );
+
+        rustix::fs::fallocate(&file, FallocateFlags::empty(), 0, 8192).unwrap();
+        file.set_len(4096).unwrap();
+        rustix::fs::fallocate(&file, FallocateFlags::KEEP_SIZE, 8192, 4096).unwrap();
+        assert_eq!(file.metadata().unwrap().len(), 4096);
+        assert_eq!(
+            rustix::fs::fallocate(
+                &file,
+                FallocateFlags::KEEP_SIZE | FallocateFlags::PUNCH_HOLE,
+                0,
+                4096
+            ),
+            Err(rustix::io::Errno::OPNOTSUPP)
+        );
+        let mut expected = b"independent full-byte proof".to_vec();
+        expected.resize(4096, 0);
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut read = Vec::new();
+        file.read_to_end(&mut read).unwrap();
+        assert_eq!(read, expected);
+        file.sync_all().unwrap();
+        assert_eq!(store.bytes("directory/file"), expected);
+        drop(file);
+
+        let moved = directory.join("moved");
+        std::fs::rename(&source, &moved).unwrap();
+        let link = directory.join("link");
+        std::os::unix::fs::symlink("moved", &link).unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), Path::new("moved"));
+        assert_eq!(std::fs::read(&link).unwrap(), expected);
+        let fifo = directory.join("fifo");
+        rustix::fs::mkfifoat(rustix::fs::CWD, &fifo, Mode::from_bits_truncate(0o600)).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&fifo)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
+        std::fs::File::open(&directory).unwrap().sync_all().unwrap();
+        assert_eq!(store.bytes("directory/moved"), expected);
+        assert_eq!(
+            std::fs::remove_dir(&directory).unwrap_err().kind(),
+            std::io::ErrorKind::DirectoryNotEmpty
+        );
+        std::fs::remove_file(&link).unwrap();
+        std::fs::remove_file(&fifo).unwrap();
+        std::fs::remove_file(&moved).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    });
+    assert!(store.objects.lock().unwrap().is_empty());
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Linux FUSE fixture"]
+fn fsync_on_close_commits_dirty_bytes_before_the_mount_is_destroyed() {
+    let store = MemoryStore::new();
+    let mut config = MemoryStore::config(16);
+    config.fsync_on_close = true;
+    let fs = Filesystem::new(config, store.clone()).unwrap();
+    mounted(fs, |path| {
+        std::fs::write(path.join("file"), b"durable close boundary").unwrap();
+        assert_eq!(store.bytes("file"), b"durable close boundary");
+    });
+}

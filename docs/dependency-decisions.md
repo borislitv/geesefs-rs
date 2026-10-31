@@ -22,6 +22,7 @@ remains outstanding. See LICENSE and NOTICE for source attribution.
 | Fixtures | tiny_http 0.12 (MIT OR Apache-2.0), rcgen/tempfile (MIT OR Apache-2.0), Moto and SeaweedFS (Apache-2.0); real HTTP/TLS boundaries plus faithful gated storage fakes. |
 | CPU accounting | psutil 7.2.2 (BSD-3-Clause) process counters and owned cgroup `cpu.stat`; wall time is not CPU consumed. |
 | Go heap accounting | Go's public `net/http/pprof` debug text exposes live `runtime.MemStats`. Python standard-library HTTP, response bounds and a narrow field adapter avoid implementing a heap-profile decoder or adding another runtime dependency. |
+| Redistribution inventory | [cargo-about 0.9.3](https://github.com/EmbarkStudios/cargo-about/releases/tag/0.9.3) (MIT OR Apache-2.0) plus Cargo's source-vendor command: verified locked HTML/native-source notice bundle. Checksum-specific webpki clarification retains ISC/BSD/Apache texts; bundled C/assembly/file notices remain with full upstream sources. See [distribution](distribution.md). |
 
 The pinned Go 1.25.9 [heap writer](https://github.com/golang/go/blob/go1.25.9/src/runtime/pprof/pprof.go)
 prints `HeapAlloc` separately from sampled profile totals. Its
@@ -39,7 +40,8 @@ cancel/drain jobs. Disjoint windows remain concurrent. Required and optional
 admission differ: optional refill skips pressure, required FIFO must progress.
 Contiguous consumption hints protect foreign unread cache backing only during
 optional eviction; they never pin required admission. Reset adaptive Pattern on
-zero-to-one open without discarding payload or active-reader history.
+zero-to-one legacy open without discarding payload or active-reader history;
+FUSE handles now own independent history.
 
 The idle flush-reserve cache policy uses the selected Tokio 1.54.1
 [`RwLock`](https://github.com/tokio-rs/tokio/blob/tokio-1.54.1/tokio/src/sync/rwlock.rs)
@@ -149,3 +151,25 @@ rejoining the FIFO queue. No dependency replacement or new allocator is needed.
 GeeseFS [#28](https://github.com/yandex-cloud/geesefs/issues/28) discusses slow
 listing/HEAD work; the measured repeated LISTs here instead follow our global
 directory-page epoch invalidation after unrelated writes.
+
+The subsequent TTL/PLUS investigation checks fuser 0.18.0's supported
+`KernelConfig::add_capabilities`, `ReplyDirectoryPlus::add` and reply TTL APIs.
+[#756](https://github.com/cberner/fuser/issues/756) explains the single-TTL limit
+for PLUS/create; conservative remaining freshness needs no fork. Public Linux
+`fs/fuse/readdir.c` and native tests establish dot-entry/lookup ownership.
+Mountpoint [#1801](https://github.com/awslabs/mountpoint-s3/issues/1801) and
+[#953](https://github.com/awslabs/mountpoint-s3/issues/953) provide metadata/TTL
+analogues, not an SDK correction. Per-open history follows the pinned public Go
+`FileHandle` contract. Existing Tokio owned permits bound file handles; existing
+rustix 1.1.5 `fs` APIs exercise native xattr/fallocate behavior without local unsafe.
+jemalloc-ctl 0.7.0 exposes safe optional page gauges; no allocator tuning or
+dependency replacement is justified by these observations.
+
+The frozen candidate's native request trace confirms repeated standard LIST
+prefix scans for bounded directory chunks (10–11 requests for 1,024 names).
+AWS SDK 1.155.0 exposes `ListObjects::marker` and
+[`ListObjectsV2::start_after`](https://docs.rs/aws-sdk-s3/1.155.0/aws_sdk_s3/operation/list_objects_v2/builders/struct.ListObjectsV2FluentBuilder.html#method.start_after).
+A narrow exclusive-name adapter can skip consumed pages while retaining opaque
+continuation tokens. Extended LIST retains its existing protocol until equivalent
+start-after semantics are verified; no custom parser, request cache, larger
+directory buffer or weakened type/metadata resolution is needed.

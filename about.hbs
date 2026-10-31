@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>GeeseFS Rust third-party licenses</title>
+  <style>body { max-width: 80em; margin: 2em auto; } pre { white-space: pre-wrap; }</style>
+</head>
+<body>
+  <h1>Third-party licenses</h1>
+  <p>Generated from locked Cargo dependencies. Retain LICENSE, NOTICE and the
+    dependency-sources directory for bundled native and file-level notices.</p>
+  {{#each licenses}}
+  <section>
+    <h2>{{name}}</h2>
+    <ul>
+      {{#each used_by}}
+      <li>{{crate.name}} {{crate.version}}</li>
+      {{/each}}
+    </ul>
+    <pre>{{text}}</pre>
+  </section>
+  {{/each}}
+</body>
+</html>

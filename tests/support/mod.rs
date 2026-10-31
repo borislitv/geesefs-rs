@@ -74,6 +74,7 @@ pub struct MemoryStore {
     pub peak_heads: AtomicUsize,
     pub list_calls: AtomicUsize,
     pub fail_list: AtomicBool,
+    pub failed_list_prefix: Mutex<Option<String>>,
     patch_pause: Mutex<Pause>,
     head_pause: Mutex<Pause>,
     head_response_pause: Mutex<Pause>,
@@ -83,6 +84,7 @@ pub struct MemoryStore {
     pub fail_head_after_put_once: AtomicBool,
     pub fail_head_after_complete_once: AtomicBool,
     pub standard_listing: AtomicBool,
+    pub omit_list_etag: AtomicBool,
     pub last_modified: Mutex<Option<std::time::SystemTime>>,
     pub fail_head_once: AtomicBool,
     pub fail_copy: AtomicBool,
@@ -209,7 +211,13 @@ impl MemoryStore {
         );
     }
     pub fn bytes(&self, key: &str) -> Vec<u8> {
-        self.objects.lock().unwrap()[key].bytes.clone()
+        let bytes = self
+            .objects
+            .lock()
+            .unwrap()
+            .get(key)
+            .map(|object| object.bytes.clone());
+        bytes.unwrap_or_else(|| panic!("backend object {key:?} is missing"))
     }
 }
 
@@ -580,7 +588,9 @@ impl Store for MemoryStore {
         token: Option<&str>,
     ) -> Result<ListPage> {
         self.list_calls.fetch_add(1, Ordering::Relaxed);
-        if self.fail_list.load(Ordering::Relaxed) {
+        if self.fail_list.load(Ordering::Relaxed)
+            || self.failed_list_prefix.lock().unwrap().as_deref() == Some(prefix)
+        {
             return Err(Self::failure("LIST"));
         }
         let page = {
@@ -615,7 +625,8 @@ impl Store for MemoryStore {
                     items.get(key).map(|o| ListedObject {
                         key: key.clone(),
                         size: o.bytes.len() as u64,
-                        etag: Some(o.etag.clone()),
+                        etag: (!self.omit_list_etag.load(Ordering::Relaxed))
+                            .then(|| o.etag.clone()),
                         last_modified: self
                             .last_modified
                             .lock()
@@ -638,5 +649,15 @@ impl Store for MemoryStore {
         };
         Self::barrier(&self.list_pause).await;
         Ok(page)
+    }
+
+    async fn list_after(
+        &self,
+        prefix: &str,
+        delimiter: Option<&str>,
+        token: Option<&str>,
+        after: Option<&str>,
+    ) -> Result<ListPage> {
+        self.list(prefix, delimiter, token.or(after)).await
     }
 }

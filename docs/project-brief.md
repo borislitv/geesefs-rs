@@ -133,3 +133,10 @@ a memory plateau. See the separate [2026-10-31 checkpoint](performance.md#native
 The first-stage scope still excludes FUSE passthrough and disk-backed caching.
 No single profile proves that every possible optimization is exhausted; report
 covered workloads, unresolved attribution and remaining compatibility gaps.
+
+The [integrated 2026-11-01 checkpoint](performance-integrated.md) measures the
+subsequent freshness/PLUS/LIST, per-open history and clean-fsync changes together.
+Its 240 healthy records and 2,880 mixed phases are independently byte/generation
+verified, while original isolated-controller errors and short-window accounting
+gaps remain retained. Paced metadata tails improve; metadata/writer throughput
+and concurrent/equal-rate cgroup memory still lose. Full acceptance remains open.

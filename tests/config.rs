@@ -5,6 +5,20 @@ use tokio::process::Command;
 use clap::Parser;
 use geesefs_rs::config::{Config, ListType, normalize_fstab};
 
+async fn cli(arguments: &[&str]) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_geesefs-rs"));
+    command.env_clear().kill_on_drop(true).args(arguments);
+    // Keep production credentials absent while allowing instrumented child
+    // executions to contribute their actual entrypoint coverage.
+    if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile);
+    }
+    tokio::time::timeout(Duration::from_secs(5), command.output())
+        .await
+        .expect("CLI must exit within five seconds")
+        .unwrap()
+}
+
 #[test]
 fn reference_cli_defaults_and_prefix() {
     let c = Config::try_parse_from(["geesefs-rs", "bucket:packages", "/tmp/mount"]).unwrap();
@@ -47,17 +61,7 @@ async fn rejects_unsupported_options_in_actual_binary() {
         "--cluster",
         "--typo",
     ] {
-        let output = tokio::time::timeout(
-            Duration::from_secs(5),
-            Command::new(env!("CARGO_BIN_EXE_geesefs-rs"))
-                .env_clear()
-                .kill_on_drop(true)
-                .args([flag, "bucket", "/tmp/mount"])
-                .output(),
-        )
-        .await
-        .expect("CLI must exit within five seconds")
-        .unwrap();
+        let output = cli(&[flag, "bucket", "/tmp/mount"]).await;
         assert_eq!(output.status.code(), Some(2), "flag {flag}");
         assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument"));
     }
@@ -91,6 +95,21 @@ fn validates_boundary_values_without_contacting_backend() {
 }
 
 #[test]
+fn entry_limit_must_fit_owned_handle_admission() {
+    let maximum = tokio::sync::Semaphore::MAX_PERMITS as u64;
+    for (limit, valid) in [(maximum, true), (maximum + 1, false), (u64::MAX, false)] {
+        let config = Config::try_parse_from([
+            "geesefs-rs",
+            &format!("--entry-limit={limit}"),
+            "bucket",
+            "/tmp/mount",
+        ])
+        .unwrap();
+        assert_eq!(config.validate().is_ok(), valid, "entry limit {limit}");
+    }
+}
+
+#[test]
 fn permission_integer_bases_and_non_yandex_list_default() {
     let c = Config::try_parse_from([
         "geesefs-rs",
@@ -107,19 +126,65 @@ fn permission_integer_bases_and_non_yandex_list_default() {
 
 #[tokio::test]
 async fn missing_foreground_mode_is_an_explicit_failure() {
-    let output = tokio::time::timeout(
-        Duration::from_secs(5),
-        Command::new(env!("CARGO_BIN_EXE_geesefs-rs"))
-            .env_clear()
-            .kill_on_drop(true)
-            .args(["bucket", "/tmp/mount"])
-            .output(),
-    )
-    .await
-    .expect("CLI must exit within five seconds")
-    .unwrap();
+    let output = cli(&["bucket", "/tmp/mount"]).await;
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("specify -f"));
+}
+
+#[tokio::test]
+async fn startup_rejects_invalid_configuration_before_backend_or_mount_activity() {
+    let directory = tempfile::tempdir().unwrap();
+    let mount = directory.path().to_str().unwrap();
+    for (flag, message) in [
+        ("--memory-limit=0".to_owned(), "invalid memory-limit"),
+        (
+            format!(
+                "--entry-limit={}",
+                tokio::sync::Semaphore::MAX_PERMITS as u64 + 1
+            ),
+            "entry-limit must be",
+        ),
+        (
+            "--request-timeout=0s".to_owned(),
+            "request-timeout and shutdown-timeout",
+        ),
+        (
+            "--read-only-direct-io".to_owned(),
+            "read-only-direct-io requires -o ro",
+        ),
+    ] {
+        let output = cli(&[
+            "-f",
+            "--no-detect",
+            "--endpoint=http://127.0.0.1:1",
+            &flag,
+            "bucket",
+            mount,
+        ])
+        .await;
+        assert_eq!(output.status.code(), Some(1), "{flag}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(message),
+            "{flag}: {:?}",
+            output.stderr
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+    let missing = directory.path().join("absent");
+    let output = cli(&[
+        "-f",
+        "--no-detect",
+        "--endpoint=http://127.0.0.1:1",
+        "bucket",
+        missing.to_str().unwrap(),
+    ])
+    .await;
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("mountpoint must be an existing directory")
+    );
+    assert!(!missing.exists());
 }
 #[test]
 fn backend_flags_have_reference_defaults_and_reject_invalid_combinations() {
@@ -132,6 +197,11 @@ fn backend_flags_have_reference_defaults_and_reject_invalid_combinations() {
     assert_eq!(c.storage_class, "STANDARD");
     assert_eq!(c.iam_header, "X-YaCloud-SubjectToken");
     for flags in [
+        vec!["--region="],
+        vec!["--storage-class="],
+        vec!["--profile="],
+        vec!["--iam", "--signature-version=4"],
+        vec!["--iam-header=Host"],
         vec!["--http-timeout=0s"],
         vec!["--http-timeout=25h"],
         vec!["--multipart-copy-threshold=0"],

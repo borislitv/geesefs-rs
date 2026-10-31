@@ -44,7 +44,47 @@ storage fakes and channels control concurrency without sleep-based interleavings
 Expected content, ranges and observable side effects are independent of production
 algorithms. Each bug fix needs an observed behavior failure before the correction;
 selected faults/mutations verify sensitivity and must be restored before rerunning.
-Broad mutation coverage, coverage/CRAP and three duplicate candidates remain open.
+Broader mutation coverage and large-method quality findings remain open.
+
+The integrated freshness/handle correction also runs nine explicitly requested
+native tests in `tests/fuse_directory.rs`; they fail if mounting is unavailable.
+They cover PLUS paging/refcounts/error rollback, real kernel TTL, handle pressure,
+marker attrs, side-effect-free unsupported hardlinks, writer metadata/xattrs,
+fallocate/truncate/rename/removal and durable close. Run separately on an authorized
+Linux fixture:
+
+```bash
+timeout 180s cargo test --locked --test fuse_directory -- --ignored --test-threads=1
+python3 -m unittest discover -s bench -p 'test_*.py'
+```
+
+Both default-jemalloc and all-feature System-allocator LLVM runs pass 251 Rust
+cases, including those nine native mounts. Separate instrumented executables also
+pass read/write and read-only rsync/aiohttp/nginx/failure contracts, validate the
+reported allocator and effective budgets, and exit normally. Jemalloc page gauges
+are checked through the real statistics file; this is not performance timing.
+The exact frozen default release separately passes the same available rw/ro
+contracts, including literal nginx, rsync, injected fsync recovery and EROFS;
+213+3 real allocator/page/budget observations and both daemon exits are checked.
+Child-process profiles are preserved and merged only with matching source/build.
+Python branch coverage covers 75 bench tests; the separate fixture suite passes
+14 tests. CLI receipts, malformed schema/budgets, actual worker protocol and
+checksum/failure-sensitive workload tests supplement pure gate-policy tests.
+Automated mutation kills 24/24 Go-heap and 30/30 shared-metrics sites, including
+exactly two samples and zero values. This is not repository-wide mutation coverage.
+Affected runtime/accounting duplication >= 0.8 is absent. With matched native
+entrypoint coverage, mount options and serving have CRAP 9 and 8; the extracted
+directory pipeline, standard LIST decoding and benchmark gate have CRAP 6, 8
+and 7 respectively. Whole affected-file CRAP still exceeds 10: existing rename
+is 62.9, and uncovered matrix orchestration reaches 56. These remain failures,
+not excluded files or a relaxed threshold. A successful release build is not
+coverage or full compatibility acceptance.
+
+SDK loopback tests retain malformed/confinement/order checks, V1 prefix-only
+continuation, exact 1,000-entry bounds and opaque V2/extended tokens. Controlled
+faults in each boundary trigger the intended assertions and are restored before
+the passing suite. Native 8,192-name traversal requires 65 bounded LIST calls,
+including EOF, without larger directory buffers or inaccurate file types.
 
 Key read regressions live in `tests/read_windows.rs`, `read_reply.rs`,
 `read_refill.rs`, `read_stream_history.rs`, `cache_loans.rs`, `receive_ownership.rs` and
@@ -78,11 +118,14 @@ aiohttp full/Range, rsync, symlinks, mode/mtime, xattrs, FIFO, fsyncdir,
 sparse/truncate, fresh-reader durability, rename and concurrent writer/fsync.
 Rust injected upload/fsync failure propagation and recovery passed; the reference
 Go open-file recovery remained EAGAIN through its deadline. Hardlink-as-symlink
-returns EIO on the tested kernel, so the complete runner remains failed.
+formerly returned EIO after mutation. Corrected Rust returns EOPNOTSUPP without
+mutation, so the required hardlink compatibility probe remains failed.
 
 Actual-service IAM/SSE/signing/PATCH, imported multipart layouts, full CLI parity
-and broader durability cases remain open. Aiohttp is not literal nginx; no
-all-xfstests pass is claimed. CI covers deterministic checks, not mounted or
+and broader durability cases remain open. A separate native fixture checks literal
+nginx 1.28.3 HEAD/full checksum, unaligned/suffix/short-EOF 206 and unsatisfiable 416
+responses through all three mounted filesystems. No all-xfstests pass is claimed.
+CI covers deterministic checks, not mounted or
 performance acceptance. See [compatibility](compatibility.md) for the inventory.
 
 The cache-policy release separately completes 120 healthy-warm four-binary records
@@ -100,3 +143,12 @@ regression and cgroup-memory losses. Both raw-series summaries verify equivalent
 work and unchanged budgets; all 25 compiled inputs and four executable hashes are
 checked against retained provenance. These comparisons neither repeat the same
 design independently nor pass compatibility/performance acceptance.
+
+The later integrated checkpoint independently verifies 240 isolated healthy
+cold/warm records, 60 generation/full-byte groups and 2,880 mixed phases with
+16 further checks. The original isolated controllers retain backend-startup and
+final-bookkeeping errors; independent complete-grid validation does not relabel
+them. The mixed controls complete, preserve recorded interval counters and stop
+their owned processes/mounts. Short isolated allocator/late windows remain missing,
+and throughput/memory nonwins remain acceptance failures; see the
+[latest measurements](performance-integrated.md).

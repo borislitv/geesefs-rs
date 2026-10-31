@@ -5,6 +5,65 @@ use std::sync::atomic::Ordering;
 use support::MemoryStore;
 
 #[tokio::test]
+async fn bounded_directory_chunks_resume_after_names_instead_of_rescanning_old_pages() {
+    let store = MemoryStore::new();
+    store.page_size.store(4, Ordering::Relaxed);
+    for name in ["a", "b", "c", "d", "e", "f", "g"] {
+        store.seed(name, name.as_bytes());
+    }
+    let fs = store.filesystem(16);
+    let mut after = String::new();
+    let mut names = Vec::new();
+    loop {
+        let entries = fs.directory_chunk(1, &after, 2).await.unwrap();
+        if entries.is_empty() {
+            break;
+        }
+        for entry in entries {
+            assert_eq!(entry.kind, fuser::FileType::RegularFile);
+            assert_eq!(fs.node(entry.ino).unwrap().attr().size, 1);
+            after = entry.name.clone();
+            names.push(entry.name);
+        }
+    }
+    assert_eq!(names, ["a", "b", "c", "d", "e", "f", "g"]);
+    assert_eq!(
+        store.list_calls.load(Ordering::Relaxed),
+        5,
+        "each bounded chunk and the final empty chunk need only their next backend page"
+    );
+}
+
+#[tokio::test]
+async fn resuming_after_a_directory_keeps_lexically_adjacent_objects() {
+    let store = MemoryStore::new();
+    store.page_size.store(2, Ordering::Relaxed);
+    for name in ["d/alpha/child", "d/alpha.", "d/alpha0", "d/z"] {
+        store.seed(name, b"contents");
+    }
+    let fs = store.filesystem(16);
+    let directory = fs.lookup(1, "d").await.unwrap();
+    let mut after = String::new();
+    let mut names = Vec::new();
+    for _ in 0..8 {
+        let entries = fs.directory_chunk(directory.ino, &after, 1).await.unwrap();
+        if entries.is_empty() {
+            break;
+        }
+        let entry = &entries[0];
+        if entry.name == "alpha" {
+            assert_eq!(entry.kind, fuser::FileType::Directory);
+        } else {
+            assert_eq!(entry.kind, fuser::FileType::RegularFile);
+            assert_eq!(fs.node(entry.ino).unwrap().attr().size, 8);
+        }
+        after = entry.name.clone();
+        names.push(entry.name.clone());
+    }
+    assert_eq!(names, ["alpha", "alpha.", "alpha0", "z"]);
+}
+
+#[tokio::test]
 async fn repeated_directory_pages_keep_names_types_and_avoid_relisting() {
     let store = MemoryStore::new();
     for name in ["a", "b", "c", "d"] {
@@ -90,6 +149,135 @@ async fn zero_stat_ttl_does_not_reuse_even_an_empty_listing_page() {
     assert_eq!(entries[0].name, "new");
     assert_eq!(fs.node(entries[0].ino).unwrap().attr().size, 8);
     assert_eq!(store.list_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn cached_page_rechecks_expired_child_metadata() {
+    let store = MemoryStore::new();
+    store.standard_listing.store(true, Ordering::Relaxed);
+    for name in ["a", "b", "c"] {
+        store.seed(name, b"old");
+    }
+    let fs = store.filesystem(16);
+    let first = fs.directory_chunk(1, "", 10).await.unwrap();
+    for entry in &first {
+        let node = fs.node(entry.ino).unwrap();
+        node.state.lock().unwrap().fetched =
+            std::time::Instant::now() - 2 * fs.config.stat_cache_ttl;
+        store.seed(&entry.name, b"changed");
+    }
+    store
+        .objects
+        .lock()
+        .unwrap()
+        .get_mut("b")
+        .unwrap()
+        .metadata
+        .insert("--symlink-target".into(), "target".into());
+
+    let entries = fs.directory_chunk(1, "", 10).await.unwrap();
+    assert_eq!(entries.len(), 3);
+    for (old, fresh) in first.iter().zip(&entries) {
+        assert_eq!(fresh.ino, old.ino);
+        let attr = fs.node(fresh.ino).unwrap().attr();
+        if fresh.name == "b" {
+            assert_eq!(fresh.kind, fuser::FileType::Symlink);
+            assert_eq!(attr.size, 6);
+        } else {
+            assert_eq!(fresh.kind, fuser::FileType::RegularFile);
+            assert_eq!(
+                attr.size, 7,
+                "a fresh name page must not extend older attributes"
+            );
+        }
+    }
+    let calls = store.head_starts.load(Ordering::SeqCst);
+    for entry in &entries {
+        fs.refresh_inode_if_expired(entry.ino).await.unwrap();
+    }
+    assert_eq!(store.head_starts.load(Ordering::SeqCst), calls);
+}
+
+#[tokio::test]
+async fn extended_pages_refresh_existing_metadata_without_redundant_heads() {
+    let store = MemoryStore::new();
+    store.seed("item", b"old");
+    let mut config = MemoryStore::config(16);
+    config.stat_cache_ttl = std::time::Duration::ZERO;
+    let fs = Filesystem::new(config, store.clone()).unwrap();
+    let original = fs.lookup(1, "item").await.unwrap();
+    store.seed("item", b"new generation");
+    let calls = store.head_starts.load(Ordering::SeqCst);
+    let entries = fs.directory_chunk(1, "", 10).await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].ino, original.ino);
+    assert_eq!(original.attr().size, 14);
+    assert_eq!(store.head_starts.load(Ordering::SeqCst), calls);
+    assert_eq!(
+        fs.read(original.ino, 0, 14).await.unwrap().as_slice(),
+        b"new generation"
+    );
+}
+
+#[tokio::test]
+async fn listing_metadata_without_an_etag_requires_an_authoritative_generation() {
+    let store = MemoryStore::new();
+    store.seed("item", b"old");
+    let fs = store.filesystem(16);
+    let node = fs.lookup(1, "item").await.unwrap();
+    node.state.lock().unwrap().fetched = std::time::Instant::now() - 2 * fs.config.stat_cache_ttl;
+    store.seed("item", b"new generation");
+    store.omit_list_etag.store(true, Ordering::Relaxed);
+    let before = store.head_starts.load(Ordering::Relaxed);
+    let entries = fs.directory_chunk(1, "", 10).await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].ino, node.ino);
+    assert_eq!(
+        fs.read(node.ino, 0, 14).await.unwrap().as_slice(),
+        b"new generation"
+    );
+    assert_eq!(store.head_starts.load(Ordering::Relaxed), before + 1);
+}
+
+#[tokio::test]
+async fn stale_extended_page_cannot_replace_a_newer_head_or_committed_write() {
+    for write in [false, true] {
+        let store = MemoryStore::new();
+        store.seed("item", b"old");
+        let mut config = MemoryStore::config(16);
+        config.stat_cache_ttl = std::time::Duration::ZERO;
+        let fs = Filesystem::new(config, store.clone()).unwrap();
+        let original = fs.lookup(1, "item").await.unwrap();
+        let (entered, release) = store.pause_list();
+        let listing = tokio::spawn({
+            let fs = fs.clone();
+            async move { fs.directory_chunk(1, "", 10).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(3), entered)
+            .await
+            .unwrap()
+            .unwrap();
+        if write {
+            fs.write(original.ino, 0, b"new generation").await.unwrap();
+            fs.fsync(original.ino).await.unwrap();
+        } else {
+            store.seed("item", b"new generation");
+            fs.refresh_inode_if_expired(original.ino).await.unwrap();
+        }
+        release.send(()).unwrap();
+        let entries = tokio::time::timeout(std::time::Duration::from_secs(3), listing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].ino, original.ino);
+        assert_eq!(original.attr().size, 14);
+        assert_eq!(
+            fs.read(original.ino, 0, 14).await.unwrap().as_slice(),
+            b"new generation"
+        );
+    }
 }
 
 #[tokio::test]

@@ -108,7 +108,7 @@ class HeapSeriesTests(unittest.TestCase):
         result = self.samples([(0, 9, 999, 0), (10, 20, 30, 0), (30, 40, 90, 0),
                                (70, 80, 50, 0), (90, 110, 1000, 0)])
         self.assertEqual(result["allocator_peak_bytes"], 90)
-        self.assertEqual(result["allocator_steady_bytes"], 70)
+        self.assertEqual(result["allocator_steady_bytes"], 50)
         self.assertEqual(result["allocator_samples"], 3)
         self.assertAlmostEqual(result["allocator_sampling_wall_seconds"], 0.006)
 
@@ -118,6 +118,11 @@ class HeapSeriesTests(unittest.TestCase):
                 result = self.samples(rows)
                 self.assertIsNone(result["allocator_peak_bytes"])
                 self.assertIsNone(result["allocator_steady_bytes"])
+
+    def test_two_early_samples_do_not_supply_a_late_memory_value(self):
+        result = self.samples([(10, 20, 30, 0), (30, 40, 90, 0)])
+        self.assertEqual(result["allocator_peak_bytes"], 90)
+        self.assertIsNone(result["allocator_steady_bytes"])
 
     def test_baseline_owned_gc_is_reported_without_changing_its_policy(self):
         result = self.samples([(10, 20, 30, 2), (30, 40, 90, 3), (70, 80, 50, 5)])
@@ -129,6 +134,15 @@ class HeapSeriesTests(unittest.TestCase):
         self.assertEqual(result["allocator_samples"], 2)
         self.assertEqual(result["allocator_peak_bytes"], 90)
         self.assertEqual(result["allocator_steady_bytes"], 90)
+        self.assertEqual(result["allocator_forced_gc_count"], 0)
+
+    def test_exact_midpoint_and_equal_wall_timestamps_remain_inside_the_window(self):
+        # Request duration uses monotonic time. Equal Unix timestamps are valid
+        # with a coarse/adjusted wall clock and must not lose a contained request.
+        result = self.samples([(10, 10, 30, 0), (55, 55, 90, 0), (100, 100, 40, 0)])
+        self.assertEqual(result["allocator_samples"], 3)
+        self.assertEqual(result["allocator_peak_bytes"], 90)
+        self.assertEqual(result["allocator_steady_bytes"], 65)
 
     def test_nonpositive_interval_cannot_start_a_busy_poll_loop(self):
         for interval in (0, -1):
@@ -144,7 +158,8 @@ class HeapSeriesTests(unittest.TestCase):
         with server(PROFILE, received=received) as (port, _):
             with go_heap.GoHeapSampler(port, self.trace, interval=0.01) as observer:
                 self.assertTrue(received.wait(timeout=2))
-        result = observer.metrics(0, 10 ** 30)
+        rows = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        result = observer.metrics(rows[0]['started_ns'], rows[-1]['finished_ns'])
         self.assertGreaterEqual(result["allocator_samples"], 3)
         self.assertEqual(result["allocator_peak_bytes"], 123456)
         self.assertEqual(result["allocator_steady_bytes"], 123456)

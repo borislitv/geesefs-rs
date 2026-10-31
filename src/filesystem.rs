@@ -19,7 +19,7 @@ use crate::{
 };
 use fuser::{FileAttr, FileType};
 use futures_util::{StreamExt, stream::FuturesUnordered};
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, RwLock, Semaphore};
 
 pub struct Filesystem {
     pub config: Arc<Config>,
@@ -28,7 +28,9 @@ pub struct Filesystem {
     pub ingress: Budget,
     data: Budget,
     cache: Mutex<crate::cache::ReadCache>,
+    cache_published: Notify,
     flush_lane: Budget,
+    flush_activity: Arc<RwLock<()>>,
     flushers: Arc<Semaphore>,
     upload_admission: write::UploadAdmission,
     metadata_slots: Arc<Semaphore>,
@@ -50,12 +52,13 @@ pub struct DirEntry {
 }
 
 /// Effective owner budgets, not RSS or allocator measurements. The cache shares
-/// the full data lane with dirty/pinned/temporary bytes; no hidden half-cache cap.
+/// the data lane and can borrow revocable, idle flush capacity for clean owners.
 #[derive(Debug, serde::Serialize)]
 pub struct EffectiveBudgets {
     pub payload_limit_bytes: usize,
     pub data_shared_bytes: usize,
     pub read_cache_policy_bytes: usize,
+    pub read_cache_loaned_bytes: usize,
     pub ingress_bytes: usize,
     pub flush_bytes: usize,
     pub data_used_bytes: usize,
@@ -98,7 +101,8 @@ impl Filesystem {
         EffectiveBudgets {
             payload_limit_bytes: self.ingress.limit() + self.data.limit() + self.flush_lane.limit(),
             data_shared_bytes: self.data.limit(),
-            read_cache_policy_bytes: self.data.limit(),
+            read_cache_policy_bytes: self.data.limit() + self.flush_lane.limit(),
+            read_cache_loaned_bytes: self.cache.lock().unwrap().loaned_bytes(),
             ingress_bytes: self.ingress.limit(),
             flush_bytes: self.flush_lane.limit(),
             data_used_bytes: self.data.used(),
@@ -165,10 +169,12 @@ impl Filesystem {
             ingress: Budget::new(ingress_bytes)?,
             data: Budget::new(data_bytes)?,
             cache: Mutex::new(crate::cache::ReadCache::with_entry_limit(
-                data_bytes as u64,
+                (data_bytes + flush_bytes) as u64,
                 config.entry_limit as usize,
             )),
+            cache_published: Notify::new(),
             flush_lane: Budget::new(flush_bytes)?,
+            flush_activity: Arc::new(RwLock::new(())),
             flushers: Arc::new(Semaphore::new(config.max_flushers)),
             upload_admission: write::UploadAdmission::new(&config),
             metadata_slots: Arc::new(Semaphore::new(config.max_requests)),
@@ -551,7 +557,7 @@ impl Filesystem {
             Err(error) if not_found(&error) => {
                 s.deleted = true;
                 ns.names.remove(&key);
-                ns.epoch += 1;
+                ns.changed(&key);
                 return Err(error);
             }
             Err(error) => return Err(error),
@@ -588,7 +594,7 @@ impl Filesystem {
             state.deleted = true;
             drop(state);
             ns.names.remove(key);
-            ns.epoch += 1;
+            ns.changed(key);
         }
         if self.config.negative_lookup_cache_size > 0
             && started.elapsed() < self.config.stat_cache_ttl
@@ -717,7 +723,7 @@ impl Filesystem {
             return Err(Error::Fs(libc::EEXIST));
         }
         ns.tombstones.remove(&key);
-        ns.epoch += 1;
+        ns.changed(&key);
         let node = ns.install(&key, |ino| {
             Inode::new(ino, key.clone(), directory, None, &self.config)
         })?;
@@ -1247,6 +1253,7 @@ impl Filesystem {
                     );
                 }
                 fill.published();
+                self.cache_published.notify_waiters();
             }
         }
         if let Some(error) = prefetch_error {
@@ -1263,7 +1270,7 @@ impl Filesystem {
                 // Pinned borrowers retain their permits; FIFO waiters stay ahead.
                 {
                     let cache = self.cache.lock().unwrap();
-                    while cache.evict_lru() {
+                    while self.try_cache_loan(&cache) || cache.evict_lru() {
                         if let Ok(reservation) = self.data.try_reserve(size) {
                             return Ok(reservation);
                         }
@@ -1276,12 +1283,43 @@ impl Filesystem {
                     return self.data.try_reserve(size);
                 }
                 self.flush_all().await?;
-                tokio::time::timeout(Duration::from_secs(30), self.data.reserve(size))
-                    .await
-                    .map_err(|_| Error::Timeout("payload admission"))?
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    // Retain the same FIFO reservation while reclaiming owners
+                    // published by fills that were in flight at the first sweep.
+                    let reservation = self.data.reserve(size);
+                    tokio::pin!(reservation);
+                    loop {
+                        let published = self.cache_published.notified();
+                        // notify_waiters covers futures created before the
+                        // cache check, including ones not yet polled.
+                        tokio::select! {
+                            biased;
+                            result = &mut reservation => return result,
+                            _ = async {
+                                let reclaimed = {
+                                    let cache = self.cache.lock().unwrap();
+                                    self.try_cache_loan(&cache) || cache.evict_lru()
+                                };
+                                if !reclaimed {
+                                    published.await;
+                                }
+                            } => {}
+                        }
+                    }
+                })
+                .await
+                .map_err(|_| Error::Timeout("payload admission"))?
             }
             Err(error) => Err(error),
         }
+    }
+
+    fn try_cache_loan(&self, cache: &crate::cache::ReadCache) -> bool {
+        // Never wait for optional capacity or lend while an upload/body owns it.
+        let Ok(_activity) = self.flush_activity.try_write() else {
+            return false;
+        };
+        cache.loan_lru(&self.flush_lane)
     }
 
     pub async fn write(&self, ino: u64, offset: u64, bytes: &[u8]) -> Result<usize> {
@@ -1396,10 +1434,16 @@ impl Filesystem {
             .acquire_owned()
             .await
             .map_err(|_| Error::Cancelled)?;
+        // Shared guards preserve independent flush concurrency. The budget carries
+        // activity into cloned SDK bodies and jobs, including cancellation cleanup.
+        let lane = self
+            .flush_lane
+            .with_activity(self.flush_activity.clone().read_owned().await);
+        self.cache.lock().unwrap().reclaim_loans();
         write::flush_locked(
             &self.store,
             node,
-            &self.flush_lane,
+            &lane,
             flusher,
             &self.config,
             &self.upload_admission,
@@ -1445,23 +1489,23 @@ impl Filesystem {
         resolve_types: bool,
     ) -> Result<Vec<DirEntry>> {
         let fetched = std::time::Instant::now();
-        let node = self.node(ino)?;
-        let key = {
+        let (node, key, epoch) = {
+            let ns = self.namespace.lock().unwrap();
+            let node = ns.get(ino)?;
             let state = node.state.lock().unwrap();
             if file_type(state.mode) != FileType::Directory {
                 return Err(Error::Fs(libc::ENOTDIR));
             }
-            state.key.clone()
-        };
-        let prefix = if key.is_empty() {
-            key
-        } else {
-            format!("{key}/")
-        };
-        let epoch = {
-            let ns = self.namespace.lock().unwrap();
+            if state.deleted {
+                return Err(Error::Fs(libc::ENOENT));
+            }
+            let key = state.key.clone();
+            if resolve_types && (ns.is_moving(&key) || ns.is_deleting(&key)) {
+                return Err(Error::Fs(libc::EAGAIN));
+            }
+            let epoch = node.directory_epoch.load(Ordering::Relaxed);
             if resolve_types
-                && let Some(page) = self.directory_pages.get(&(ino, ns.epoch, after.into(), limit))
+                && let Some(page) = self.directory_pages.get(&(ino, epoch, after.into(), limit))
                 && page.fetched.elapsed() < self.config.stat_cache_ttl
                 // READDIR does not retain lookup references. Namespace pressure
                 // may have evicted an inode represented by this cached page.
@@ -1469,7 +1513,13 @@ impl Filesystem {
             {
                 return Ok(page.entries.clone());
             }
-            ns.epoch
+            drop(state);
+            (node, key, epoch)
+        };
+        let prefix = if key.is_empty() {
+            key
+        } else {
+            format!("{key}/")
         };
         let mut selected: BTreeMap<String, (bool, Option<ObjectHead>, bool)> = BTreeMap::new();
         {
@@ -1632,7 +1682,9 @@ impl Filesystem {
             }
         }
         let mut ns = self.namespace.lock().unwrap();
-        if ns.epoch != epoch {
+        if node.directory_epoch.load(Ordering::Relaxed) != epoch
+            || ns.names.get(prefix.trim_end_matches('/')) != Some(&ino)
+        {
             return Err(Error::Fs(libc::EAGAIN));
         }
         let mut entries = Vec::with_capacity(selected.len());
@@ -1769,14 +1821,14 @@ impl Filesystem {
                 let mut ns = self.namespace.lock().unwrap();
                 ns.pending_deletes.remove(&key);
                 ns.tombstones.remove(&key);
-                ns.epoch += 1;
+                ns.changed(&key);
             }
             return Err(error);
         }
         let mut ns = self.namespace.lock().unwrap();
         ns.pending_deletes.remove(&key);
         ns.names.remove(&key);
-        ns.epoch += 1;
+        ns.changed(&key);
         let mut state = node.state.lock().unwrap();
         state.deleted = true;
         state.extents.clear();
@@ -2016,7 +2068,7 @@ impl Filesystem {
                 }
             }
         }
-        ns.epoch += 1;
+        ns.changed(&destination);
         ns.pending_moves.remove(&old);
         ns.pending_moves.remove(&destination);
         ns.get(newparent)?

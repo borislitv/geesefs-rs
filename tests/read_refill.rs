@@ -474,3 +474,115 @@ async fn adjacent_cached_fragments_form_one_window_and_refill_respects_eof() {
     assert_eq!(store.read_calls.load(Ordering::Relaxed), 9);
     assert_eq!(fs.effective_budgets().data_used_bytes, MIB + STEP);
 }
+
+#[tokio::test]
+async fn required_admission_reclaims_cache_published_after_it_started_waiting() {
+    use std::{future::Future, task::Poll};
+
+    let (store, fs, bytes) = fixture(16, 4 * MIB);
+    let ino = fs.lookup(1, "file").await.unwrap().ino;
+    let gate = Arc::new(Semaphore::new(0));
+    *store.read_gate.lock().unwrap() = Some(gate.clone());
+    let first = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            let mut reply = None;
+            let error = fs
+                .read_reply_data(ino, 0, STEP, |result| {
+                    reply = Some(result.unwrap().to_vec());
+                })
+                .await;
+            assert!(error.is_none());
+            reply.unwrap()
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while store.read_calls.load(Ordering::Relaxed) == 0 {
+            store.read_started.notified().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    // The first window owns nearly the entire data lane, but none of its bytes
+    // are cache-owned yet. A disjoint required read must queue for admission.
+    let offset = 8 * MIB;
+    let mut second = Box::pin(fs.read(ino, offset as u64, STEP));
+    std::future::poll_fn(|cx| {
+        assert!(second.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    *store.read_gate.lock().unwrap() = None;
+    gate.add_permits(16);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), first)
+            .await
+            .unwrap()
+            .unwrap(),
+        bytes[..STEP]
+    );
+
+    let block = tokio::time::timeout(Duration::from_secs(3), second)
+        .await
+        .expect("admission must reclaim newly published cache instead of waiting for its timeout")
+        .unwrap();
+    assert_eq!(block.as_slice(), &bytes[offset..offset + STEP]);
+    let budgets = fs.effective_budgets();
+    assert!(budgets.data_used_bytes <= budgets.data_shared_bytes);
+    assert!(
+        budgets.data_used_bytes + budgets.flush_used_bytes + budgets.ingress_used_bytes
+            <= budgets.payload_limit_bytes
+    );
+}
+
+#[tokio::test]
+async fn cancelling_a_required_waiter_preserves_progress_of_the_next_reader() {
+    use std::{future::Future, task::Poll};
+
+    let (store, fs, bytes) = fixture(16, 4 * MIB);
+    let ino = fs.lookup(1, "file").await.unwrap().ino;
+    let gate = Arc::new(Semaphore::new(0));
+    *store.read_gate.lock().unwrap() = Some(gate.clone());
+    let first = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.read_reply_data(ino, 0, STEP, |result| {
+                assert!(result.unwrap().iter().all(|&byte| byte == 0));
+            })
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while store.read_calls.load(Ordering::Relaxed) == 0 {
+            store.read_started.notified().await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut cancelled = Box::pin(fs.read(ino, (8 * MIB) as u64, STEP));
+    let offset = 12 * MIB;
+    let mut next = Box::pin(fs.read(ino, offset as u64, STEP));
+    std::future::poll_fn(|cx| {
+        assert!(cancelled.as_mut().poll(cx).is_pending());
+        assert!(next.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    drop(cancelled);
+    *store.read_gate.lock().unwrap() = None;
+    gate.add_permits(16);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), first)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    let block = tokio::time::timeout(Duration::from_secs(3), next)
+        .await
+        .expect("a cancelled head waiter must not retain permits or block the next reader")
+        .unwrap();
+    assert_eq!(block.as_slice(), &bytes[offset..offset + STEP]);
+    assert!(fs.effective_budgets().data_used_bytes <= fs.effective_budgets().data_shared_bytes);
+}

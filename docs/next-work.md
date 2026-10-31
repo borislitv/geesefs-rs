@@ -1,16 +1,23 @@
-# Next work: observed problems and causes, 2026-10-30
+# Next work: observed problems and causes, 2026-10-31
 
 Overall status remains **UNACCEPTED**. This is the handoff for the next iteration;
 it separates confirmed mechanisms from hypotheses. See the latest
 [measurement tables](../README.md#latest-completed-measurements--2026-10-30),
 [architecture](architecture.md) and [comparison contract](performance.md).
 
+The subsequent [native VM checkpoint](performance.md#native-vm-admissiondirectory-checkpoint--2026-10-31)
+attributes and corrects the admission and global-directory-invalidation mechanisms
+below at `67f7aec`. Earlier measurements retain their original scope; the new
+fixed-work control improves total elapsed but not every tail or memory metric.
+The reverse-order offered-rate control adds a late-run metadata-tail regression
+and higher late cgroup memory than both Go references to the unresolved work.
+
 ## 1. Warm random reads: cache working-set eviction
 
-**Observed:** the complete five-repeat warm matrix gives Rust 1.01 MiB/s versus
-7.90/8.33 MiB/s for experimental/packaged Go. Mean run p99 is 7.428 ms versus
-1.026/0.897 ms; independently pooled p99 is 7.680 versus 0.764/0.886 ms.
-Concurrent-reader throughput and RSS also do not beat both references.
+**Observed before the correction:** the earlier five-repeat warm matrix gives
+Rust 1.01 MiB/s versus 7.90/8.33 MiB/s for experimental/packaged Go. Mean run p99
+is 7.428 ms versus 1.026/0.897 ms; independently pooled p99 is 7.680 versus
+0.764/0.886 ms. These measurements describe the unchanged predecessor.
 
 **Confirmed contributing mechanism:** `Filesystem::new` reserves 10 MiB for flush
 and 4 MiB for ingress at a 64 MiB total, leaving 50 MiB for clean/dirty/pinned data.
@@ -23,36 +30,87 @@ that every millisecond of mounted latency comes from the cache.
 **Where:** `src/filesystem.rs::{new,admit,try_refill_admission,load_window}`,
 `src/cache.rs::{insert,evict_lru}`, `src/read.rs::Pattern`.
 
-**Next:** correlate retained ranges, backing charges and real mounted GET counts;
-test a minimal policy change against the same trace and both Go references.
-A proposed idle-flush borrowing policy has an observed diagnostic RED: a 12 MiB
-clean working set at a 16 MiB total makes 192 rather than 96 backend calls across
-two passes. This is a desired new policy, not a broken existing guarantee; its
-test/source is retained privately, and no implementation is delivered.
-Before borrowing, prove writer progress, cancellation/loan release, full pinned
-backing charge and existing FIFO invariants. Do not simply enlarge the data lane
-or remove the reserve. Reuse the maintained permit/cache APIs first.
+**Subsequent attribution:** three rotated fixed-binary native controls make
+3,381–3,389 Rust GETs per 4,096 warm random reads; both Go references make zero.
+These controls and CPU/off-CPU captures pass Go `--gc-interval 0`; they are
+configured diagnostics, not evidence of unchanged-default Go performance.
+PID-scoped CPU profiles and complete GET/FUSE lifecycle joins show no reported
+sample/event loss, quota throttling, memory reclaim or OOM. Instrumented times are
+kept separate; scheduler wait and instrumentation overhead remain measurable.
+Transport timing is not proof of a single SDK defect or every internal await.
+
+**Correction:** the 12 MiB clean / 16 MiB total diagnostic first fails with 192
+rather than 96 backend calls. Required admission now transfers exclusive clean
+owners into idle flush capacity, using existing Tokio/lru ownership APIs. Total
+and lane limits remain unchanged; writers revoke loans, and owned replies cannot
+export a revocable backing. Cancellation, independent flush concurrency, failure
+recovery and FIFO/pinned ownership are tested. Optional refill does not initiate
+loans. The reopened-history test now creates real independent cache pressure
+instead of depending on an incidental old cache capacity.
+
+**Measured outcome:** the default-GC four-binary comparison completes all 120
+records and verifies all 30 generations. Candidate warm-random GETs are zero in
+all five repeats, versus 3,380–3,389 for the predecessor. Total-work/time throughput
+is 9.07 MiB/s versus Go 8.80/8.88, but mean run p99 still loses: 0.926 ms versus
+0.714/0.650. Concurrent throughput is 4.09 versus 4.41/4.35 MiB/s and uses more
+RSS/cgroup memory. Writer pooled p99 is 348.573 versus Go 288.321/347.198 ms;
+the favorable mean-run-p99 column cannot override this loss.
+
+**Next:** attribute concurrent/admission ownership, writer-tail regressions and
+the rare serial stalls below before another change. Keep the additional retained
+cache's memory tradeoff visible; reducing GETs alone does not close acceptance.
 
 ## 2. Persistent mixed mount misses its target rate
 
-**Observed:** all three implementations complete 60 cycles / 360 checked passes.
-Rust takes 885.09 s and misses the 10-second cycle target 58 times; experimental
-Go takes 600.01 s with no late cycles, packaged Go 600.00 s with one. Rust uses
-less process RSS/CPU, but late-half cgroup memory is 314.7 MiB versus experimental
-Go's 298.0 MiB. Different durations do not establish an equal-rate memory win.
+**Earlier observed:** all four binaries complete 60 cycles / 360 checked passes.
+Candidate Rust takes 709.11 s versus predecessor 873.78 s and 600.00 s for both
+Go references. Late cycles are 58/54/0/0 respectively. Candidate peak RSS is lower
+than Go, but its whole-series late-half RSS is 232.1 MiB versus experimental Go's
+226.9 MiB; cgroup late means are 296.0 versus Go 300.1/300.2 MiB. Different
+durations and one fixed-order observation do not establish an equal-rate memory
+win or repeatability. The earlier 885.09-second Rust run remains retained under
+its different resource configuration.
 
-**Cause boundary:** static cache pressure is independently reproduced, but its
-share of mixed-cycle delay has not been isolated. A sampled late-half mean,
+**Earlier cause boundary:** candidate/predecessor have 11/16 approximately 30-second
+successful serial reads; both Go have zero. Candidate sequential/eviction active
+times total 164.23/252.35 s; experimental Go totals 118.57/113.41 s. Persistent
+metadata also totals 35.65 s versus Go 2.90/2.88 s despite the faster short warm
+metadata checkpoint. Memory/quota counters remain clean, while filesystem/client
+I/O PSI-some reaches 57.9%/63.3% for candidate/predecessor. This identifies waits,
+not their responsible SDK, admission, FUSE or backend stage. P99 and mean rates
+hide rare stalls; retain raw calls, maxima and total-work/time rates. A matching
+30-second admission timeout is a hypothesis, not a proven cause. A sampled mean,
 linear slope or one persistent run does not prove a memory plateau or leak.
 
 **Where:** `src/filesystem.rs` read/refill/admission, `src/read.rs`, `src/cache.rs`,
 `src/main.rs` allocator observation; `bench/accounting.py` measurement scopes.
 
-**Next:** retain per-operation mixed-cycle latency and backend traffic; repeat
-with sufficient backend headroom and controlled observer overhead. Compare the
-same fixed work and the same offered rate separately. Keep whole-series daemon,
-client, allocator, cgroup, file and kernel memory; extend duration and repeats
-before claiming a plateau. Preserve baseline-owned Go GC.
+**Subsequent confirmed cause/correction:** a scoped FUSE/ownership join shows the
+admission timeout while an in-flight fill has already published reclaimable cache
+fragments. The admission waiter never revisits them. A gated public read first
+fails for this mechanism; Notify-driven reclamation now preserves its FIFO
+reservation. Separate diagnostics show 15 LISTs per mixed cycle because unrelated
+writer mutations change the global directory-page epoch. Directory-local epochs
+remove that invalidation, with TTL, binding, rename/delete and cancellation checks.
+
+**New VM outcome:** the final 60-cycle fixed-work comparison takes 200.89 s for
+corrected Rust versus prior Rust 251.35 s, with one-to-zero calls above 20 s.
+The separate reverse-order 30-cycle offered-rate control completes in 300 s for
+all four binaries without lateness. Neither Rust binary has the rare stall in
+that paced control. It does not establish the same improvement under every rate.
+Corrected metadata pooled p99 rises to 1.26849 ms versus prior Rust 0.07488 and
+Go 0.02886/0.02510. Cycle 28 alone has 345 metadata calls above 1 ms: a sustained
+operation concern, not only initial listing. Late cgroup memory is 389.8 MiB
+versus Go 350.6/371.4 despite lower sampled daemon RSS. Full tables and scope
+qualifiers are in [performance](performance.md#native-vm-admissiondirectory-checkpoint--2026-10-31).
+
+**Next:** attribute the late metadata calls, including page/attribute freshness and
+backend request lifetimes, before changing TTL or invalidation again; a causal
+explanation has not been established. Retain random/concurrent/writer regressions
+and both Go references. Control observer and shared-host effects; repeat each
+fixed-work/offered-rate design independently. Keep whole-series daemon, client,
+allocator, cgroup, file and kernel memory; extend duration and repetitions before
+claiming a plateau. Preserve baseline-owned Go GC.
 
 ## 3. Resource and observer effects still qualify performance claims
 
@@ -62,6 +120,14 @@ After raising the parent to 24 CPU, the completed matrix still records backend
 throttling in sequential/eviction runs. Subsequent persistent/observer experiments
 use 32 CPU parent, 16 CPU backend and unchanged 8 CPU daemon/client limits.
 Resource enlargement is not a source optimization.
+
+The first default-GC candidate attempt stops after 47 completed records on the
+strict memory-pressure gate. Backend working files persist for the whole shared
+bucket lifetime. Their footprint falls after scoped bucket deletion, motivating
+one bucket per paired workload group, not higher application budgets. All 120
+records in the versioned isolated comparison pass byte/generation and quota/memory
+checks. CPU and I/O waits remain measured; the resource change is not a source
+performance improvement. The partial/rejected attempt remains retained.
 
 **Where:** `bench/compare.py::{cgroup,Sampler}`, `bench/go_heap.py`,
 `src/main.rs` optional statistics writer; fixture parent/backend limits.
@@ -136,8 +202,8 @@ shared failure as compatibility or pretend it is a Rust-only regression.
 
 - `bench/compare.py::Sampler.metrics` computes its `steady` memory fields from
   the latter half of a `deque(maxlen=1000)`, not the whole measurement's late
-  half once that buffer wraps. The README operation table calls this a late
-  window; the persistent table uses independent whole-series analysis instead.
+  half once that buffer wraps. The older operation checkpoint labels this a late
+  window. Latest README tables use independent full-raw-series analysis instead.
   Before using long-run `steady` fields in acceptance, replace this bounded-tail
   aggregation with an explicit whole-window/time-window contract and a regression
   that exceeds 1,000 samples. Otherwise an earlier sustained high-memory interval

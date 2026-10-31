@@ -41,6 +41,12 @@ paged and admission-limited. Remote metadata is validated against the observed
 binding/generation before installation. Dirty or newly durable local state is not
 replaced merely because an older response completes later.
 
+Directory pages use inode-local listing epochs. A mutation invalidates its parent
+and any moved/deleted cached subtree, preserving fresh pages elsewhere. Epochs
+are read and changed under the namespace lock, independently of refreshed inode
+metadata. In-flight listings validate both epoch and name-to-inode binding before
+publication; move/delete leases invalidate on entry and on every completion path.
+
 ## Payload ownership and progress
 
 `src/budget.rs` uses Tokio owned semaphore permits. Every `Block` owns its full
@@ -57,15 +63,34 @@ All three lanes are carved from the requested payload limit:
 | data | `total - ingress - flush` | Shared clean cache, dirty extents and pinned/temporary payload |
 
 A 64 MiB configuration therefore provides 50 MiB data, 4 MiB ingress and 10 MiB
-flush. Clean reads cannot borrow an idle flush reserve in the delivered code.
-`effective_budgets()` reports actual capacities/use; these are payload-owner
-bounds, **not RSS, allocator or cgroup memory bounds**. Metadata, SDK/runtime,
+flush. Required admission may move an exclusively cache-owned clean backing's
+charge from data into idle flush capacity. The retained policy ceiling is then
+60 MiB; no lane or total limit increases. Shared/pinned allocations cannot move.
+`effective_budgets()` reports capacities/use and current clean cache loans;
+`flush_used_bytes` includes these loans as well as upload allocations. These are
+payload-owner bounds, **not RSS, allocator or cgroup memory bounds**. Metadata, SDK/runtime,
 allocator retention, clients and kernel caches require separate measurement.
 
 Required data admission reclaims only enough LRU ownership to satisfy the request;
 queued semaphore waiters retain FIFO priority. Dirty-pressure progress can flush
 through the independent reserved lane. Optional read-ahead uses nonblocking
-admission and skips pressure instead of blocking required work.
+data admission and skips pressure instead of initiating loans or blocking required
+work. A required miss may reclaim any cache owner; existing FIFO admission stays
+ahead of later hits or loans.
+
+A fill can publish new cache ownership after admission's first reclamation sweep.
+Waiting admission therefore listens for cache publication through Tokio `Notify`
+and retries reclamation while retaining the same FIFO semaphore reservation.
+Registering before inspecting the cache closes the check/wait race; cancellation
+drops the reservation and notification with the caller-owned future.
+
+Before uploading, a flusher holds shared Tokio `RwLock` activity and synchronously
+revokes cache loans. Independent uploads remain concurrent. The guard travels
+with cloned upload budgets into SDK bodies and jobs, preventing new loans until
+the last allocation-capable upload owner finishes, including after caller
+cancellation. Cache lending only tries exclusive activity synchronously and
+never waits. Loaned bytes are copied into an already admitted data reply before
+an owned `Block` can leave the cache, so callers cannot pin a revocable reserve.
 
 ## Reads, generations and cache
 
@@ -76,9 +101,10 @@ or cancellation. Followers recheck current state/cache rather than inheriting an
 unvalidated result from a different generation.
 
 `src/cache.rs` retains charged immutable blocks using `lru` plus a range index.
-A single cached backing can supply a view; joining fragments uses admitted
-output. Required pressure may reclaim any LRU owner. Optional refill protects a
-foreign unread prefix using contiguous-consumption hints, not permanent pins.
+A normal cached backing can supply a view; joining fragments or reading a loaned
+backing uses admitted output. Required pressure may reclaim any LRU owner.
+Optional refill protects a foreign unread prefix using contiguous-consumption
+hints, not permanent pins.
 
 Adaptive `Pattern` currently belongs to the inode, not each open handle. The
 zero-to-one open transition resets history while preserving cached payload;
@@ -122,4 +148,5 @@ Default release builds use jemalloc and ThinLTO with one codegen unit. The
 `system-allocator` feature is an explicit alternative with differently scoped
 counters. RSS, live allocator use and cgroup file/kernel memory are not
 interchangeable. Current measured losses and remaining compatibility work are
-recorded in [next work](next-work.md); no cache-loan redesign is included.
+recorded in [next work](next-work.md); the idle-loan policy is a bounded ownership
+change, not proof of whole-filesystem speed or memory acceptance.

@@ -109,7 +109,26 @@ These observations do not pass acceptance or explain every wait. The subsequent
 read and sustained-rate losses. Current checkpoint tables are in the
 [README](../README.md); [architecture](architecture.md) describes the delivered
 design and [next work](next-work.md) records confirmed causes and unresolved
-attribution. The cache-loan proposal is not implemented.
+attribution. Subsequent fixed-binary native GET/FUSE profiles confirm the repeated
+warm cache misses without quota throttling or reclaim. Required admission can now
+use revocable idle flush capacity without changing the total payload limit;
+owned replies and active uploads retain their separate progress guarantees.
+The subsequent 120-record healthy-warm comparison eliminates repeated random GETs
+but retains tail, concurrent-read and memory losses. All four binaries complete
+60 persistent mixed cycles; candidate Rust takes 709 seconds versus 600 for both
+Go references. Rare successful approximately 30-second Rust reads are a new
+attribution priority, not yet a proven SDK/admission defect. Full comparative and
+compatibility acceptance remains open; current numbers and scopes are in the README.
+
+The subsequent native VM investigation joins the 30-second read to admission
+missing cache owners published after its initial reclamation sweep, and observes
+a deterministic failing test before correction. Source `67f7aec` reclaims on
+publication without losing FIFO position; directory-local epochs also preserve
+fresh listings across unrelated writes. Its fixed-work control improves elapsed
+and metadata work. The reverse-order equal-rate control meets its schedule, but
+exposes a late-run metadata-tail regression and higher late cgroup memory than Go.
+Tail/throughput losses and full compatibility remain open; neither control proves
+a memory plateau. See the separate [2026-10-31 checkpoint](performance.md#native-vm-admissiondirectory-checkpoint--2026-10-31).
 
 The first-stage scope still excludes FUSE passthrough and disk-backed caching.
 No single profile proves that every possible optimization is exhausted; report

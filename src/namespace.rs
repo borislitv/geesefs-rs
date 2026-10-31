@@ -4,7 +4,7 @@ use crate::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::Ordering},
     time::{Duration, Instant},
 };
 
@@ -45,6 +45,28 @@ impl Namespace {
         self.names.get(key).and_then(|i| self.nodes.get(i)).cloned()
     }
 
+    pub(crate) fn changed(&mut self, key: &str) {
+        self.epoch += 1;
+        let parent = key.rsplit_once('/').map_or("", |(parent, _)| parent);
+        // Mutations affect the parent page and any moved/deleted subtree, not
+        // fresh pages elsewhere. All epoch access is under the namespace lock.
+        for name in [parent, key] {
+            if let Some(node) = self.named(name) {
+                node.directory_epoch.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let prefix = format!("{key}/");
+        for (_, ino) in self
+            .names
+            .range(prefix.clone()..)
+            .take_while(|(name, _)| name.starts_with(&prefix))
+        {
+            if let Some(node) = self.nodes.get(ino) {
+                node.directory_epoch.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
     pub(crate) fn has_dirty_descendants(&self, key: &str) -> bool {
         let prefix = if key.is_empty() {
             String::new()
@@ -78,7 +100,7 @@ impl Namespace {
         }
         self.tombstones
             .insert(key.to_owned(), Instant::now() + Duration::from_secs(60));
-        self.epoch += 1;
+        self.changed(key);
         Ok(())
     }
 
@@ -171,7 +193,9 @@ impl<'a> MoveLease<'a> {
             return Err(Error::Fs(libc::ENOMEM));
         }
         ns.moving.extend(keys.iter().cloned());
-        ns.epoch += 1;
+        for key in &keys {
+            ns.changed(key);
+        }
         Ok(Self { namespace, keys })
     }
 }
@@ -180,8 +204,8 @@ impl Drop for MoveLease<'_> {
         let mut ns = self.namespace.lock().unwrap();
         for key in &self.keys {
             ns.moving.remove(key);
+            ns.changed(key);
         }
-        ns.epoch += 1;
     }
 }
 

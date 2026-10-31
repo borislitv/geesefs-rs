@@ -1,9 +1,16 @@
-# Next work: observed problems and causes, 2026-10-30
+# Next work: observed problems and causes, 2026-10-31
 
 Overall status remains **UNACCEPTED**. This is the handoff for the next iteration;
 it separates confirmed mechanisms from hypotheses. See the latest
 [measurement tables](../README.md#latest-completed-measurements--2026-10-30),
 [architecture](architecture.md) and [comparison contract](performance.md).
+
+The subsequent [native VM checkpoint](performance.md#native-vm-admissiondirectory-checkpoint--2026-10-31)
+attributes and corrects the admission and global-directory-invalidation mechanisms
+below at `67f7aec`. Earlier measurements retain their original scope; the new
+fixed-work control improves total elapsed but not every tail or memory metric.
+The reverse-order offered-rate control adds a late-run metadata-tail regression
+and higher late cgroup memory than both Go references to the unresolved work.
 
 ## 1. Warm random reads: cache working-set eviction
 
@@ -55,7 +62,7 @@ cache's memory tradeoff visible; reducing GETs alone does not close acceptance.
 
 ## 2. Persistent mixed mount misses its target rate
 
-**Latest observed:** all four binaries complete 60 cycles / 360 checked passes.
+**Earlier observed:** all four binaries complete 60 cycles / 360 checked passes.
 Candidate Rust takes 709.11 s versus predecessor 873.78 s and 600.00 s for both
 Go references. Late cycles are 58/54/0/0 respectively. Candidate peak RSS is lower
 than Go, but its whole-series late-half RSS is 232.1 MiB versus experimental Go's
@@ -64,7 +71,7 @@ durations and one fixed-order observation do not establish an equal-rate memory
 win or repeatability. The earlier 885.09-second Rust run remains retained under
 its different resource configuration.
 
-**Cause boundary:** candidate/predecessor have 11/16 approximately 30-second
+**Earlier cause boundary:** candidate/predecessor have 11/16 approximately 30-second
 successful serial reads; both Go have zero. Candidate sequential/eviction active
 times total 164.23/252.35 s; experimental Go totals 118.57/113.41 s. Persistent
 metadata also totals 35.65 s versus Go 2.90/2.88 s despite the faster short warm
@@ -78,12 +85,32 @@ linear slope or one persistent run does not prove a memory plateau or leak.
 **Where:** `src/filesystem.rs` read/refill/admission, `src/read.rs`, `src/cache.rs`,
 `src/main.rs` allocator observation; `bench/accounting.py` measurement scopes.
 
-**Next:** correlate the retained slow offsets/calls with scoped FUSE events,
-SDK/body progress and permit owners; observe a behavioral RED before fixing the
-responsible wait. Keep observer overhead controlled. Compare the
-same fixed work and the same offered rate separately. Keep whole-series daemon,
-client, allocator, cgroup, file and kernel memory; extend duration and repeats
-before claiming a plateau. Preserve baseline-owned Go GC.
+**Subsequent confirmed cause/correction:** a scoped FUSE/ownership join shows the
+admission timeout while an in-flight fill has already published reclaimable cache
+fragments. The admission waiter never revisits them. A gated public read first
+fails for this mechanism; Notify-driven reclamation now preserves its FIFO
+reservation. Separate diagnostics show 15 LISTs per mixed cycle because unrelated
+writer mutations change the global directory-page epoch. Directory-local epochs
+remove that invalidation, with TTL, binding, rename/delete and cancellation checks.
+
+**New VM outcome:** the final 60-cycle fixed-work comparison takes 200.89 s for
+corrected Rust versus prior Rust 251.35 s, with one-to-zero calls above 20 s.
+The separate reverse-order 30-cycle offered-rate control completes in 300 s for
+all four binaries without lateness. Neither Rust binary has the rare stall in
+that paced control. It does not establish the same improvement under every rate.
+Corrected metadata pooled p99 rises to 1.26849 ms versus prior Rust 0.07488 and
+Go 0.02886/0.02510. Cycle 28 alone has 345 metadata calls above 1 ms: a sustained
+operation concern, not only initial listing. Late cgroup memory is 389.8 MiB
+versus Go 350.6/371.4 despite lower sampled daemon RSS. Full tables and scope
+qualifiers are in [performance](performance.md#native-vm-admissiondirectory-checkpoint--2026-10-31).
+
+**Next:** attribute the late metadata calls, including page/attribute freshness and
+backend request lifetimes, before changing TTL or invalidation again; a causal
+explanation has not been established. Retain random/concurrent/writer regressions
+and both Go references. Control observer and shared-host effects; repeat each
+fixed-work/offered-rate design independently. Keep whole-series daemon, client,
+allocator, cgroup, file and kernel memory; extend duration and repetitions before
+claiming a plateau. Preserve baseline-owned Go GC.
 
 ## 3. Resource and observer effects still qualify performance claims
 

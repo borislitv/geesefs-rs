@@ -12,7 +12,8 @@ passing unit tests or one favorable workload does not satisfy that goal.
 
 Use Rust 1.96.0 or newer with rustfmt/clippy and Python 3.12+ with dependencies
 from `requirements-fixture.txt`. Builds, tests and mounted benchmarks run in
-isolated Kubernetes fixtures. Dependencies are public crates; this package
+isolated disposable fixtures; the operator also authorized the OpenCode VM for
+the 2026-10-31 diagnostics. Dependencies are public crates; this package
 forbids unsafe code. Reuse maintained library APIs before custom infrastructure.
 
 ```bash
@@ -30,7 +31,35 @@ but concurrent reads, tails, sustained rate and memory still fail the agreed
 all-metrics goal. See [architecture](docs/architecture.md) and
 [next work and confirmed causes](docs/next-work.md).
 
+## Persistent admission correction — 2026-10-31
+
+Native FUSE/ownership diagnostics attribute the rare 30-second read to admission
+missing cache owners published after its initial reclamation sweep. Required
+admission now reclaims on publication while retaining its FIFO reservation.
+Directory-local epochs also prevent unrelated writes from invalidating every
+fresh listing page. Gated regressions fail before correction; 218 all-feature
+Rust cases, Clippy, formatting and the public-source audit pass.
+
+The final release completes 60 persistent mixed cycles per implementation, with
+1,440 checked passes and four full-byte/generation checks passing. The same work
+takes 200.89 s versus prior Rust 251.35 s and Go experimental/packaged
+288.61/379.29 s. Metadata active time drops 21.08 to 2.46 s; calls over 20 s drop
+from one to zero. Random p99 still slightly regresses against prior Rust, and
+metadata/random/writer metrics retain Go losses. These are scoped VM diagnostics,
+not all-workload acceptance.
+
+A reverse-order control runs 30 cycles at one cycle per 10 s: all four binaries
+complete 300 s without lateness, and all 720 passes/four generation checks pass.
+Corrected Rust uses 114.93 whole-cgroup CPU seconds versus Go 428.46/640.10, but
+late cgroup memory is higher: 389.8 MiB versus 350.6/371.4. Metadata pooled p99
+regresses to 1.26849 ms versus prior Rust 0.07488 and Go 0.02886/0.02510, including
+late-run slow calls. This remains an open acceptance failure. See
+[method, CPU/memory/tails and qualifications](docs/performance.md#native-vm-admissiondirectory-checkpoint--2026-10-31).
+
 ## Latest completed measurements — 2026-10-30
+
+This is the earlier idle-flush cache-policy checkpoint, retained independently
+from the subsequent admission/directory correction above.
 
 **Diagnostic results, not production acceptance.** The cache-policy comparison
 completes 120 healthy-warm records: five repetitions of six workloads on the new

@@ -120,6 +120,16 @@ Go references. Rare successful approximately 30-second Rust reads are a new
 attribution priority, not yet a proven SDK/admission defect. Full comparative and
 compatibility acceptance remains open; current numbers and scopes are in the README.
 
+The subsequent native VM investigation joins the 30-second read to admission
+missing cache owners published after its initial reclamation sweep, and observes
+a deterministic failing test before correction. Source `67f7aec` reclaims on
+publication without losing FIFO position; directory-local epochs also preserve
+fresh listings across unrelated writes. Its fixed-work control improves elapsed
+and metadata work. The reverse-order equal-rate control meets its schedule, but
+exposes a late-run metadata-tail regression and higher late cgroup memory than Go.
+Tail/throughput losses and full compatibility remain open; neither control proves
+a memory plateau. See the separate [2026-10-31 checkpoint](performance.md#native-vm-admissiondirectory-checkpoint--2026-10-31).
+
 The first-stage scope still excludes FUSE passthrough and disk-backed caching.
 No single profile proves that every possible optimization is exhausted; report
 covered workloads, unresolved attribution and remaining compatibility gaps.

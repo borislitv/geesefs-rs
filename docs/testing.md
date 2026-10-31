@@ -24,6 +24,12 @@ binding check. Directory tests also retain TTL, inode eviction, parent/descendan
 rename and in-flight response coverage. The Python fixture dependencies must be
 on the selected interpreter's environment; setup failures are not behavioral RED.
 
+Installed `mutator` kills all three selected epoch/binding-guard faults using the
+directory public-interface suite. This is a three-site check, not whole-file or
+repository mutation coverage. `dryer --threshold 0.8` finds no duplicate candidates
+in the three changed runtime files. `crapper --no-coverage` reports complexity
+only: coverage and CRAP remain N/A, and large existing methods remain open work.
+
 ```bash
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
@@ -85,3 +91,12 @@ with 30 frozen generations verified, then 60 persistent mixed cycles per binary
 unchanged budgets and quota/memory counters. Rare successful 30-second Rust reads,
 other adverse metrics and unisolated observer cost keep performance unaccepted.
 These healthy runs do not close the known mounted compatibility/failure gaps.
+
+The final admission/directory binary separately completes 1,440 fixed-work and
+720 equal-offered-rate passes on the VM, with all eight final full-byte/generation
+checks passing. Owned mounts, clients, daemons and backends stop successfully.
+The paced control has no missed cycles but retains a late-run metadata-tail
+regression and cgroup-memory losses. Both raw-series summaries verify equivalent
+work and unchanged budgets; all 25 compiled inputs and four executable hashes are
+checked against retained provenance. These comparisons neither repeat the same
+design independently nor pass compatibility/performance acceptance.

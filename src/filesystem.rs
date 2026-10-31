@@ -19,7 +19,7 @@ use crate::{
 };
 use fuser::{FileAttr, FileType};
 use futures_util::{StreamExt, stream::FuturesUnordered};
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::{Notify, RwLock, Semaphore};
 
 pub struct Filesystem {
     pub config: Arc<Config>,
@@ -28,6 +28,7 @@ pub struct Filesystem {
     pub ingress: Budget,
     data: Budget,
     cache: Mutex<crate::cache::ReadCache>,
+    cache_published: Notify,
     flush_lane: Budget,
     flush_activity: Arc<RwLock<()>>,
     flushers: Arc<Semaphore>,
@@ -171,6 +172,7 @@ impl Filesystem {
                 (data_bytes + flush_bytes) as u64,
                 config.entry_limit as usize,
             )),
+            cache_published: Notify::new(),
             flush_lane: Budget::new(flush_bytes)?,
             flush_activity: Arc::new(RwLock::new(())),
             flushers: Arc::new(Semaphore::new(config.max_flushers)),
@@ -555,7 +557,7 @@ impl Filesystem {
             Err(error) if not_found(&error) => {
                 s.deleted = true;
                 ns.names.remove(&key);
-                ns.epoch += 1;
+                ns.changed(&key);
                 return Err(error);
             }
             Err(error) => return Err(error),
@@ -592,7 +594,7 @@ impl Filesystem {
             state.deleted = true;
             drop(state);
             ns.names.remove(key);
-            ns.epoch += 1;
+            ns.changed(key);
         }
         if self.config.negative_lookup_cache_size > 0
             && started.elapsed() < self.config.stat_cache_ttl
@@ -721,7 +723,7 @@ impl Filesystem {
             return Err(Error::Fs(libc::EEXIST));
         }
         ns.tombstones.remove(&key);
-        ns.epoch += 1;
+        ns.changed(&key);
         let node = ns.install(&key, |ino| {
             Inode::new(ino, key.clone(), directory, None, &self.config)
         })?;
@@ -1251,6 +1253,7 @@ impl Filesystem {
                     );
                 }
                 fill.published();
+                self.cache_published.notify_waiters();
             }
         }
         if let Some(error) = prefetch_error {
@@ -1280,9 +1283,32 @@ impl Filesystem {
                     return self.data.try_reserve(size);
                 }
                 self.flush_all().await?;
-                tokio::time::timeout(Duration::from_secs(30), self.data.reserve(size))
-                    .await
-                    .map_err(|_| Error::Timeout("payload admission"))?
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    // Retain the same FIFO reservation while reclaiming owners
+                    // published by fills that were in flight at the first sweep.
+                    let reservation = self.data.reserve(size);
+                    tokio::pin!(reservation);
+                    loop {
+                        let published = self.cache_published.notified();
+                        // notify_waiters covers futures created before the
+                        // cache check, including ones not yet polled.
+                        tokio::select! {
+                            biased;
+                            result = &mut reservation => return result,
+                            _ = async {
+                                let reclaimed = {
+                                    let cache = self.cache.lock().unwrap();
+                                    self.try_cache_loan(&cache) || cache.evict_lru()
+                                };
+                                if !reclaimed {
+                                    published.await;
+                                }
+                            } => {}
+                        }
+                    }
+                })
+                .await
+                .map_err(|_| Error::Timeout("payload admission"))?
             }
             Err(error) => Err(error),
         }
@@ -1463,23 +1489,23 @@ impl Filesystem {
         resolve_types: bool,
     ) -> Result<Vec<DirEntry>> {
         let fetched = std::time::Instant::now();
-        let node = self.node(ino)?;
-        let key = {
+        let (node, key, epoch) = {
+            let ns = self.namespace.lock().unwrap();
+            let node = ns.get(ino)?;
             let state = node.state.lock().unwrap();
             if file_type(state.mode) != FileType::Directory {
                 return Err(Error::Fs(libc::ENOTDIR));
             }
-            state.key.clone()
-        };
-        let prefix = if key.is_empty() {
-            key
-        } else {
-            format!("{key}/")
-        };
-        let epoch = {
-            let ns = self.namespace.lock().unwrap();
+            if state.deleted {
+                return Err(Error::Fs(libc::ENOENT));
+            }
+            let key = state.key.clone();
+            if resolve_types && (ns.is_moving(&key) || ns.is_deleting(&key)) {
+                return Err(Error::Fs(libc::EAGAIN));
+            }
+            let epoch = node.directory_epoch.load(Ordering::Relaxed);
             if resolve_types
-                && let Some(page) = self.directory_pages.get(&(ino, ns.epoch, after.into(), limit))
+                && let Some(page) = self.directory_pages.get(&(ino, epoch, after.into(), limit))
                 && page.fetched.elapsed() < self.config.stat_cache_ttl
                 // READDIR does not retain lookup references. Namespace pressure
                 // may have evicted an inode represented by this cached page.
@@ -1487,7 +1513,13 @@ impl Filesystem {
             {
                 return Ok(page.entries.clone());
             }
-            ns.epoch
+            drop(state);
+            (node, key, epoch)
+        };
+        let prefix = if key.is_empty() {
+            key
+        } else {
+            format!("{key}/")
         };
         let mut selected: BTreeMap<String, (bool, Option<ObjectHead>, bool)> = BTreeMap::new();
         {
@@ -1650,7 +1682,9 @@ impl Filesystem {
             }
         }
         let mut ns = self.namespace.lock().unwrap();
-        if ns.epoch != epoch {
+        if node.directory_epoch.load(Ordering::Relaxed) != epoch
+            || ns.names.get(prefix.trim_end_matches('/')) != Some(&ino)
+        {
             return Err(Error::Fs(libc::EAGAIN));
         }
         let mut entries = Vec::with_capacity(selected.len());
@@ -1787,14 +1821,14 @@ impl Filesystem {
                 let mut ns = self.namespace.lock().unwrap();
                 ns.pending_deletes.remove(&key);
                 ns.tombstones.remove(&key);
-                ns.epoch += 1;
+                ns.changed(&key);
             }
             return Err(error);
         }
         let mut ns = self.namespace.lock().unwrap();
         ns.pending_deletes.remove(&key);
         ns.names.remove(&key);
-        ns.epoch += 1;
+        ns.changed(&key);
         let mut state = node.state.lock().unwrap();
         state.deleted = true;
         state.extents.clear();
@@ -2034,7 +2068,7 @@ impl Filesystem {
                 }
             }
         }
-        ns.epoch += 1;
+        ns.changed(&destination);
         ns.pending_moves.remove(&old);
         ns.pending_moves.remove(&destination);
         ns.get(newparent)?

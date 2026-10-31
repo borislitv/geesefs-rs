@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    sync::Mutex,
+    sync::{Mutex, atomic::AtomicU64},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -48,6 +48,8 @@ pub struct Inode {
     /// Serialize commits/rename/delete for this object only, never the namespace.
     pub flush: std::sync::Arc<tokio::sync::Mutex<()>>,
     pub(crate) preload: tokio::sync::Mutex<()>,
+    /// Listing invalidation is independent of refreshed object metadata.
+    pub(crate) directory_epoch: AtomicU64,
     pub pattern: Mutex<crate::read::Pattern>,
     pub(crate) read_fills: Mutex<BTreeMap<(u64, u64), crate::read::Fill>>,
 }
@@ -148,6 +150,7 @@ impl Inode {
         };
         Self {
             ino,
+            directory_epoch: AtomicU64::new(0),
             state: Mutex::new(State {
                 key,
                 data_key: None,

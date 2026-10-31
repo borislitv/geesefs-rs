@@ -41,6 +41,12 @@ paged and admission-limited. Remote metadata is validated against the observed
 binding/generation before installation. Dirty or newly durable local state is not
 replaced merely because an older response completes later.
 
+Directory pages use inode-local listing epochs. A mutation invalidates its parent
+and any moved/deleted cached subtree, preserving fresh pages elsewhere. Epochs
+are read and changed under the namespace lock, independently of refreshed inode
+metadata. In-flight listings validate both epoch and name-to-inode binding before
+publication; move/delete leases invalidate on entry and on every completion path.
+
 ## Payload ownership and progress
 
 `src/budget.rs` uses Tokio owned semaphore permits. Every `Block` owns its full
@@ -71,6 +77,12 @@ through the independent reserved lane. Optional read-ahead uses nonblocking
 data admission and skips pressure instead of initiating loans or blocking required
 work. A required miss may reclaim any cache owner; existing FIFO admission stays
 ahead of later hits or loans.
+
+A fill can publish new cache ownership after admission's first reclamation sweep.
+Waiting admission therefore listens for cache publication through Tokio `Notify`
+and retries reclamation while retaining the same FIFO semaphore reservation.
+Registering before inspecting the cache closes the check/wait race; cancellation
+drops the reservation and notification with the caller-owned future.
 
 Before uploading, a flusher holds shared Tokio `RwLock` activity and synchronously
 revokes cache loans. Independent uploads remain concurrent. The guard travels

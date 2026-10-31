@@ -136,3 +136,16 @@ concurrency discussion is not a ready-made small-random latency fix.
 [#958](https://github.com/awslabs/aws-sdk-rust/issues/958)'s TCP_NODELAY setting is
 already enabled by the selected transport. No dependency replacement follows
 from these discussions.
+
+The 2026-10-31 native FUSE investigation attributes a 30-second wait to application
+admission: an in-flight fill publishes reclaimable cache owners after the initial
+sweep, but waiting for permits alone cannot reclaim them. Tokio
+[#6450](https://github.com/tokio-rs/tokio/issues/6450) documents FIFO behavior,
+not an applicable semaphore defect. Reuse selected Tokio 1.54.1
+[`Notify`](https://docs.rs/tokio/1.54.1/tokio/sync/struct.Notify.html):
+`notify_waiters` covers notification futures created before the cache check even
+when not yet polled. Keep the same pinned reservation instead of cancelling and
+rejoining the FIFO queue. No dependency replacement or new allocator is needed.
+GeeseFS [#28](https://github.com/yandex-cloud/geesefs/issues/28) discusses slow
+listing/HEAD work; the measured repeated LISTs here instead follow our global
+directory-page epoch invalidation after unrelated writes.

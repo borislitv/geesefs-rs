@@ -4,6 +4,26 @@ This is the concise engineering context for the experimental Linux/S3 rewrite.
 Detailed results and operational logs stay outside tracked source files.
 Overall compatibility and comparative performance remain **UNACCEPTED**.
 
+## Persistent admission and metadata correction, 2026-10-31
+
+- Native VM CPU profiles, scoped FUSE lifecycle events and temporary ownership
+  diagnostics reproduce the rare 30-second read. Admission waits for 42,074,112
+  bytes while an in-flight fill publishes 170 cache fragments over about 25 ms;
+  no second reclamation sweep runs before timeout. A deterministic gated public
+  read regression fails for the same mechanism before correction. Admission now
+  reclaims newly published owners through Tokio Notify while retaining FIFO place,
+  unchanged budgets, pinned-owner accounting and cancellation.
+- Persistent metadata repeatedly makes 15 LISTs per cycle because an unrelated
+  writer changes the global namespace epoch. A fresh-page regression first fails
+  on the extra backend call. Directory-local epochs invalidate affected parents
+  and moved/deleted subtrees instead. Existing TTL and dead-inode checks remain;
+  in-flight responses also validate their binding. A separate observed failure
+  during authoritative directory removal catches the missing binding check.
+- Tests cover unaffected in-flight listings, both rename parents, descendant
+  listing rejection during a parent move, waiter cancellation and byte/budget
+  correctness. Temporary runtime diagnostics are removed. These corrections do
+  not establish all-workload comparative or production acceptance.
+
 ## Initial implementation and correctness
 
 - Reused fuser and AWS SDK rather than implementing FUSE/S3 protocols. Added

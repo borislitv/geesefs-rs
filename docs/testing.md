@@ -1,7 +1,8 @@
 # Testing and verification boundary
 
 **Experimental read/write filesystem; compatibility and performance unaccepted.**
-Build and test in isolated Kubernetes fixtures with disposable data. Never use
+Build and test in isolated fixtures with disposable data. The operator also
+authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
 ## Library and contract checks
@@ -13,6 +14,15 @@ audit in Kubernetes. The unchanged runner also passes 57 Python cases.
 Default and System-allocator ThinLTO builds pass; the default release passes
 30 backend-contract, cache-loan and read-view cases.
 These checks are not full reference parity or production acceptance.
+
+The 2026-10-31 admission/directory correction passes 218 Rust cases with all
+targets/features, formatting, warning-denying all-target/all-feature Clippy, the
+public-source audit and a default release build on the VM using Rust 1.99.1.
+The gated admission and unrelated-directory regressions each fail before their
+fix, then pass. A further directory-removal race first exposes the missing final
+binding check. Directory tests also retain TTL, inode eviction, parent/descendant
+rename and in-flight response coverage. The Python fixture dependencies must be
+on the selected interpreter's environment; setup failures are not behavioral RED.
 
 ```bash
 cargo fmt --all -- --check

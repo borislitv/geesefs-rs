@@ -20,6 +20,11 @@ fn mounted(fs: Arc<Filesystem>, check: impl FnOnce(&Path)) {
     let notifier = adapter.notifier.clone();
     let shutdown_error = adapter.shutdown_error.clone();
     let mut options = fuser::Config::default();
+    let threads = std::env::var("GEESEFS_TEST_FUSE_THREADS")
+        .map(|value| value.parse::<usize>().expect("native fixture loop count"))
+        .unwrap_or(1);
+    options.n_threads = Some(threads);
+    options.clone_fd = threads > 1;
     options
         .mount_options
         .push(fuser::MountOption::DefaultPermissions);
@@ -36,6 +41,76 @@ fn mounted(fs: Arc<Filesystem>, check: impl FnOnce(&Path)) {
         std::panic::resume_unwind(panic);
     }
     assert!(shutdown_error.lock().unwrap().is_none());
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Linux FUSE fixture"]
+fn concurrent_receivers_preserve_lookup_read_write_and_unmount_bytes() {
+    use std::io::Write;
+
+    let store = MemoryStore::new();
+    store.seed("shared", b"independent read bytes");
+    mounted(store.filesystem(32), |path| {
+        std::thread::scope(|scope| {
+            let start = Arc::new(std::sync::Barrier::new(4));
+            let mut threads = Vec::new();
+            for worker in 0..4 {
+                let start = start.clone();
+                threads.push(scope.spawn(move || {
+                    start.wait();
+                    for generation in 0..16 {
+                        assert_eq!(
+                            std::fs::read(path.join("shared")).unwrap(),
+                            b"independent read bytes"
+                        );
+                        let names = std::fs::read_dir(path)
+                            .unwrap()
+                            .map(|entry| entry.unwrap().file_name())
+                            .collect::<Vec<_>>();
+                        assert!(names.iter().any(|name| name == "shared"));
+                        let file = path.join(format!("worker-{worker}"));
+                        let renamed = path.join(format!("renamed-{worker}"));
+                        let bytes = format!("worker {worker}, generation {generation}");
+                        let mut handle = std::fs::File::create(&file).unwrap();
+                        handle.write_all(bytes.as_bytes()).unwrap();
+                        handle.sync_all().unwrap();
+                        drop(handle);
+                        std::fs::rename(&file, &renamed).unwrap();
+                        assert_eq!(std::fs::read(&renamed).unwrap(), bytes.as_bytes());
+                        std::fs::remove_file(&renamed).unwrap();
+                    }
+                    std::fs::write(
+                        path.join(format!("durable-{worker}")),
+                        b"durable after unmount",
+                    )
+                    .unwrap();
+                }));
+            }
+            for thread in threads {
+                thread.join().unwrap();
+            }
+        });
+    });
+    for worker in 0..4 {
+        assert_eq!(
+            store.bytes(&format!("durable-{worker}")),
+            b"durable after unmount"
+        );
+        assert!(
+            !store
+                .objects
+                .lock()
+                .unwrap()
+                .contains_key(&format!("worker-{worker}"))
+        );
+        assert!(
+            !store
+                .objects
+                .lock()
+                .unwrap()
+                .contains_key(&format!("renamed-{worker}"))
+        );
+    }
 }
 
 #[test]

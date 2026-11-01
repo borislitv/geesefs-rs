@@ -845,16 +845,12 @@ impl fuser::Filesystem for Fuse {
                 return;
             }
         };
-        let notifier = self.notifier.clone();
+        // VFS updates rename dentries itself. Extra entry notifications can wait
+        // for a directory operation that needs this executor or notifier lock,
+        // even after our rename reply has been sent.
         self.spawn(reply, move |fs, reply| async move {
             match fs.rename(parent.0, &name, newparent.0, &newname).await {
-                Ok(()) => {
-                    reply.ok();
-                    if let Some(notifier) = notifier.lock().unwrap().as_ref() {
-                        let _ = notifier.inval_entry(parent, OsStr::new(&name));
-                        let _ = notifier.inval_entry(newparent, OsStr::new(&newname));
-                    }
-                }
+                Ok(()) => reply.ok(),
                 Err(error) => reply.error(errno(error)),
             }
         });

@@ -18,7 +18,8 @@ remain [project brief](project-brief.md) and [AGENTS.md](../AGENTS.md).
 - Retained runtime: `1b13033c3f161b9502c7a23870b645ca871ab2e3`.
   Release SHA256: `df24b6bdd42920b7989db2ed7c44855b9fc2bb1cf53292ee60ce023eb42138a8`.
   All 85 frozen source/build/test inputs and the binary still match after package
-  installation. Do not restore the rejected experimental runtime/test changes.
+  installation, corrective reboot and native lab tests. Do not restore the rejected
+  experimental runtime/test changes.
 - The retained verification scope is 260 Rust cases per allocator, 75 benchmark
   Python cases, ten native directory contracts and three matching native variants.
   These results belong to that runtime, not to an untested io_uring integration.
@@ -60,14 +61,14 @@ win. Keep raw measurements and distinguish required checks from avoidable cost.
 
 The operator intended four CPUs for the io_uring experiment, not four CPUs for the
 whole VM. The agent incorrectly implemented that scope with global `nr_cpus=4`.
-The guest has since booted 7.3.1 with only four possible/online CPUs. This was an
+The guest initially booted 7.3.1 with only four possible/online CPUs. This was an
 agent configuration error, not an operator-requested guest resource reduction.
 
-The global limit is now removed from the next-boot entry. Four-CPU placement is
-implemented separately for the standalone lab process tree. The operator explicitly
-authorized correcting the configuration **and rebooting**. This pre-reboot
-checkpoint must not be mistaken for proof that all CPUs have already returned;
-read the automatic postboot receipt below. Production mounts/data/credentials
+The global limit was removed and the explicitly authorized corrective reboot has
+completed. The postboot receipt and independent live checks confirm **256 possible
+CPUs, 64 online CPUs and unrestricted caller affinity `0-63`** on 7.3.1, without
+`nr_cpus` or `maxcpus`. FUSE io_uring is enabled. A separate lab child stays on
+`0-3` even when attempting to widen its affinity. Production mounts/data/credentials
 remain outside this task.
 
 ### Verified host and package plan
@@ -75,10 +76,10 @@ remain outside this task.
 - Disposable KVM guest: Ubuntu 26.04 LTS `resolute`, amd64, currently running
   `7.3.1-070301-generic`; GRUB/BIOS and existing dracut `110-11ubuntu0.1`.
   Preserve the installed 7.0 kernels and existing initramfs tooling.
-- The original guest has 256 possible/configured CPUs and 64 online CPUs. The
-  mistaken boot currently exposes only `0-3`. Removing `nr_cpus=4` requires a new
-  boot; CPUs outside the possible mask cannot simply be onlined at runtime.
-  The corrected entry retains `fuse.enable_uring=1` without a global CPU limit.
+- The restored guest has 256 possible/configured CPUs and 64 online CPUs. The
+  mistaken boot exposed only `0-3`; restoring CPUs outside that possible mask
+  required the corrective reboot. The selected entry retains `fuse.enable_uring=1`
+  without a global CPU limit.
 - Normal generic/HWE APT candidates are still 7.0, not the required 7.3 pool UAPI.
   [Canonical mainline 7.3.1 amd64](https://kernel.ubuntu.com/mainline/v7.3.1/amd64/)
   provides matching image/modules version `7.3.1-070301.202610301300`.
@@ -143,12 +144,12 @@ without the ignored build tree. Source archive, licenses, config and provenance
 are in `share/libfuse-lab/`. System libfuse3 3.18.2-1 and mount-helper hashes are
 unchanged; no global loader path, helper or service was replaced.
 
-Existing perf 7.0.14 records and decodes a bounded child-only CPU smoke test
-(six samples) on the **current 7.0 kernel**; tcpdump is available. Repeat the perf
-recording smoke test after the future 7.3 boot. No example was mounted, no new
-Rust transport was selected and no 7.3 runtime/performance result is claimed.
+Existing perf 7.0.14 now also records and decodes a bounded child-only CPU smoke
+test on **7.3.1: 129 samples**, following the earlier six-sample 7.0 check. This
+establishes tool compatibility, not an application profile or performance result.
+Native example mounts are verified below; the Rust transport remains unchanged.
 
-### Ready next boot and laboratory launcher
+### Verified boot configuration and laboratory launcher
 
 The default GRUB entry is **`geesefs-fuse-uring-7.3.1`**, displayed as
 `Ubuntu 7.3.1 FUSE io_uring (all guest CPUs)`. It loads the matching 7.3.1 kernel
@@ -170,8 +171,8 @@ fuse.enable_uring=1
 - Neither `nr_cpus` nor `maxcpus` is present in the corrected entry. There is no
   one-shot selection. Backups and hashes of the previous configuration are private.
 
-The lab prefix now also has `bin/check-boot` and `bin/run-fuse-lab`. After reboot,
-run the read-only check as root:
+The lab prefix also has `bin/check-boot` and `bin/run-fuse-lab`. The read-only
+postboot check now succeeds as root:
 
 ```sh
 timeout 20s /opt/libfuse-3.19.0-rc0-fe66006/bin/check-boot
@@ -190,6 +191,9 @@ queue depth 8 and apply **64 MiB soft/hard memlock to the child only**. A dedica
 owned systemd scope sets `AllowedCPUs=0-3`, with matching initial task affinity.
 The child cannot widen its CPU placement beyond that cpuset. Other VM processes
 retain the full topology; this is not CPU isolation or a guest-wide CPU limit.
+`CAP_IPC_LOCK` can bypass memlock: the limit is not a root-process memory bound.
+The native test harness separately requested a 4 GiB owned-daemon cgroup ceiling,
+zero swap and 768 tasks; it did not change hosting or ancestor cgroups.
 
 The cpuset covers the entire standalone C lab process tree. It is not a delivered
 io-thread-only affinity implementation for Rust/Tokio; the Rust transport remains
@@ -197,15 +201,129 @@ unchanged. Inspected libfuse creates one worker/queue per configured possible CP
 and attempts to bind each qid to its CPU. A cpuset prevents those attempts from
 escaping the selected four CPUs, but does not reduce worker/queue count or payload
 allocation. At 256 possible CPUs and depth 8 its nominal 1 MiB payload capacity is
-2 GiB, not the earlier four-queue 32 MiB estimate. Reassess bounded transport/pool
-ownership before a performance run; do not hide this cost by shrinking the VM.
+2 GiB, not the earlier four-queue 32 MiB estimate. The native tests confirm about
+2,064 MiB daemon RSS in both basic and pool modes. Do not hide this cost by shrinking
+the VM or describe four-CPU placement as a four-worker transport.
 
-`geesefs-cpu-restore-check.service` is enabled for the next boot. It records changed
-boot identity, absence of CPU-cap parameters, restored unpinned guest counts and a
-separate child whose affinity stays `0-3` even after an attempted widening. Receipt:
+`geesefs-cpu-restore-check.service` completed successfully and was then disabled.
+Its receipt records changed boot identity, absence of CPU-cap parameters, restored
+unpinned guest counts and a separate child whose affinity stays `0-3` even after
+an attempted widening:
 `benchmark-results/private/vm-20261031-integrated/cpu-scope-correction-v1/postboot.json`.
-The one-shot skips later boots once that receipt exists. Until it succeeds, restored
-CPU topology must remain unverified in progress reports.
+The immutable receipt remains available; no background verification loop is needed.
+
+### Native transport and notification results
+
+The unmodified upstream `passthrough_ll` ran classic (`ENABLE=0, BUFPOOL=0`), basic
+io_uring (`1,0`) and pool (`1,1`) controls on the restored topology. Each used depth 8,
+`FUSE_INIT_STATUS=1`, debug output, an io_uring setup/register syscall trace and
+`-o source=<disposable-source>,cache=auto,timeout=0`. All 14 checks passed per mode:
+directory contents, full bytes, ranges/EOF, mode, mmap read, concurrent readers on
+CPUs 0/3/31/63, create/write/fsync/reopen/backing bytes, chmod, truncate/zero fill,
+rename/unlink, symlinks, directory mutation and ENOENT. These are local backing-file
+contracts, not remote S3 generation, failure-recovery or Rust compatibility proofs.
+
+Negotiation reports `io_uring=on`; requests appear as `cqe unique` rather than
+legacy `dev unique`. Each uring control successfully creates all 256 rings and
+retains qid workers 0 through 255 within the four-CPU cpuset. The 252 attempted
+per-qid bindings outside CPU0-3 log `EINVAL`; no thread escapes. Pool controls
+negotiate `FUSE_CAP_IO_URING_BUFPOOL` without per-entry-payload fallback.
+
+| Diagnostic control | Daemon threads | Fixed pools | RSS / peak RSS, MiB | Owned daemon-scope peak, MiB |
+| --- | ---: | ---: | ---: | ---: |
+| Classic, memlock 64 MiB | 6 | n/a | 3.01 / 3.57 | 5.68 |
+| Basic uring, memlock 64 MiB | 258 | n/a | 2,064.13 / 2,064.13 | 2,081.65 |
+| Pool, `CAP_IPC_LOCK`, memlock 64 MiB | 258 | 256/256 | 2,064.13 / 2,064.13 | 2,081.84 |
+| Pool, no `CAP_IPC_LOCK`, memlock 64 MiB | 258 | 8/256 | 2,064.13 / 2,064.13 | 2,081.65 |
+| Pool, no `CAP_IPC_LOCK`, memlock 3 GiB | 258 | 256/256 | 2,064.12 / 2,064.12 | 2,081.92 |
+
+The privileged control registers 2 GiB despite its 64 MiB memlock. Dropping only
+the child's `CAP_IPC_LOCK` causes 248 fixed registrations to fail with ENOMEM;
+filesystem checks still pass using unregistered pools. A strict fully-registered
+gate correctly rejects that control. Raising only that child's memlock to 3 GiB
+restores 256 registrations without the capability. This is a registration
+sensitivity test, not an application-budget change or performance optimization.
+These instrumented short-run footprints include the daemon/strace/timeout scope
+but exclude the client and separately created backing fixture. They are not
+whole-workload memory comparisons, long-lived plateaus or acceptance timings.
+
+The upstream `notify_inval_inode` also passes in all three modes: a persistent
+open fd sees changed cached bytes after `NOTIFY_INVAL_INODE` despite 500,000-second
+name/attribute TTLs. In the pooled negative control, `--no-notify` leaves the same
+bytes cached and the positive freshness assertion fails after four seconds;
+re-enabling notifications passes again. This covers the legacy notification path
+while regular requests use uring. Every mount unmounts normally, every daemon
+exits zero, the original FUSE connection set is preserved, and no owned-scope OOM
+or memory-limit event is observed.
+
+The first classic attempt used `cache=never`, which makes this example return
+`direct_io`; its unnegotiated shared-mmap attempt correctly returned ENODEV. That
+failed fixture assumption remains recorded. All comparable positive controls use
+the explicitly declared `cache=auto` configuration; no upstream/application source
+was changed. This setup is functional but its 256-worker/2 GiB backing is not yet
+a bounded low-memory transport suitable for the Rust acceptance experiment.
+
+### Review of the io_uring decisions and tests
+
+Sources checked for this review: Linux 7.3 `fs/fuse/dev_uring.c` (pinned copy in
+`kernel73-research-v1`), libfuse `fe66006` `lib/fuse_uring.c`, libfuse issue 1281
+and PRs 1177/1351/1522/1593, fuser issue 380 with the Skory design note and
+fork, installed fuser 0.18.0 `session.rs`/`mnt/mount_options.rs`, and the 2023
+LSFMM FUSE/io_uring report. Verdicts below separate what the tests prove from what
+they do not.
+
+What holds up:
+
+- The transport proof is real, not inferred: `io_uring=on` in INIT, 159 `cqe unique`
+  versus 5 `dev unique` requests in the basic log, 256 successful `io_uring_setup`
+  calls and zero `io_uring=off:` fallbacks. Classic controls report `disabled` and
+  create no rings.
+- Negative controls exist and fail for the right reason: `cache=never`/ENODEV,
+  `--no-notify` stale bytes after 4 s, and the no-`CAP_IPC_LOCK` run where 248 fixed
+  registrations return ENOMEM while the filesystem keeps working.
+- Teardown is clean in all eleven runs (normal unmount, exit 0, baseline FUSE
+  connection set unchanged, no cgroup OOM/max events).
+
+What does not hold up or is over-stated:
+
+- The original `nr_cpus=4` rationale was wrong twice. The kernel routes by
+  `task_cpu()` and marks the ring ready only when every `qid < nr_queues =
+  num_possible_cpus()` has a registered queue (`fuse_uring_task_to_queue`,
+  `is_ring_ready`); a request from a CPU without a queue fails with EINVAL. So
+  queue count is a VM-definition property (256 possible vs 64 online is a
+  hypervisor hot-plug setting), not a guest-kernel or cgroup knob.
+- The 2,064 MiB RSS is a libfuse implementation choice, not a kernel requirement:
+  `fuse_create_ring` allocates and populates `depth x payload_chunk` per queue.
+  The Skory fuser design maps one `MAP_NORESERVE` region per ring and only pages
+  touched by a request become resident; queues are shared across `n_threads`
+  rings. The earlier text implying pools might shrink the backing was unfounded;
+  pools only change ownership/registration, which the tests now show directly.
+- The four-CPU "placement" result is a cpuset holding 256 threads on four CPUs,
+  with 252 failed `sched_setaffinity` attempts. Any later timing on that layout
+  would measure thread contention, not transport cost.
+- The "readers on CPU 0/3/31/63" check proves bytes, not routing: no per-qid
+  request counter exists. Kernel tracepoints or per-queue counters are needed
+  before claiming cross-CPU queue coverage.
+- The harness changed during the series (three `harness_sha256` values; the
+  `IORING_REGISTER_BUFFERS|IORING_REGISTER_USE_REGISTERED_RING` flag parser was
+  fixed mid-way). Receipts stay immutable; only `native-uring-verified-v1` is
+  authoritative for registration counts. The on-disk harness is not byte-identical
+  to any run.
+- `strace -f` on a 258-thread daemon and 90 s/2 s run lengths make the recorded
+  CPU and init times unusable as performance evidence; they were never meant as
+  such, and the tables above are labelled accordingly.
+- The 64 MiB child memlock is not a bound for a root daemon with `CAP_IPC_LOCK`.
+  If the Rust daemon is ever deployed as root, memlock-based pool budgeting is
+  ineffective and a cgroup memory ceiling is the only real limit.
+
+Relevance to the acceptance gaps: published numbers for this transport (Skory
+bench, in-memory filesystem, Linux 7.0, single NUMA node) are +10-25% on small
+frequent requests (4 KiB reads/writes, stat, pread) and parity on 1 MiB streams.
+Our random-read loss (1.73/1.79 vs 1.91/1.97 MiB/s) is about 450 4 KiB requests
+per second against S3 round trips; the transport share there is negligible. The
+transport can plausibly matter only for cache-hit metadata (22,398/20,239 ops/s)
+and cached 4 KiB reads. The io_uring track is therefore a candidate for one gap,
+not the acceptance path, and must be gated by a measured transport share.
 
 ### Execution checklist
 
@@ -219,46 +337,99 @@ CPU topology must remain unverified in progress reports.
   entries and unchanged running kernel, boot identity, possible CPUs and sysctls.
 - [x] Correct the erroneous global CPU cap, preserve the recovery menu and scope
   laboratory CPU placement/memlock separately from the VM.
-- [ ] Confirm the authorized corrective reboot and full CPU restoration from the
-  automatic postboot receipt, then finish delivery verification.
+- [x] Confirm the authorized corrective reboot and full CPU restoration from the
+  automatic postboot receipt and independent live checks; verify perf record/decode.
+- [x] Prove native classic/basic/pool initialization, bytes/mutation/mmap contracts,
+  fixed-registration sensitivity, notifications and clean owned-resource teardown.
 
 For each checkpoint delivery, append the private action/reason log, commit/push
 the documentation, verify the existing draft PR and its footer link, and report
 actual scope and remaining gaps in Tracker in Russian. Do not convert a
 reboot-required marker or package/build readiness into runtime acceptance.
 
-## Subsequent work after an authorized test boot
+## Plans A-D with gates after the native smoke tests
 
-1. Execute the now-authorized corrective reboot. Read the postboot receipt and
-   verify the original 64 online / 256 possible CPU topology, then run the perf
-   recording smoke test. The four-CPU constraint belongs only to the lab cpuset.
-2. Prove actual initialization/no fallback in the standalone pool smoke test.
-   Explicit controls are `FUSE_URING_ENABLE=1`, `FUSE_URING_BUFPOOL=1`,
-   `FUSE_URING_QUEUE_DEPTH=4` or 8. Legacy controls must set both ENABLE and
-   BUFPOOL to 0 because BUFPOOL enables transport. Inspected libfuse still
-   allocates/populates depth times payload per qid: pools do not automatically
-   deliver a smaller backing or client-page zero-copy.
-3. Select a supported reused Rust transport/adapter using the
-   [versioned assessment](fuse-io-uring-assessment.md) and
-   [dependency decisions](dependency-decisions.md). Current fuser 0.18.0 is
-   read/writev; a new kernel or libfuse install does not change our Rust transport.
-   The unmerged Skory stack is the closest API candidate, not an accepted library
-   release. Do not implement a new FUSE protocol or local unsafe/FFI shim.
-4. First prove full bytes, fresh modes/generations, fsync failure/recovery,
-   cancellation/unmount, mmap, delivered FORGET/PLUS references, notifications
-   and reply/write/buffer ownership through completion. Cover every required qid
-   while investigating 1/2 transport workers and shallow depths 4/8.
-5. Compare one-loop and bounded multi-loop classic fuser controls with the reused
-   transport on the same kernel/full guest topology with local four-CPU placement.
-   For the Rust adapter, keep transport affinity separate from Tokio workers.
-   Hold application workers,
-   budgets, TTL, signing/checksums, negative-cache policy and post-commit HEAD fixed.
-   Rotate repeated cache-hit metadata/4 KiB reads, expiry, S3 misses and writer/fsync
-   runs. Separate basic transport, pools and zero-copy; report pooled tails,
-   CPU/work and process/allocator/cgroup/kernel/pinned memory with pressure deltas.
-6. Resume the independent [remaining priorities](next-work.md). Neither a boot,
-   standalone C mount nor a microbenchmark closes the complete Rust/S3 acceptance
-   gate or authorizes deployment.
+Each plan has an entry gate and a kill criterion. Plans are not exclusive: B and C
+run on the retained classic transport and do not wait for A. All comparisons stay
+same-kernel (7.3.1), full guest topology, local four-CPU placement applied equally
+to every implementation, rotated repetitions, no profiler during timing, and the
+unchanged workload/TTL/budget/signing/checksum/post-commit HEAD contract.
+
+### Plan A: FUSE-over-io_uring through a reused adapter
+
+1. Gate: quantify the transport share. From the retained calibrated perf/HTTP
+   profiles and a new cache-hit metadata and cached 4 KiB read run on 7.3.1,
+   attribute daemon CPU to /dev/fuse read/writev plus fuser dispatch versus
+   application work. Proceed only if that share is at least 10% of daemon CPU on
+   the cache-hit workloads; otherwise record the number and stop A.
+2. Quantify the memory floor on the C lab without patching: repeat the pool
+   control with `FUSE_URING_QUEUE_DEPTH=2` and `4` and `-o max_write=131072` /
+   `262144`. Kernel minimum payload is `max(8192, max_write, max_pages*PAGE_SIZE)`
+   (libfuse issue 1281), so 256 queues x depth 2 x 128 KiB is 64 MiB. Record RSS,
+   registration counts and the 14 checks per configuration.
+3. Prove routing, not only bytes: count requests per qid with kernel FUSE/io_uring
+   tracepoints (or the daemon's own per-queue counters) under readers pinned to
+   CPUs outside the daemon cpuset. Keep the 90 s/strace diagnostic separate from
+   any timing run.
+4. Adapter selection stays reuse-first and `unsafe_code = "forbid"` for this
+   package: the Skory fuser stack (unmerged; the design maps `MAP_NORESERVE`
+   rings, shares queues across `n_threads`, keeps a /dev/fuse reader for
+   INIT/FORGET/INTERRUPT/notifications, ends the session on registration failure)
+   is the only candidate with the required contracts. It is not on crates.io; the
+   public-source audit admits only the crates.io registry, so using a pinned Git
+   fork requires an explicit operator exception recorded in
+   [dependency decisions](dependency-decisions.md). Without it, A waits for an
+   upstream fuser release.
+5. If authorized: integrate behind a cargo feature and `Config::io_uring`, prove
+   full bytes, fresh modes/generations, fsync failure/recovery, cancellation and
+   unmount with entries held, mmap, delivered FORGET/PLUS references, notifications
+   and reply/write buffer ownership through completion. Transport threads keep
+   their own affinity, separate from Tokio workers.
+6. Kill criterion: no reproducible win in at least three of four rotated pairs on
+   cache-hit metadata ops/s, cached 4 KiB read p99 and daemon CPU per operation,
+   with peak/late RSS and cgroup memory not worse than the classic control.
+
+### Plan B: bounded multi-loop classic transport and dispatch cost
+
+1. Use the supported fuser 0.18.0 APIs the daemon does not use today:
+   `Config::n_threads` 2 and 4 with `Config::clone_fd` (`FUSE_DEV_IOC_CLONE`,
+   Linux 4.5+). Current `main.rs` runs one loop without clone_fd.
+2. Measure the fuser-thread to Tokio handoff per request on cache hits (task spawn,
+   admission permit, channel) and reply synchronously from the RAM cache where the
+   contract allows, keeping admission/backpressure for misses. This is the most
+   likely source of the cache-hit metadata gap and needs no kernel change.
+3. Re-check negotiated `max_write`/`max_readahead`/`FUSE_MAX_PAGES` on 7.3.1 so
+   sequential reads use fewer, larger requests; keep the bounded buffer budget.
+4. Kill criterion: same as A6. If B wins, A's gate (step 1) must be re-measured
+   on top of B before A proceeds.
+
+### Plan C: S3 request path for the random-read and writer losses
+
+1. Random read: compare the Go readahead/prefetch heuristics with ours on the
+   retained traces; test a bounded prefetch window for detected random patterns,
+   and connection reuse/in-flight limits, with correctness-equivalent metadata.
+2. Writer: separate necessary checks (create validation, post-commit HEAD) from
+   avoidable per-actor HEAD/LIST cost using the retained RPC trace; remove only
+   requests whose absence keeps the proven contracts.
+3. Long-lived memory: attribute the v9/v10 late allocation growth to owners
+   (SDK connection pool, retained buffers, cache index) before any allocator
+   or budget change.
+4. Kill criterion: any pair that loses throughput/p99 twice or raises late RSS in
+   all repetitions is rejected, as for the earlier trials.
+
+### Plan D: deferred architecture options requiring operator approval
+
+- FUSE passthrough (Linux 6.9+) with a disk-backed cache, and kernel writeback
+  cache for writers, are deferred by the operator and change durability/coherence
+  semantics. They are listed as fallbacks only; no work starts without explicit
+  approval and a written contract for fsync/visibility behavior.
+- If libfuse-style eager queue memory must be tested at bounded size, the correct
+  lever is a disposable VM whose possible CPU count equals its online count, not a
+  guest `nr_cpus`/`maxcpus` limit or a cpuset.
+
+Resume the independent [remaining priorities](next-work.md) alongside these plans.
+Neither a boot, standalone C mount nor a microbenchmark closes the complete
+Rust/S3 acceptance gate or authorizes deployment.
 
 ## Evidence and resumption
 
@@ -274,6 +445,12 @@ The bounded helpers are `install_uring_without_reboot.py`,
 four-CPU configuration and its checks, not a correct interpretation of CPU pinning.
 `cpu-scope-correction-v1` and `correct_cpu_scope.py` supersede it with the corrected
 boot/cpuset scope, backups, reboot authorization and automatic postboot verification.
+`native-uring-verified-v1/report.json` derives strict verdicts and footprint rows
+from the immutable `native-*-v1`/`native-notify-pool-v2` receipts. The bounded
+`native_uring_smoke.py` and `verify_native_uring.py` use unmodified installed examples;
+`postboot-perf-*-v1` records the 129-sample record/decode smoke. Initial trace-count
+extraction missed the ORed registered-ring flag; the derived verification corrects
+that parser against the unchanged syscall logs instead of overwriting receipts.
 Raw sources, commands, failures and hashes remain there; they are not public PR attachments.
 Use new output labels/directories: earlier receipts are immutable and helpers
 often use exclusive creation. Do not rerun an old label over an existing result.

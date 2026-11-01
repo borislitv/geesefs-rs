@@ -5,6 +5,15 @@ it separates confirmed mechanisms from hypotheses. See the latest
 [latest measurement tables](performance-owned-uploads.md),
 [architecture](architecture.md) and [comparison contract](performance.md).
 
+The latest directory remainder correction removes repeated validation/copies of
+already-emitted page prefixes without changing freshness or inode ownership.
+Its pressure regression fails before correction; stale-type and continuation
+mutants are rejected. Four short rotated metadata pairs improve throughput
+7.0–13.3% but retain tail and memory losses. The supported READDIRPLUS_AUTO
+experiment is rejected after adverse paired results. Repeated joint mixed
+comparison against both Go references remains required; earlier tables keep
+their original source and scope.
+
 The subsequent [native VM checkpoint](performance.md#native-vm-admissiondirectory-checkpoint--2026-10-31)
 attributes and corrects the admission and global-directory-invalidation mechanisms
 below at `67f7aec`. Earlier measurements retain their original scope; the new

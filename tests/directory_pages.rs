@@ -5,6 +5,109 @@ use std::sync::atomic::Ordering;
 use support::MemoryStore;
 
 #[tokio::test]
+async fn a_released_consumed_prefix_does_not_restart_the_remaining_backend_page() {
+    let store = MemoryStore::new();
+    for name in ["a", "b", "c", "d", "z"] {
+        store.seed(name, name.as_bytes());
+    }
+    let mut config = MemoryStore::config(16);
+    config.entry_limit = 5;
+    let fs = Filesystem::new(config, store.clone()).unwrap();
+    let page = fs.directory_chunk(1, "", 4).await.unwrap();
+    let consumed = page[0].ino;
+    let held = fs.lookup(1, "z").await.unwrap();
+    assert!(
+        fs.node(consumed).is_err(),
+        "pressure must reclaim the consumed inode"
+    );
+    let lists = store.list_calls.load(Ordering::Relaxed);
+
+    let remainder = fs.directory_remainder(1, "", "a", 4).await.unwrap();
+    assert_eq!(
+        remainder
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["b", "c", "d"]
+    );
+    assert_eq!(remainder.next_after.as_deref(), Some("d"));
+    for entry in remainder.entries {
+        assert_eq!(entry.kind, fuser::FileType::RegularFile);
+        assert_eq!(fs.node(entry.ino).unwrap().attr().size, 1);
+    }
+    assert_eq!(held.attr().size, 1);
+    assert_eq!(
+        store.list_calls.load(Ordering::Relaxed),
+        lists,
+        "consumed inode eviction must not repeat LIST or rebuild the emitted prefix"
+    );
+}
+
+#[tokio::test]
+async fn page_remainders_still_refresh_expired_unconsumed_types() {
+    let store = MemoryStore::new();
+    store.standard_listing.store(true, Ordering::Relaxed);
+    for name in ["a", "b", "c"] {
+        store.seed(name, name.as_bytes());
+    }
+    let fs = store.filesystem(16);
+    let page = fs.directory_chunk(1, "", 3).await.unwrap();
+    let changed = fs.node(page[1].ino).unwrap();
+    changed.state.lock().unwrap().fetched =
+        std::time::Instant::now() - 2 * fs.config.stat_cache_ttl;
+    store
+        .objects
+        .lock()
+        .unwrap()
+        .get_mut("b")
+        .unwrap()
+        .metadata
+        .insert("--symlink-target".into(), "target".into());
+
+    let remainder = fs.directory_remainder(1, "", "a", 3).await.unwrap();
+    assert_eq!(remainder.next_after.as_deref(), Some("c"));
+    assert_eq!(remainder.entries.len(), 2);
+    assert_eq!(remainder.entries[0].name, "b");
+    assert_eq!(remainder.entries[0].kind, fuser::FileType::Symlink);
+    assert_eq!(fs.node(remainder.entries[0].ino).unwrap().attr().size, 6);
+    assert_eq!(remainder.entries[1].name, "c");
+    assert_eq!(remainder.entries[1].kind, fuser::FileType::RegularFile);
+    assert_eq!(fs.node(remainder.entries[1].ino).unwrap().attr().size, 1);
+}
+
+#[tokio::test]
+async fn exhausted_remainders_advance_past_new_prefixes_instead_of_reporting_eof() {
+    let store = MemoryStore::new();
+    for name in ["b", "c", "d"] {
+        store.seed(name, name.as_bytes());
+    }
+    let fs = store.filesystem(16);
+    assert_eq!(fs.directory_chunk(1, "", 2).await.unwrap().len(), 2);
+    for name in ["a0", "a1"] {
+        fs.create(1, name, libc::S_IFREG | 0o644, None, 0)
+            .await
+            .unwrap();
+    }
+
+    let exhausted = fs.directory_remainder(1, "", "b", 2).await.unwrap();
+    assert!(exhausted.entries.is_empty());
+    assert_eq!(exhausted.next_after.as_deref(), Some("b"));
+    let next = fs.directory_remainder(1, "b", "b", 2).await.unwrap();
+    assert_eq!(
+        next.entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["c", "d"]
+    );
+    assert_eq!(next.next_after.as_deref(), Some("d"));
+    let eof = fs.directory_remainder(1, "d", "d", 2).await.unwrap();
+    assert!(eof.entries.is_empty());
+    assert!(eof.next_after.is_none());
+}
+
+#[tokio::test]
 async fn bounded_directory_chunks_resume_after_names_instead_of_rescanning_old_pages() {
     let store = MemoryStore::new();
     store.page_size.store(4, Ordering::Relaxed);

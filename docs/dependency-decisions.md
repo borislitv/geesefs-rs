@@ -184,3 +184,12 @@ A narrow exclusive-name adapter can skip consumed pages while retaining opaque
 continuation tokens. Extended LIST retains its existing protocol until equivalent
 start-after semantics are verified; no custom parser, request cache, larger
 directory buffer or weakened type/metadata resolution is needed.
+
+The warm directory profile also exposes repeated application page processing.
+Reuse the existing Moka 0.12.16 page cache and Rust slice `partition_point` to skip
+the consumed prefix; validate the remaining inode bindings, types and TTL exactly
+as before. No new cache, dependency, kernel buffer or ownership pin is needed.
+The alternative supported fuser 0.18.0 `FUSE_READDIRPLUS_AUTO` capability reduces
+unused name-only lookup owners in a real mounted test, but four rotated metadata
+pairs lose throughput in three cases and pooled p99 in all four. Retain the
+existing forced-PLUS policy rather than shipping that unproven speed change.

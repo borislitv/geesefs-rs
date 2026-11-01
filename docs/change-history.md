@@ -4,6 +4,25 @@ This is the concise engineering context for the experimental Linux/S3 rewrite.
 Detailed results and operational logs stay outside tracked source files.
 Overall compatibility and comparative performance remain **UNACCEPTED**.
 
+## Resuming only the remaining directory page, 2026-11-01
+
+- A backend page spans several kernel frames. The adapter repeatedly validated
+  and copied its consumed prefix; namespace pressure on an already-emitted inode
+  could unnecessarily repeat LIST. The public remainder regression first fails
+  on two LIST calls instead of one after real inode eviction.
+- Binary-search past consumed names, retaining the original page/epoch/TTL bound
+  and exact validation of every remaining entry. Preserve backend continuation
+  separately from EOF so new prefixes cannot hide later names. No cache size,
+  kernel capability, inode pin, lookup ownership or metadata contract changes.
+- Stale-type and inserted-prefix regressions reject deliberate freshness and
+  continuation faults. Both allocator suites pass 258 Rust cases; matching
+  release and instrumented native client variants pass. The selected partition
+  mutation is killed; whole-file CRAP and broader mutation gaps remain open.
+- Four rotated 1,000-traversal metadata-only pairs improve throughput by
+  7.0–13.3%, but some tails and memory metrics lose. This short source attribution
+  is not repeated sustained mixed acceptance. A separate AUTO experiment is
+  rejected: three throughput losses and four pooled-p99 losses in four pairs.
+
 ## Reusing owned contiguous upload bytes, 2026-11-01
 
 - A real filesystem create/write/fsync/retry regression first sends 302 HTTP body

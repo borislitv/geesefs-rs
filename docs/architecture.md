@@ -53,7 +53,12 @@ are read and changed under the namespace lock, independently of refreshed inode
 metadata. In-flight listings validate both epoch and name-to-inode binding before
 publication; move/delete leases invalidate on entry and on every completion path.
 
-Cached pages also validate each child's binding, type and freshness. Authoritative
+Cached pages validate every unconsumed child's binding, type and freshness. A
+FUSE frame resumes the same backend page but binary-searches past names already
+delivered, avoiding their repeated validation and copies. Consumed inode eviction
+does not force a new LIST. The backend-page continuation remains distinct from
+true EOF, including insertions before the cursor; no inode or lookup owner is
+retained merely to keep a consumed prefix alive. Authoritative
 extended LIST metadata can refresh an existing clean inode, preserving owners and
 local counters; a later HEAD or verified commit wins over the older request.
 Kernel replies carry the remaining metadata TTL. Common prefixes establish names,

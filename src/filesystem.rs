@@ -44,6 +44,25 @@ struct DirectoryPage {
     entries: Vec<DirEntry>,
 }
 
+impl DirectoryPage {
+    fn remaining(&self, after: &str) -> &[DirEntry] {
+        let start = self
+            .entries
+            .partition_point(|entry| entry.name.as_str() <= after);
+        &self.entries[start..]
+    }
+
+    fn remainder(&self, after: &str) -> DirectoryRemainder {
+        DirectoryRemainder {
+            entries: self.remaining(after).to_vec(),
+            next_after: self
+                .entries
+                .last()
+                .map(|entry| entry.name.as_str().max(after).to_owned()),
+        }
+    }
+}
+
 type DirectorySelection = BTreeMap<String, (bool, Option<ObjectHead>, bool)>;
 
 struct DirectorySnapshot {
@@ -92,6 +111,12 @@ pub struct DirEntry {
     pub ino: u64,
     pub name: String,
     pub kind: FileType,
+}
+
+pub struct DirectoryRemainder {
+    pub entries: Vec<DirEntry>,
+    /// An exhausted page still advances; only a backend EOF has no next name.
+    pub next_after: Option<String>,
 }
 
 /// An open file retains its inode until the last admitted user releases it.
@@ -1585,7 +1610,21 @@ impl Filesystem {
         after: &str,
         limit: usize,
     ) -> Result<Vec<DirEntry>> {
-        self.directory_chunk_inner(ino, after, limit, true).await
+        Ok(self
+            .directory_chunk_inner(ino, after, limit, true, after)
+            .await?
+            .entries)
+    }
+
+    pub async fn directory_remainder(
+        &self,
+        ino: u64,
+        page_after: &str,
+        after: &str,
+        limit: usize,
+    ) -> Result<DirectoryRemainder> {
+        self.directory_chunk_inner(ino, page_after, limit, true, after)
+            .await
     }
 
     fn listed_node(
@@ -1633,15 +1672,17 @@ impl Filesystem {
         after: &str,
         limit: usize,
         resolve_types: bool,
-    ) -> Result<Vec<DirEntry>> {
+        resume_after: &str,
+    ) -> Result<DirectoryRemainder> {
         let fetched = std::time::Instant::now();
         let snapshot = {
             let ns = self.namespace.lock().unwrap();
             let snapshot = self.directory_snapshot(&ns, ino, resolve_types, fetched)?;
             if resolve_types
-                && let Some(page) = self.cached_directory_page(&ns, &snapshot, after, limit)
+                && let Some(page) =
+                    self.cached_directory_page(&ns, &snapshot, after, limit, resume_after)
             {
-                return Ok(page.entries.clone());
+                return Ok(page.remainder(resume_after));
             }
             snapshot
         };
@@ -1656,7 +1697,9 @@ impl Filesystem {
         if resolve_types {
             self.resolve_directory_types(ino, &mut selected).await?;
         }
-        self.publish_directory_page(snapshot, after, limit, selected, resolve_types)
+        Ok(self
+            .publish_directory_page(snapshot, after, limit, selected, resolve_types)?
+            .remainder(resume_after))
     }
 
     fn directory_snapshot(
@@ -1698,13 +1741,14 @@ impl Filesystem {
         snapshot: &DirectorySnapshot,
         after: &str,
         limit: usize,
+        resume_after: &str,
     ) -> Option<Arc<DirectoryPage>> {
         let page =
             self.directory_pages
                 .get(&(snapshot.node.ino, snapshot.epoch, after.into(), limit))?;
         (page.fetched.elapsed() < self.config.stat_cache_ttl
             && page
-                .entries
+                .remaining(resume_after)
                 .iter()
                 .all(|entry| self.directory_entry_fresh(ns, entry)))
         .then_some(page)
@@ -1902,7 +1946,7 @@ impl Filesystem {
         limit: usize,
         selected: DirectorySelection,
         resolve_types: bool,
-    ) -> Result<Vec<DirEntry>> {
+    ) -> Result<Arc<DirectoryPage>> {
         let mut ns = self.namespace.lock().unwrap();
         let ino = snapshot.node.ino;
         if snapshot.node.directory_epoch.load(Ordering::Relaxed) != snapshot.epoch
@@ -1921,17 +1965,16 @@ impl Filesystem {
                 kind: node.attr().kind,
             });
         }
+        let page = Arc::new(DirectoryPage {
+            fetched: snapshot.fetched,
+            entries,
+        });
         if resolve_types {
-            self.directory_pages.insert(
-                (ino, snapshot.epoch, after.into(), limit),
-                Arc::new(DirectoryPage {
-                    fetched: snapshot.fetched,
-                    entries: entries.clone(),
-                }),
-            );
+            self.directory_pages
+                .insert((ino, snapshot.epoch, after.into(), limit), page.clone());
             self.directory_pages.run_pending_tasks();
         }
-        Ok(entries)
+        Ok(page)
     }
 
     pub async fn unlink(&self, parent: u64, name: &str, directory: bool) -> Result<()> {
@@ -2014,8 +2057,9 @@ impl Filesystem {
         // reservation; it must not recursively look up children through that lease.
         if directory
             && !self
-                .directory_chunk_inner(node.ino, "", 1, false)
+                .directory_chunk_inner(node.ino, "", 1, false, "")
                 .await?
+                .entries
                 .is_empty()
         {
             return Err(Error::Fs(libc::ENOTEMPTY));

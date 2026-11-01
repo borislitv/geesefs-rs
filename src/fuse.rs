@@ -121,14 +121,13 @@ impl Directory {
         limit: usize,
         reply: &mut DirectoryReply,
     ) -> crate::error::Result<bool> {
-        let entries = fs.directory_chunk(ino.0, &self.page_after, limit).await?;
-        if entries.is_empty() {
+        let page = fs
+            .directory_remainder(ino.0, &self.page_after, &self.last, limit)
+            .await?;
+        let Some(next_after) = page.next_after else {
             return Ok(false);
-        }
-        for entry in entries {
-            if entry.name <= self.last {
-                continue;
-            }
+        };
+        for entry in page.entries {
             let next = self.cookie + 1;
             if self.cookie >= offset
                 && reply
@@ -142,7 +141,7 @@ impl Directory {
         }
         // A full kernel frame resumes the same cached backend page; only a
         // completely consumed backend page advances its exclusive start name.
-        self.page_after = self.last.clone();
+        self.page_after = next_after;
         Ok(true)
     }
 }

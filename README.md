@@ -39,6 +39,11 @@ reported in the new checkpoint below. Older tables retain their binary/source sc
 
 ## Directory remainder checkpoint — 2026-11-01
 
+The latest [observation-age checkpoint](docs/performance-observation-age.md)
+verifies another 1,440 mixed phases/eight generations after the permission-TTL
+correction. Metadata/writer throughput and process-memory gates still fail;
+all current rates, tails, CPU and memory components are published separately.
+
 These measurements precede the subsequent user-metadata observation-age fix.
 Its native permission regression rejects restarting cached metadata TTL on a
 standard LIST; current allocator suites pass 260 Rust cases. Historical rates

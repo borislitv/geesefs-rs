@@ -21,6 +21,11 @@ Overall compatibility and comparative performance remain **UNACCEPTED**.
   contracts, and matching release/instrumented clients pass. This is a correctness
   correction, not a speed claim. Earlier performance tables retain their source
   and now-known freshness gap; current-source joint performance remains unaccepted.
+- [Two current-source mixed repetitions](performance-observation-age.md) verify
+  1,440 phases and eight final full-byte/generation checks, with clean owners,
+  counters and no lateness. Metadata/writer rates still lose to both Go references;
+  process RSS and prior-Rust-relative metrics retain losses. The predecessor's
+  lower refresh cost cannot excuse its permission-freshness defect.
 
 ## Resuming only the remaining directory page, 2026-11-01
 

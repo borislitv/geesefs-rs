@@ -1,18 +1,20 @@
 # Next work: observed problems and causes, 2026-11-01
 
 Overall status remains **UNACCEPTED**. This is the current working inventory;
-it separates confirmed mechanisms from hypotheses. See the latest
-[latest measurement tables](performance-directory-remainders.md),
+it separates confirmed mechanisms from hypotheses. See the
+[latest measurement tables](performance-observation-age.md),
 [architecture](architecture.md) and [comparison contract](performance.md).
 
-A subsequent expiry diagnostic exposes a correctness defect in those measured
-sources: a new standard-LIST page renews cached user metadata's observation time.
+An expiry diagnostic exposed a correctness defect in the earlier measured
+sources: a new standard-LIST page renewed cached user metadata's observation time.
 The age regression and real permission-change regression fail before correction.
 Per-entry source timestamps now preserve remaining TTL without discarding exact
 metadata or changing configured policy. Both allocator suites pass 260 Rust
-cases and matching native clients; earlier numbers remain historical. Repeat
-current-source joint controls and attribute remaining requests without using
-freshness extension as an optimization.
+cases and matching native clients; earlier numbers remain historical. Two new
+mixed repetitions verify 1,440 phases/eight final generations. Current metadata
+rates 22,398/20,239 ops/s and writer rates 23.39/26.13 MiB/s still lose to both Go
+references. Process memory is not a reproducible win over experimental Go.
+Attribute remaining requests without using freshness extension as an optimization.
 
 The latest directory remainder correction removes repeated validation/copies of
 already-emitted page prefixes without changing freshness or inode ownership.

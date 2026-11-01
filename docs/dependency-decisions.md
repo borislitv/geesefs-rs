@@ -33,6 +33,16 @@ snapshot. Sampling overhead remains part of the observed server cost.
 
 ## Narrow application state
 
+The [metadata expiry diagnosis](metadata-expiry-diagnosis.md) uses standalone
+[TShark 4.6.4](https://www.wireshark.org/docs/man-pages/tshark.html) for TCP/HTTP
+reassembly instead of implementing a packet decoder. Public distro packages are
+extracted locally with hashes; nothing is linked into or distributed with the
+runtime. Reinspection of the locked SDK 1.155.0 confirms generated orchestration
+and plugin assembly are crate-private, not a supported prepared-operation API.
+SDK issue [#1349](https://github.com/awslabs/aws-sdk-rust/issues/1349) does not deliver
+a metadata setup fix. Keep the selected SDK and integrity/metadata contracts;
+sampled SDK work alone does not justify a private fork or replacement transport.
+
 The rejected [cached-observation trial](performance-cached-observations.md) uses
 Rust 1.99's supported [`Arc`/`Weak`](https://doc.rust-lang.org/1.99.0/std/sync/struct.Arc.html)
 ownership APIs rather than a custom metadata cache or SDK replacement. Strong

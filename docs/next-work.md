@@ -35,6 +35,17 @@ are discarded and all 85 v8 inputs are restored. Ordinary payload-cache hits do
 not create read snapshots. Isolate actual expiry/setup phases and allocation
 owners next; short cached traversal is not evidence about the 1,002-HEAD burst.
 
+The [expiry CPU/HTTP diagnosis](metadata-expiry-diagnosis.md) now checks 42 metadata
+phases with bidirectional response reassembly and 999 Hz CPU samples. Rust's
+cycle-7 traversal makes 1,024 HEADs/three LISTs; Go makes two HEADs/four LISTs.
+Six equal-TTL native probes then distinguish permission freshness: both Go
+references retain old modes at unchanged ETag, including after a successful HEAD
+in the stat-only case; all three pass a changed-ETag control. Standard LIST and
+unchanged content ETag cannot revalidate user metadata. Retain the required HEADs
+and observation age; identify supported SDK/setup or retained-owner work before
+another optimization. Instrumented times are not a new joint win or a CPU/wait
+partition, and all earlier throughput/memory losses remain visible.
+
 The latest directory remainder correction removes repeated validation/copies of
 already-emitted page prefixes without changing freshness or inode ownership.
 Its pressure regression fails before correction; stale-type and continuation

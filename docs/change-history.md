@@ -4,6 +4,23 @@ This is the concise engineering context for the experimental Linux/S3 rewrite.
 Detailed results and operational logs stay outside tracked source files.
 Overall compatibility and comparative performance remain **UNACCEPTED**.
 
+## Metadata expiry and reference freshness attribution, 2026-11-01
+
+- Reassemble bidirectional HTTP with maintained TShark and join calibrated 999 Hz
+  CPU profiles to 42 checked metadata phases. Distinguish flat-prefix LIST from
+  payload GET and CPU from overlapping in-flight intervals; no new timing win is
+  claimed. Rust's expiry burst resolves accurate metadata with 1,024 HEADs.
+- Six equal-TTL S3/FUSE probes show both pinned Go references miss unchanged-ETag
+  permission updates, including a successful fresh HEAD in the stat-only route.
+  Rust sees the update; all three see the changed-ETag positive control. Exact
+  reference sources apply metadata in the ETag/size-change branch and can renew
+  cached attributes. Lower RPC count does not establish equivalent freshness.
+- Keep `1b13033` and all 85 frozen inputs unchanged. No supported SDK prepared-
+  operation API or measured minimal runtime correction is established. Preserve
+  failed capture/verifier assumptions and scope in ignored evidence; continue
+  setup/owner attribution without removing required validation or metadata.
+  [Method, results and limitations](metadata-expiry-diagnosis.md).
+
 ## Rejected cached directory observation reuse, 2026-11-01
 
 - Public ownership regression exposes copying/decoding an already published inode

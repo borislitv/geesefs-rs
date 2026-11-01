@@ -7,6 +7,12 @@ The subsequent [cached-observation reuse experiment](performance-cached-observat
 is discarded after short paired losses. Runtime/test inputs are restored exactly;
 the source scope and current mixed measurements on this page remain applicable.
 
+The later [expiry diagnosis](metadata-expiry-diagnosis.md) adds calibrated HTTP
+response and CPU attribution plus equal-TTL native permission probes. Both Go
+references miss an unchanged-ETag metadata update; their lower request count is
+not a correctness-equivalent way to remove Rust HEADs. Runtime and tables below
+remain unchanged; the diagnostic is not comparative acceptance.
+
 ## Correction and verification
 
 Standard LIST contains basic object fields, not arbitrary user metadata. A new

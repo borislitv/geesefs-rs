@@ -64,6 +64,15 @@ The separate 2026-10-31 close/recovery probe observes full backend bytes after
 This confirms a different recovery boundary without relabelling the failed open
 handle probe. All three also pass literal nginx 1.28.3 full/Range/EOF checks.
 
+Separate [native permission-freshness probes](metadata-expiry-diagnosis.md) expose
+another reference limitation: both pinned Go binaries retain old permissions after
+an equal stat TTL when backend metadata changes but bytes/size/ETag do not. The
+stat-only case receives fresh permission metadata in HEAD but still returns the
+prior mode; listing before stat likewise fails. Rust returns the new mode, while
+all three pass the changed-ETag positive control. This disposable-fixture result
+does not establish actual-service acceptance. Do not weaken Rust metadata freshness
+to reproduce the reference's lower HEAD count.
+
 ## Reference contracts and acceptance status
 
 | Contract | Reference requirement | Status |

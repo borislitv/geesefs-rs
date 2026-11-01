@@ -53,6 +53,12 @@ removes a demonstrated redundant reconstruction but fails to establish a joint
 win in four short metadata pairs. It is discarded; current runtime remains
 `1b13033`. These short controls do not measure sustained expiry or beat Go.
 
+The [expiry CPU/HTTP and permission-freshness diagnosis](docs/metadata-expiry-diagnosis.md)
+now verifies 42 instrumented metadata phases and six native mutation probes.
+Both Go references miss a mode-only update at unchanged ETag after an equal TTL;
+all three pass a changed-ETag control. Lower request count is not equivalent
+permission freshness. Runtime and current mixed performance results stay unchanged.
+
 These measurements precede the subsequent user-metadata observation-age fix.
 Its native permission regression rejects restarting cached metadata TTL on a
 standard LIST; current allocator suites pass 260 Rust cases. Historical rates

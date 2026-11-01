@@ -158,3 +158,7 @@ refreshing absent permission metadata. Attribute the remaining request/work cost
 without extending TTL, changing negative-cache policy or dropping post-commit
 verification. The formal joint performance, actual-service, positive LINK and
 remaining compatibility/quality gates in [next work](next-work.md) stay open.
+
+A later [lookup-probe overlap experiment](performance-lookup-probes.md) is rejected
+after four short writer pairs retain tail/memory losses. Its runtime/test changes
+are discarded; the observation-age source and measurements above remain current.

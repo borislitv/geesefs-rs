@@ -16,6 +16,16 @@ rates 22,398/20,239 ops/s and writer rates 23.39/26.13 MiB/s still lose to both 
 references. Process memory is not a reproducible win over experimental Go.
 Attribute remaining requests without using freshness extension as an optimization.
 
+The [subsequent lookup-probe overlap experiment](performance-lookup-probes.md) is
+rejected and its runtime/test changes are discarded. Four rotated writer pairs
+lose throughput once, p95/p99 three times and daemon peak/late RSS in every
+repetition despite proven HTTP overlap. Counted actors remain kernel LOOKUP,
+create validation and post-commit verification: five HEADs/two LISTs per writer,
+plus PUT and independent GET/DELETE. The failed premise is that overlapping
+unchanged requests is enough for a joint win. Attribute request/setup and retained
+allocation lifetimes before another scheduling variant; the RSS cause is not yet
+proved. Do not skip validation or introduce a cached miss to remove measured work.
+
 The latest directory remainder correction removes repeated validation/copies of
 already-emitted page prefixes without changing freshness or inode ownership.
 Its pressure regression fails before correction; stale-type and continuation

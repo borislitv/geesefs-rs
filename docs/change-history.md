@@ -4,6 +4,21 @@ This is the concise engineering context for the experimental Linux/S3 rewrite.
 Detailed results and operational logs stay outside tracked source files.
 Overall compatibility and comparative performance remain **UNACCEPTED**.
 
+## Rejected lookup-probe overlap, 2026-11-01
+
+- Trace/source attribution separates kernel LOOKUP, create validation and mandatory
+  post-commit HEAD. Retaining a miss or removing create validation would change
+  negative-cache/race behavior; neither is applied.
+- Optional marker HEAD/implicit LIST overlap passes meaningful public and SDK/HTTP
+  failure-sensitive tests, both 268-case experimental allocator suites and matching
+  native clients. Four rotated writer pairs nevertheless lose throughput once,
+  p95/p99 three times and peak/late daemon RSS in all four repetitions. The checked
+  diagnostic removes no RPC. [Complete results](performance-lookup-probes.md).
+- Reject the experiment and restore every runtime/test input to observation-age
+  source `1b13033`. Experimental 268-case results do not replace the retained
+  source's 260-case verification. Whole-file CRAP, broad mutation, compatibility
+  and joint performance acceptance remain open.
+
 ## Preserving metadata observation age through listing, 2026-11-01
 
 - A source-bound expiry diagnostic identifies 1,002 HEADs and one LIST inside a

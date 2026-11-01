@@ -119,6 +119,24 @@ and measured whole-filesystem acceptance remain separate gates.
 
 ## Investigation boundary
 
+The writer trace contains two independent absence resolutions (kernel LOOKUP,
+then create validation) and mandatory post-commit HEAD. Linux 7.0
+[`fuse_atomic_open`](https://github.com/torvalds/linux/blob/v7.0/fs/fuse/dir.c)
+performs LOOKUP before FUSE_CREATE; fuser 0.18.0 does not merge those callbacks.
+Removing validation would change remote-create race behavior, and retaining a
+previous miss would change the default zero negative-cache policy. Keep both.
+Within each missing-object resolution, marker HEAD and implicit-directory LIST
+were tested with overlap using the existing Tokio 1.54.1
+[`select!`](https://docs.rs/tokio/1.54.1/tokio/macro.select.html) and a spare existing
+metadata-resolution permit. The experiment preserves marker metadata/error
+priority, cancels irrelevant LISTs and falls back to serial progress when slots
+are occupied. Native SDK/HTTP wiring and cancellation tests pass. Four rotated
+writer pairs nevertheless lose throughput once, p95/p99 three times and daemon
+RSS in every repetition, without removing any writer requests. Reject the runtime
+change; the serial lookup implementation remains. See the
+[experiment results](performance-lookup-probes.md). No transport replacement,
+new dependency or weaker negative-cache policy follows from this investigation.
+
 The selected SDK already contains [interceptor optimizations #4597](https://github.com/smithy-lang/smithy-rs/pull/4597)
 and [BDD endpoint improvements #4595](https://github.com/smithy-lang/smithy-rs/pull/4595),
 including a default resolver cache. Endpoint params include operation-specific

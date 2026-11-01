@@ -45,6 +45,21 @@ versions even at a modest performance cost (2026-11-01). The Skory fuser stack i
 therefore rejected; unreleased upstream fuse-backend-rs `fusedev-uring` is watched,
 not adopted. Use supported fuser 0.18.0 `n_threads`/`clone_fd` for transport work.
 
+The [classic dispatch diagnosis](performance-classic-dispatch.md) first measures
+queue/service intervals, off-CPU wakes and CPU stacks. Extra fuser receive loops
+retain a separate `16 MiB + 4 KiB` buffer each and fail the joint mixed-workload
+gate. Keep one loop. A cache-hit read experiment evaluated existing futures-util
+0.3.34 [`FutureExt::now_or_never`](https://docs.rs/futures-util/0.3.34/futures_util/future/trait.FutureExt.html#method.now_or_never)
+on a pinned mutable future and Tokio 1.54.1
+[`Handle::enter`](https://docs.rs/tokio/1.54.1/tokio/runtime/struct.Handle.html#method.enter).
+Polling a pinned borrow preserves a pending future for the same bounded Tokio
+fallback, including admission, timeout, cancellation and reply ownership. It
+does not add a cache implementation or duplicate generation/TTL logic. Despite
+improving cached-read latency and CPU, the trial fails the paired metadata,
+writer-tail and memory gates. Discard its runtime/test changes and the receive-loop
+CLI; retain only removal of redundant post-rename notifications. No dependency
+change, custom cache or executor is adopted.
+
 The [metadata expiry diagnosis](metadata-expiry-diagnosis.md) uses standalone
 [TShark 4.6.4](https://www.wireshark.org/docs/man-pages/tshark.html) for TCP/HTTP
 reassembly instead of implementing a packet decoder. Public distro packages are

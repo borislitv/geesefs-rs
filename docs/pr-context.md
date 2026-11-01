@@ -1,4 +1,4 @@
-# PR context and continuation plan — 2026-11-01
+# PR context and continuation plan — 2026-11-02
 
 This is the resumable checkpoint for [PR2](https://github.com/borislitv/geesefs-rs/pull/2).
 Update this file when completing a step; keep detailed execution logs and private
@@ -12,17 +12,20 @@ remain [project brief](project-brief.md) and [AGENTS.md](../AGENTS.md).
   disk-backed cache remain deferred. Local unsafe code is forbidden.
 - Overall status: **UNACCEPTED**. Keep the PR open and draft, targeting `main`,
   without auto-merge. Library CI is not native-filesystem or production acceptance.
-- Branch: `perf/prove-read-bottlenecks-20261030`. The preceding research checkpoint
-  is `a724dbb617b4d99a0475823d8cd49915c69b99b9`; subsequent checkpoint edits are
-  documentation and test-environment preparation, not a new application runtime.
-- Retained runtime: `1b13033c3f161b9502c7a23870b645ca871ab2e3`.
-  Release SHA256: `df24b6bdd42920b7989db2ed7c44855b9fc2bb1cf53292ee60ce023eb42138a8`.
-  All 85 frozen source/build/test inputs and the binary still match after package
-  installation, corrective reboot and native lab tests. Do not restore the rejected
-  experimental runtime/test changes.
-- The retained verification scope is 260 Rust cases per allocator, 75 benchmark
+- Branch: `perf/prove-read-bottlenecks-20261030`. Plan B below is now measured.
+  Current runtime differs from observation-age source only by removing redundant
+  post-rename entry notifications in `src/fuse.rs`; a native concurrent-client
+  regression covers the demonstrated deadlock. No new dependency or CLI is retained.
+  Runtime commit: `0e44bd84f0a6498afd852339a41cacccf2381972`; release SHA256
+  `9949ad9f8041397d5ca7583dbb163af621de51228472901e1ca17d37f5de0200`.
+- Historical observation-age baseline: `1b13033c3f161b9502c7a23870b645ca871ab2e3`,
+  release SHA256 `df24b6bdd42920b7989db2ed7c44855b9fc2bb1cf53292ee60ce023eb42138a8`.
+  Its 85 frozen inputs matched after installation/reboot/native C tests. Rejected
+  lookup, observation-reuse, receive-loop and inline-read trial changes stay discarded.
+- That baseline's verification scope was 260 Rust cases per allocator, 75 benchmark
   Python cases, ten native directory contracts and three matching native variants.
-  These results belong to that runtime, not to an untested io_uring integration.
+  These historical results do not replace [current-source verification](testing.md)
+  or establish an io_uring integration.
 
 ## Established findings and remaining priorities
 
@@ -351,8 +354,10 @@ reboot-required marker or package/build readiness into runtime acceptance.
 
 Operator constraints added for this review: avoid forks of shared libraries and
 prefer released upstream libraries even at a modest performance cost. The
-[ticket](https://st.yandex-team.ru/MIRROR-188719) targets Kubernetes readers and
-writers for Mirror, with a long read-only run on real data still outstanding.
+[ticket](https://st.yandex-team.ru/MIRROR-188719) still contains an older Kubernetes
+deployment plan. The operator subsequently clarified the primary target as **LXC
+with nginx, rsync and golist**; containerd is not a blocker. A sustained real-data
+run remains outstanding, with the primary deployment environment now LXC.
 Plan A had started (gate A1 was being located); it is stopped and nothing from
 it was changed. Upstream state was checked on 2026-11-01:
 
@@ -363,31 +368,31 @@ it was changed. Upstream state was checked on 2026-11-01:
 | fractal-fuse 0.6.1, fuser-iouring 0.1.2 | Released, small; compio runtime with eager `MAP_POPULATE` payloads; prototype missing fsync/flush/release. | Not suitable as a fuser replacement. |
 | libfuse | Released 3.18.3 predates bufpool PR1640; no maintained Rust binding to the ring loop. | C lab only; no Rust integration path. |
 | Linux 7.3 | `nr_queues = num_possible_cpus()`, all qids required; patches for fewer queues could not be checked (lore behind bot protection). | Queue memory scales with node possible CPUs. |
-| containerd [#9320](https://github.com/containerd/containerd/pull/9320), moby [#46762](https://github.com/moby/moby/pull/46762) | RuntimeDefault/default seccomp profiles block `io_uring_*` since 2023-11. | Pods need a seccomp exception plus node `fuse.enable_uring=1`, kernel >= 6.14 (7.3 for pools) and `kernel.io_uring_disabled=0`. |
+| containerd [#9320](https://github.com/containerd/containerd/pull/9320), moby [#46762](https://github.com/moby/moby/pull/46762) | RuntimeDefault/default seccomp profiles block `io_uring_*` since 2023-11. | Relevant only to a future deployment using those runtimes, not the LXC target. LXC host kernel/FUSE and its actual confinement policy remain separate checks. |
 | fuser 0.18.0 | `Config::n_threads`/`clone_fd` supported; callbacks take `&self`; `ReplyOpen::open_backing` passthrough and writeback capability exposed through safe APIs. | Plans B and D need no new dependency. |
+
+Rechecked on 2026-11-02: crates.io still reports fuser 0.18.0 and fuse-backend-rs
+0.14.0 as latest stable; fuser #380 remains open and #247 remains merged upstream.
+There is still no fitting released non-fork Rust ring transport to adopt.
 
 ### Verdicts
 
 - **A, FUSE-over-io_uring: stop integration; move to an upstream watch list.**
   No released non-fork Rust transport fits the current fuser stack. The best
-  upstream candidate would replace the FUSE crate. Deployment also needs
-  node-wide kernel/module/seccomp changes outside this repository. The benefit
+  upstream candidate would replace the FUSE crate. Deployment needs verified
+  LXC host-kernel/FUSE support and actual container policy. The benefit
   ceiling is cache-hit small requests (published +10-25% on in-memory
   filesystems), not the S3-bound random-read and writer gaps. Queue memory scales
   with node possible CPUs. Re-entry requires all of: a released crate with the
-  transport and notifications (fuser, or fuse-backend-rs >= 0.15 with
-  `fusedev-uring`), operator-confirmed node kernel/parameter/seccomp policy, and a
+  transport and notifications (a future fuser or fuse-backend-rs release containing
+  it; no future version number is assumed), verified LXC host/container policy, and a
   measured transport share >= 10% of daemon CPU on cache-hit workloads after B.
   The Skory fork is rejected under the new constraint. The native C results stay
   as evidence; no further lab work is planned.
-- **B, classic transport through supported fuser APIs: promote to the only
-  transport plan.** Try `n_threads` 2/4 with `clone_fd` (configuration only) and
-  synchronous cache-hit replies without a Tokio handoff (application code).
-  Re-check negotiated `max_write`/`max_readahead` through `KernelConfig`. Add
-  concurrency regressions for FORGET/LOOKUP, notification and unmount under
-  several loops. fuser #272 is open and #704 fixed a test-only stats race. The
-  cache-hit transport share (former gate A1) is measured in the same run to decide
-  A's re-entry.
+- **B, classic transport through supported fuser APIs: completed below.**
+  Measured 2/4 receive loops and synchronous first-poll reads fail the joint
+  gates. Retain the independent rename deadlock correction, not either optimization.
+  Negotiated limits and the isolated cache-hit transport share are now recorded.
 - **C, S3 request path: primary acceptance work.** Bounded prefetch for random
   reads, necessary versus avoidable writer RPCs, and owners of late memory growth.
   These are the measured gaps; they use the released SDK/Tokio and fit the
@@ -396,18 +401,18 @@ it was changed. Upstream state was checked on 2026-11-01:
   upstream kernels, but changes disk-cache/coherence/durability contracts the
   operator deferred, and passthrough needs `CAP_SYS_ADMIN`. A VM with
   possible == online CPUs is no longer needed because A has no lab follow-up.
-- **E, missing from the earlier plans: ticket acceptance item 4.** A long
-  correctness-checked read-only Kubernetes run on real `mirror/mirrors` with
-  varied file sizes and listings, plus actual-service IAM/SSE checks. It requires
-  operator authorization and cluster access; it cannot be replaced by VM results.
+- **E, target-environment verification.** A sustained correctness-checked LXC
+  run with nginx/rsync/golist, varied file sizes and listings, plus actual-service
+  IAM/SSE checks. Use authorized read-only real data and disposable writes;
+  VM and loopback results do not replace this gate. The older Kubernetes-only
+  wording of ticket item 4 is superseded by the operator's deployment clarification.
 
 ### Order and gates
 
-1. B configuration control together with the cache-hit transport-share profile
-   (one rotated same-kernel series; kill if no win in three of four pairs or worse
-   peak/late memory).
+1. B controls are complete and both optimization trials are rejected: no joint
+   win in three of four pairs, with adverse tails/memory. Keep the rename fix.
 2. C attribution and corrections under the existing rejection rules.
-3. E once authorized; record node kernel, CPUs, seccomp and FUSE settings there,
+3. E once authorized; record LXC host kernel, CPUs, confinement and FUSE settings,
    which also answers A's deployment precondition.
 4. A only on all re-entry triggers. Upstream releases are re-checked at each
    checkpoint instead of building a local transport.
@@ -415,6 +420,29 @@ it was changed. Upstream state was checked on 2026-11-01:
 Resume the independent [remaining priorities](next-work.md) within C and E.
 Neither a boot, standalone C mount nor a microbenchmark closes the complete
 Rust/S3 acceptance gate or authorizes deployment.
+
+### Completed Plan B checkpoint (2026-11-02)
+
+[Attribution, complete checkpoint tables and limits](performance-classic-dispatch.md)
+distinguish profiling from four-repetition unprofiled controls. Classic 1/2/4 loops
+complete 864 mixed and 144 isolated phases; first-poll source pairs complete 96
+isolated and 576 mixed phases. Every series verifies final payload generations,
+bytes, topology, cleanup and adverse counters. Neither optimization has a joint win.
+Cached-read latency/CPU really improve with first polling, but metadata/writer
+tails and memory prevent adoption. No cache/TTL/durability or SDK policy is weakened.
+
+The rename regression hangs before removal of post-reply `inval_entry`, including
+at one loop; kernel stacks and versioned Linux/libfuse sources confirm the parent
+directory/notifier lock cycle. Keep VFS rename dentry handling and last-close inode
+notification, without a new notification queue. Trial source/binary archives and
+all original failures remain private; they are not the delivered runtime.
+
+Captured INIT is 7.46→7.40, max_write 1 MiB, max_readahead 128 KiB, max_pages 256,
+max_background 16. Application max_requests remains 64. The cached probe observes
+26.99% inclusive transport CPU, but A still lacks a fitting released upstream
+transport and verified LXC policy. Continue C's measured S3/setup and memory-owner
+work, then E's actual LXC/nginx/rsync/golist and service contracts. Do not repeat B
+or resume fork integration without new evidence and the stated upstream triggers.
 
 ## Evidence and resumption
 

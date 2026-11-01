@@ -4,6 +4,26 @@ This is the concise engineering context for the experimental Linux/S3 rewrite.
 Detailed results and operational logs stay outside tracked source files.
 Overall compatibility and comparative performance remain **UNACCEPTED**.
 
+## Rename notification deadlock and rejected dispatch trials, 2026-11-02
+
+- CPU/off-CPU, FUSE lifecycle and real cache-residency controls precede changes.
+  The receiver is not saturated in the mixed read workloads; isolated cached
+  reads do show scheduling/transport cost. Profile timings are not acceptance.
+- A new four-client native regression hangs before correction: synchronous
+  post-rename entry notifications wait for a related directory operation while
+  holding the notifier lock. Linux/VFS already maintains rename dentries, and
+  libfuse's notification contract prohibits this lock relationship. Remove both
+  redundant notifications; preserve last-close inode invalidation and durable
+  unmount. Do not add an executor/queue to hide the cycle.
+- Supported 1/2/4-loop controls complete 864 mixed/144 isolated phases without a
+  joint win. A first-poll read trial improves genuine cached reads but completes
+  another 96 isolated/576 mixed phases with adverse metadata/writer tails and
+  memory. Discard optimization runtime/tests and CLI; keep only the correctness
+  fix and its regression. [Measurements, sources and limits](performance-classic-dispatch.md).
+- LXC/nginx/rsync/golist is the clarified primary target; official upstream
+  libraries remain preferred to forks. Full compatibility, sustained memory and
+  Go-relative performance/quality acceptance remain open.
+
 ## Correctness-equivalent gates and small-core io_uring assessment, 2026-11-01
 
 - Record the operator's clarification: Rust need not beat Go where Go is

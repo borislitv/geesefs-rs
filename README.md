@@ -42,9 +42,20 @@ rsync/nginx and failure probes cover the implemented subset; hardlink emulation,
 actual-service paths and whole-file CRAP remain open. Its joint performance is
 reported in the new checkpoint below. Older tables retain their binary/source scope.
 
+## Classic dispatch checkpoint — 2026-11-02
+
+The primary target is LXC serving nginx, rsync and golist. The
+[measured classic dispatch investigation](docs/performance-classic-dispatch.md)
+rejects additional receive loops and inline first-poll reads after four-pair tail
+and memory losses. Genuine cache-hit latency/CPU gains do not establish a mixed
+workload win. Both optimization trials are discarded; retain only the confirmed
+post-rename notification deadlock correction and its native concurrency regression.
+Official upstream dependencies, one receive loop, freshness and budgets remain.
+Actual LXC/service, sustained-memory, compatibility and comparative gates stay open.
+
 ## Directory remainder checkpoint — 2026-11-01
 
-The latest [observation-age checkpoint](docs/performance-observation-age.md)
+The [observation-age checkpoint](docs/performance-observation-age.md)
 verifies another 1,440 mixed phases/eight generations after the permission-TTL
 correction. Raw metadata/writer rates are lower and process memory is not a
 reproducible win; the freshness diagnosis below qualifies metadata equivalence.
@@ -56,14 +67,15 @@ repetition. Its runtime changes are discarded; observation-age source is retaine
 
 A [cached-observation reuse trial](docs/performance-cached-observations.md) also
 removes a demonstrated redundant reconstruction but fails to establish a joint
-win in four short metadata pairs. It is discarded; current runtime remains
-`1b13033`. These short controls do not measure sustained expiry or beat Go.
+win in four short metadata pairs. It is discarded; the observation-age runtime
+`1b13033` is retained at that checkpoint. These short controls do not measure
+sustained expiry or beat Go.
 
 The [expiry CPU/HTTP and permission-freshness diagnosis](docs/metadata-expiry-diagnosis.md)
 now verifies 42 instrumented metadata phases and six native mutation probes.
 Both Go references miss a mode-only update at unchanged ETag after an equal TTL;
 all three pass a changed-ETag control. Lower request count is not equivalent
-permission freshness. Runtime and current mixed performance results stay unchanged.
+permission freshness. That diagnosis changes no runtime or mixed measurement.
 
 The [Linux 7.3 FUSE io_uring assessment](docs/fuse-io-uring-assessment.md) finds a
 credible small-core experiment, not an established S3 speedup. It distinguishes

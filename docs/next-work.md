@@ -1,4 +1,4 @@
-# Next work: observed problems and causes, 2026-11-01
+# Next work: observed problems and causes, 2026-11-02
 
 Overall status remains **UNACCEPTED**. This is the current working inventory;
 it separates confirmed mechanisms from hypotheses. See the
@@ -13,6 +13,16 @@ raw Go rates non-equivalent, not a target to reproduce by removing required work
 Keep its numbers, but do not treat that difference alone as a performance failure.
 Historical checkpoint judgements below retain their original scope; this does not
 close unrelated performance, compatibility or quality gaps.
+
+The [subsequent classic dispatch checkpoint](performance-classic-dispatch.md)
+finishes Plan B on Linux 7.3.1. More receive loops and first-poll reads both fail
+the four-pair joint gates; their runtime/test changes and CLI are discarded.
+Cache-hit handoff cost is real, but removing it does not close mixed tails/memory.
+Retain only the independently reproduced post-rename notification deadlock fix.
+The current target is LXC serving nginx/rsync/golist, not Kubernetes/containerd.
+Continue the S3/setup and retained-memory-owner attribution below; do not repeat
+the rejected dispatch premise. io_uring still waits for fitting official releases
+and actual LXC policy even though the isolated transport-share condition is observed.
 
 1. Separate unavoidable metadata/durability checks from avoidable SDK setup,
    duplicate create probes and scheduling costs. Writer rates remain 23.39/26.13

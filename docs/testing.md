@@ -5,6 +5,35 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Retained rename correction — 2026-11-02
+
+The reduced source retains only removal of redundant post-rename entry
+notifications; receive-loop CLI and first-poll read trials are discarded.
+Both jemalloc and all-feature System-allocator LLVM runs pass **261 Rust cases**,
+including eleven native directory contracts, and 75 benchmark Python cases.
+The native suite also passes separately with two and four receive loops through
+the test-only `GEESEFS_TEST_FUSE_THREADS` environment setting. The new four-client
+rename/list/read/write regression hangs on the old notification path and passes
+after correction, including full dirty-close bytes after unmount.
+
+Matching default/System instrumented executables and the exact frozen default
+release pass available rw/ro, literal nginx, rsync, Range/EOF/mmap and injected
+fsync failure/recovery contracts. These are disposable Linux fixtures, not the
+actual LXC/nginx/rsync/golist deployment or positive LINK/service acceptance.
+Formatting, warning-denying all-target/all-feature Clippy and public-source audit
+pass. All 85 frozen inputs match the committed source; only `src/fuse.rs` and
+`tests/fuse_directory.rs` differ from the observation-age baseline.
+
+Whole affected-file `crapper --use-existing-coverage --threshold 10 src/fuse.rs`
+still **fails**: `errno` 23.8, `getxattr` 14.2 and `fallocate` 11.0. Adapter `rename`
+is CC6/79.2% coverage/CRAP6.3 in both matching native reports. `dryer --threshold
+0.8` finds no duplicates. Broad mutation remains open; historical restored-fault
+hangs are failure-sensitivity evidence, not a completed new mutation campaign.
+Two default-allocator CLI child profiles are preserved separately but were not
+merged after switching allocators; do not claim complete child-entrypoint coverage.
+Original setup/report-option failures and corrected completion receipts remain
+private. Successful test/build commands do not turn these quality gaps green.
+
 ## Library and contract checks
 
 Use Rust 1.96.0+ with rustfmt/clippy, Python 3.12+ and the public dependencies from

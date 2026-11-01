@@ -20,6 +20,10 @@ that Go cannot be optimized or that Rust automatically improves memory or speed.
 
 - Initial target: Linux, S3-compatible storage, and the extended metadata used by
   Yandex S3; both filesystem readers and writers are required.
+- Deployment clarification, 2026-11-01: the primary target is an LXC container
+  serving nginx, rsync and golist. Kubernetes/containerd is not a prerequisite;
+  actual container confinement and host-kernel support must be checked in LXC.
+  Prefer official upstream libraries over forks, including at a modest speed cost.
 - Go reference: `yandex-cloud/geesefs`, including the reproducible experimental
   revision `5c0884c9e8799bbab93e2d4102fdc15e9c079e0d` and an identified upstream
   packaged baseline. Preserve exact source/build hashes with benchmark results.

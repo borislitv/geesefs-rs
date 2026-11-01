@@ -56,13 +56,15 @@ win. Keep raw measurements and distinguish required checks from avoidable cost.
   broader survivors. Positive LINK, full CLI/imported multipart layouts and
   actual-service IAM/SSE/signing/PATCH are not claimed complete.
 
-## Completed task: install experiment prerequisites without rebooting
+## Prerequisites and next-boot configuration are ready
 
-The operator authorized installing the required packages, **without a reboot**.
-Installation and available no-reboot checks are complete. The system still runs
-`7.0.0-38-generic`, with unchanged boot identity and running parameters. Do not
-reboot, schedule a reboot, kexec, replace served mounts or modify production
-data/credentials. A 7.3 boot/runtime test requires separate authorization.
+The operator authorized installing the required packages and then explicitly
+requested completing all next-boot settings, **without executing a reboot**.
+Installation, persistent boot configuration and available no-reboot checks are
+complete. The system still runs `7.0.0-38-generic`, with unchanged boot identity and
+running parameters. Do not execute or schedule a reboot, kexec, replace served
+mounts or modify production data/credentials. The next operational step is an
+operator-authorized reboot, not another prerequisite configuration task.
 
 ### Verified host and package plan
 
@@ -70,8 +72,9 @@ data/credentials. A 7.3 boot/runtime test requires separate authorization.
   `7.0.0-38-generic`; GRUB/BIOS and existing dracut `110-11ubuntu0.1`.
   Preserve the installed 7.0 kernels and existing initramfs tooling.
 - Possible CPUs are `0-255`, configured CPUs 256, online CPUs 64.
-  `fuse.enable_uring=N`, `kernel.io_uring_disabled=0`. No boot parameter/sysctl
-  was changed. Current FUSE and io_uring options are compiled in.
+  Live `fuse.enable_uring=N`, `kernel.io_uring_disabled=0` remain unchanged until
+  reboot. Persistent next-boot settings are configured below. Current FUSE and
+  io_uring options are compiled in.
 - Normal generic/HWE APT candidates are still 7.0, not the required 7.3 pool UAPI.
   [Canonical mainline 7.3.1 amd64](https://kernel.ubuntu.com/mainline/v7.3.1/amd64/)
   provides matching image/modules version `7.3.1-070301.202610301300`.
@@ -100,12 +103,11 @@ nor a FUSE runtime failure is established. Follow the
 Dracut created `/boot/initrd.img-7.3.1-070301-generic` (44,525,163 bytes). The matching
 vmlinuz, config, System.map, modules.dep and initrd contents are verified; package
 integrity, `dpkg --audit`, `apt-get check` and `grub-script-check` pass. Both normal
-7.0 kernels and their boot entries remain. Standard package hooks regenerated GRUB:
-its first/default entry now selects 7.3.1, with no pending one-shot selection.
-**The generated entries do not yet contain `fuse.enable_uring=1` or `nr_cpus=4`.**
-The existing cloud-image GRUB snippet supplies console arguments; use the effective
-generated entry when preparing an authorized test boot, not `/etc/default/grub`
-in isolation. No manually managed boot configuration was edited by this task.
+7.0 kernels and their boot entries remain. Standard package hooks initially made
+7.3.1 the first normal entry; the completed configuration now selects the dedicated
+four-CPU test entry below, without a one-shot override. Existing cloud-image console
+arguments are preserved. The target kernel builds virtio block/PCI/network, ext4,
+devtmpfs and serial-console support in, rather than relying on missing initrd modules.
 
 ### Installed isolated userspace
 
@@ -142,6 +144,50 @@ Existing perf 7.0.14 records and decodes a bounded child-only CPU smoke test
 recording smoke test after the future 7.3 boot. No example was mounted, no new
 Rust transport was selected and no 7.3 runtime/performance result is claimed.
 
+### Ready next boot and laboratory launcher
+
+The default GRUB entry is **`geesefs-fuse-uring-7.3.1-4cpu`**, displayed as
+`Ubuntu 7.3.1 FUSE io_uring (4 possible CPUs)`. It loads the matching 7.3.1 kernel
+and initrd with the existing root/console arguments plus exactly:
+
+```text
+fuse.enable_uring=1 nr_cpus=4
+```
+
+- `/boot/grub/custom.cfg` contains the dedicated entry, using this guest's verified
+  generated boot device/root arguments. The standard `41_custom` hook loads it.
+- `/etc/default/grub.d/99-geesefs-fuse-uring.cfg` selects that stable entry ID after
+  the cloud-image defaults and enables a five-second menu, including recordfail.
+- `grub-mkconfig` was rendered and checked before `update-grub`; the resulting live
+  config matches the candidate. Both generated and custom syntax checks pass.
+  The normal Linux menu block is byte-identical to its saved pre-change version.
+  Normal/recovery entries for 7.0.0-38 and 7.0.0-30 keep their original arguments.
+  For an ordinary-kernel boot, select the existing 7.0 entry in Advanced options.
+- There is no pending one-shot boot selection and no reboot was executed or
+  scheduled. Backups and hashes of the prior GRUB/defaults/environment are private.
+
+The lab prefix now also has `bin/check-boot` and `bin/run-fuse-lab`. After reboot,
+run the read-only check as root:
+
+```sh
+timeout 20s /opt/libfuse-3.19.0-rc0-fe66006/bin/check-boot
+```
+
+It requires the exact target kernel/parameters, possible and online CPUs `0-3`,
+configured/online counts 4, enabled FUSE io_uring, allowed generic io_uring,
+accessible `/dev/fuse`, mount capability and the pinned userspace. On the current
+old boot it correctly exits 1 only for the pending kernel/CPU/enablement checks;
+device/policy/capability/userspace checks pass. This is not a transport mount test.
+
+The existing caller memlock is 8 MiB. `run-fuse-lab classic COMMAND ...` explicitly
+sets both FUSE enable/pool flags to 0; `run-fuse-lab uring COMMAND ...` sets both to
+1 and refuses to execute the command until `check-boot` succeeds. Both modes select
+queue depth 8 and apply **64 MiB soft/hard memlock to the child only**, without
+global limits or sysctl changes. Child environment/memlock, invalid-mode handling
+and the current-boot uring refusal are verified. The initial lab sizing is four
+queues times eight 1 MiB payload chunks; verify actual negotiation/registration
+and absence of fallback after boot rather than claiming a fixed-buffer success now.
+
 ### Execution checklist
 
 - [x] Capture pre-install boot/package state; repeat signed hash/control checks,
@@ -152,6 +198,8 @@ Rust transport was selected and no 7.3 runtime/performance result is claimed.
   tools, retaining system library/helper hashes and upstream source/licenses.
 - [x] Verify package integrity/health, boot artifacts, initrd, GRUB/recovery
   entries and unchanged running kernel, boot identity, possible CPUs and sysctls.
+- [x] Finish persistent next-boot selection/parameters, visible recovery menu,
+  scoped launcher memlock, postboot check and preboot guard verification.
 
 For each checkpoint delivery, append the private action/reason log, commit/push
 the documentation, verify the existing draft PR and its footer link, and report
@@ -160,10 +208,11 @@ reboot-required marker or package/build readiness into runtime acceptance.
 
 ## Subsequent work after an authorized test boot
 
-1. Obtain separate reboot authorization. For a controlled boot use the reviewed
-   `fuse.enable_uring=1 nr_cpus=4` or 2 configuration; verify `uname`, possible CPU
-   mask, configured count, FUSE parameter, `/dev/fuse`, io_uring policy and memlock.
-   `maxcpus`, quota, affinity or fewer workers do not shrink possible-CPU queues.
+1. Perform a separately authorized reboot into the already configured four-CPU
+   entry, then run `check-boot` and the perf recording smoke test. No additional
+   boot-parameter or memlock setup is pending. `maxcpus`, quota, affinity or fewer
+   workers do not shrink possible-CPU queues. A later two-CPU experiment is a
+   separate controlled configuration, not the prepared initial boot.
 2. Prove actual initialization/no fallback in the standalone pool smoke test.
    Explicit controls are `FUSE_URING_ENABLE=1`, `FUSE_URING_BUFPOOL=1`,
    `FUSE_URING_QUEUE_DEPTH=4` or 8. Legacy controls must set both ENABLE and
@@ -199,8 +248,11 @@ Relevant groups are `candidate-v8`, `kernel73-research-v1`, `kernel73-reuse-v1`,
 `ubuntu-uring-installed-v1`, `ubuntu-uring-userspace-installed-v1` and
 `ubuntu-uring-installation-checked-v1`; `actions.md` records actions/reasons.
 The bounded helpers are `install_uring_without_reboot.py`,
-`install_uring_userspace.py` and `verify_uring_installation.py`. Raw sources,
-commands, failures and hashes remain there; they are not public PR attachments.
+`install_uring_userspace.py` and `verify_uring_installation.py`. The subsequent
+`ubuntu-uring-boot-ready-v1` and `prepare_uring_boot.py` record the now-completed
+boot configuration, backups, candidate/live checks and launcher probes; that report
+supersedes the earlier installation-only snapshot with pending boot parameters.
+Raw sources, commands, failures and hashes remain there; they are not public PR attachments.
 Use new output labels/directories: earlier receipts are immutable and helpers
 often use exclusive creation. Do not rerun an old label over an existing result.
 

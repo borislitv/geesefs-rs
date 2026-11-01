@@ -4,6 +4,24 @@ This is the concise engineering context for the experimental Linux/S3 rewrite.
 Detailed results and operational logs stay outside tracked source files.
 Overall compatibility and comparative performance remain **UNACCEPTED**.
 
+## Preserving metadata observation age through listing, 2026-11-01
+
+- A source-bound expiry diagnostic identifies 1,002 HEADs and one LIST inside a
+  slow metadata phase. Inspection finds cached, LIST and HEAD metadata collapsed
+  into one page-publication timestamp. Standard LIST cannot revalidate cached
+  permission metadata, but publication incorrectly restarts its full TTL.
+- The age regression first returns almost 60 seconds instead of at most 15.
+  A real mounted permission test changes only backend mode 0640 to 0600 and
+  rejects the old publication-time assignment after the original TTL expires.
+  The initial size-only probe is retained with its limitation: LIST includes size.
+- Carry each entry's actual observation time through bounded selection and type
+  resolution. Preserve exact metadata, newer HEAD/commit protections, limits,
+  remaining kernel TTL and cancellation/error behavior; no cache-policy tuning.
+- Both allocator suites pass 260 Rust cases, including ten native directory
+  contracts, and matching release/instrumented clients pass. This is a correctness
+  correction, not a speed claim. Earlier performance tables retain their source
+  and now-known freshness gap; current-source joint performance remains unaccepted.
+
 ## Resuming only the remaining directory page, 2026-11-01
 
 - A backend page spans several kernel frames. The adapter repeatedly validated

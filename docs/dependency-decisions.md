@@ -193,3 +193,9 @@ The alternative supported fuser 0.18.0 `FUSE_READDIRPLUS_AUTO` capability reduce
 unused name-only lookup owners in a real mounted test, but four rotated metadata
 pairs lose throughput in three cases and pooled p99 in all four. Retain the
 existing forced-PLUS policy rather than shipping that unproven speed change.
+
+Standard S3 LIST object fields supply size/ETag/modified time, not arbitrary user
+metadata. Preserve the cached or HEAD observation time when merging selected
+entries; only actual authoritative LIST metadata has the new LIST observation
+time. Existing SDK responses, Moka and bounded futures suffice. Avoid another
+TTL extension or cache-policy change to hide required metadata refresh requests.

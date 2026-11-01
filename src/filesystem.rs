@@ -63,7 +63,14 @@ impl DirectoryPage {
     }
 }
 
-type DirectorySelection = BTreeMap<String, (bool, Option<ObjectHead>, bool)>;
+struct DirectoryMetadata {
+    directory: bool,
+    head: Option<ObjectHead>,
+    known: bool,
+    fetched: std::time::Instant,
+}
+
+type DirectorySelection = BTreeMap<String, DirectoryMetadata>;
 
 struct DirectorySnapshot {
     node: Arc<Inode>,
@@ -84,7 +91,8 @@ fn trim_directory_selection(selected: &mut DirectorySelection, limit: usize) {
 
 fn listed_object(
     object: crate::backend::extended_list::ListedObject,
-) -> (String, (bool, Option<ObjectHead>, bool)) {
+    fetched: std::time::Instant,
+) -> (String, DirectoryMetadata) {
     let known =
         object.metadata.is_some() && object.etag.as_ref().is_some_and(|etag| !etag.is_empty());
     let metadata = object
@@ -103,7 +111,15 @@ fn listed_object(
         ..Default::default()
     };
     let directory = object.key.ends_with('/');
-    (object.key, (directory, Some(head), known))
+    (
+        object.key,
+        DirectoryMetadata {
+            directory,
+            head: Some(head),
+            known,
+            fetched,
+        },
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -1690,7 +1706,7 @@ impl Filesystem {
             let mut ns = self.namespace.lock().unwrap();
             self.local_directory_entries(&mut ns, &snapshot.prefix, after, limit)
         };
-        self.remote_directory_entries(&snapshot.prefix, after, limit, &mut selected)
+        self.remote_directory_entries(&snapshot.prefix, after, limit, fetched, &mut selected)
             .await?;
         // Standard LIST cannot supply a safe concrete fuser type. Resolve only
         // this bounded page; extended authoritative metadata avoids these HEADs.
@@ -1767,11 +1783,7 @@ impl Filesystem {
         })
     }
 
-    fn fresh_local_directory_entry(
-        &self,
-        ns: &Namespace,
-        name: &str,
-    ) -> Option<(bool, Option<ObjectHead>, bool)> {
+    fn fresh_local_directory_entry(&self, ns: &Namespace, name: &str) -> Option<DirectoryMetadata> {
         let node = ns.named(name).unwrap();
         let state = node.state.lock().unwrap();
         if state.deleted {
@@ -1780,12 +1792,11 @@ impl Filesystem {
         let fresh = state.version > state.durable
             || state.fetched.elapsed() < self.config.stat_cache_ttl
             || file_type(state.mode) == FileType::Directory && ns.has_dirty_descendants(name);
-        fresh.then(|| {
-            (
-                file_type(state.mode) == FileType::Directory,
-                state.remote.clone(),
-                state.metadata_known,
-            )
+        fresh.then(|| DirectoryMetadata {
+            directory: file_type(state.mode) == FileType::Directory,
+            head: state.remote.clone(),
+            known: state.metadata_known,
+            fetched: state.fetched,
         })
     }
 
@@ -1820,6 +1831,7 @@ impl Filesystem {
         prefix: &str,
         after: &str,
         limit: usize,
+        fetched: std::time::Instant,
         selected: &mut DirectorySelection,
     ) -> Result<()> {
         let mut token = None;
@@ -1830,7 +1842,7 @@ impl Filesystem {
                 .list_after(prefix, Some("/"), token.as_deref(), start_after.as_deref())
                 .await?;
             let (page_last, next_token) =
-                self.select_directory_page(prefix, after, limit, page, selected)?;
+                self.select_directory_page(prefix, after, limit, page, fetched, selected)?;
             if next_token.is_none()
                 || selected.len() == limit
                     && selected
@@ -1850,6 +1862,7 @@ impl Filesystem {
         after: &str,
         limit: usize,
         page: crate::backend::extended_list::ListPage,
+        fetched: std::time::Instant,
         selected: &mut DirectorySelection,
     ) -> Result<(String, Option<String>)> {
         let mut page_last = String::new();
@@ -1857,12 +1870,18 @@ impl Filesystem {
             .objects
             .into_iter()
             .filter(|o| o.key != prefix)
-            .map(listed_object)
-            .chain(
-                page.common_prefixes
-                    .into_iter()
-                    .map(|p| (p, (true, None, false))),
-            )
+            .map(|object| listed_object(object, fetched))
+            .chain(page.common_prefixes.into_iter().map(|p| {
+                (
+                    p,
+                    DirectoryMetadata {
+                        directory: true,
+                        head: None,
+                        known: false,
+                        fetched,
+                    },
+                )
+            }))
         {
             let Some(name) = name.strip_prefix(prefix) else {
                 return Err(Error::InvalidResponse("directory prefix escape".into()));
@@ -1893,7 +1912,7 @@ impl Filesystem {
         let mut jobs = FuturesUnordered::new();
         let mut pending = selected
             .iter_mut()
-            .filter(|(_, entry)| !entry.0 && !entry.2);
+            .filter(|(_, entry)| !entry.directory && !entry.known);
         let mut next = pending.next();
         while next.is_some() || !jobs.is_empty() {
             tokio::select! {
@@ -1923,7 +1942,7 @@ impl Filesystem {
         &self,
         ino: u64,
         name: &str,
-        entry: &mut (bool, Option<ObjectHead>, bool),
+        entry: &mut DirectoryMetadata,
         permit: tokio::sync::OwnedSemaphorePermit,
     ) -> Result<()> {
         let _permit = permit;
@@ -1931,11 +1950,12 @@ impl Filesystem {
             .await
             .map_err(|_| Error::Timeout("directory metadata lookup"))??;
         let state = resolved.state.lock().unwrap();
-        *entry = (
-            file_type(state.mode) == FileType::Directory,
-            state.remote.clone(),
-            state.metadata_known,
-        );
+        *entry = DirectoryMetadata {
+            directory: file_type(state.mode) == FileType::Directory,
+            head: state.remote.clone(),
+            known: state.metadata_known,
+            fetched: state.fetched,
+        };
         Ok(())
     }
 
@@ -1955,10 +1975,16 @@ impl Filesystem {
             return Err(Error::Fs(libc::EAGAIN));
         }
         let mut entries = Vec::with_capacity(selected.len());
-        for (name, (directory, head, known)) in selected {
+        for (name, entry) in selected {
             let full = child(snapshot.prefix.trim_end_matches('/'), &name)?;
-            let node =
-                self.listed_node(&mut ns, &full, directory, head, known, snapshot.fetched)?;
+            let node = self.listed_node(
+                &mut ns,
+                &full,
+                entry.directory,
+                entry.head,
+                entry.known,
+                entry.fetched,
+            )?;
             entries.push(DirEntry {
                 ino: node.ino,
                 name,

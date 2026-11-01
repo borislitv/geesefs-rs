@@ -4,6 +4,12 @@ Status: **UNACCEPTED**. The consumed-prefix correction has a verified request an
 ownership contract, but repeated mixed comparisons do not establish a joint
 performance improvement. Short metadata-only gains do not override these losses.
 
+A subsequent native permission regression finds a metadata-observation-age defect
+in this source and its predecessor: standard LIST publication can renew cached
+user metadata that the response did not supply. These tables remain historical,
+not current-source timings or compatibility acceptance. The correction and its
+RED/GREEN scope are recorded in [change history](change-history.md).
+
 ## Sources and design
 
 - Candidate: `eaa8a931e32337e9c8ce02dc8088a87cf424ea6f`, release SHA256

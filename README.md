@@ -39,6 +39,11 @@ reported in the new checkpoint below. Older tables retain their binary/source sc
 
 ## Directory remainder checkpoint — 2026-11-01
 
+These measurements precede the subsequent user-metadata observation-age fix.
+Its native permission regression rejects restarting cached metadata TTL on a
+standard LIST; current allocator suites pass 260 Rust cases. Historical rates
+below do not represent that corrected source or full compatibility acceptance.
+
 The subsequent source removes consumed-prefix validation/copies without extending
 metadata TTL or pinning inodes. Two rotated 300-second mixed repetitions verify
 1,440 phases and eight full-byte/generation checks. Metadata is 29,013/36,153 ops/s

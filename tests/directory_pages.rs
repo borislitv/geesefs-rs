@@ -5,6 +5,49 @@ use std::sync::atomic::Ordering;
 use support::MemoryStore;
 
 #[tokio::test]
+async fn a_standard_listing_does_not_restart_cached_child_metadata_freshness() {
+    let store = MemoryStore::new();
+    store.standard_listing.store(true, Ordering::Relaxed);
+    store.seed("file", b"old");
+    store
+        .objects
+        .lock()
+        .unwrap()
+        .get_mut("file")
+        .unwrap()
+        .metadata
+        .insert("mode".into(), (libc::S_IFREG | 0o640).to_string());
+    let fs = store.filesystem(16);
+    let node = fs.lookup(1, "file").await.unwrap();
+    let ttl = fs.config.stat_cache_ttl;
+    node.state.lock().unwrap().fetched = std::time::Instant::now() - ttl * 3 / 4;
+    let heads = store.head_starts.load(Ordering::Relaxed);
+    store
+        .objects
+        .lock()
+        .unwrap()
+        .get_mut("file")
+        .unwrap()
+        .metadata
+        .insert("mode".into(), (libc::S_IFREG | 0o600).to_string());
+
+    let page = fs.directory_chunk(1, "", 10).await.unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].ino, node.ino);
+    let (attr, remaining) = node.cached_attr(ttl);
+    assert_eq!(attr.size, 3);
+    assert_eq!(
+        attr.perm, 0o640,
+        "LIST supplies no replacement permission metadata"
+    );
+    assert!(
+        remaining <= ttl / 4,
+        "a LIST without user metadata must not restart a cached child's TTL: {remaining:?}"
+    );
+    assert_eq!(store.head_starts.load(Ordering::Relaxed), heads);
+}
+
+#[tokio::test]
 async fn a_released_consumed_prefix_does_not_restart_the_remaining_backend_page() {
     let store = MemoryStore::new();
     for name in ["a", "b", "c", "d", "z"] {

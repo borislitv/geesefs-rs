@@ -65,6 +65,12 @@ Kernel replies carry the remaining metadata TTL. Common prefixes establish names
 not authoritative directory-marker attributes. Basic READDIR remains available;
 kernel continuation resumes the same bounded backend page until it is consumed.
 
+Each selected entry carries the observation time of its metadata source: cached
+inode, authoritative LIST or resolved HEAD. Publishing a new names page does not
+renew cached permission/xattr freshness. Standard LIST may supply size/ETag but
+cannot revalidate absent user metadata; kernel attribute TTL remains bounded by
+that older observation. Later HEAD/commit generations still override older data.
+
 ## Payload ownership and progress
 
 `src/budget.rs` uses Tokio owned semaphore permits. Every `Block` owns its full

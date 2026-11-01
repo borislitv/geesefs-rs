@@ -156,6 +156,59 @@ fn a_cached_lookup_does_not_restart_the_kernel_attribute_ttl() {
 
 #[test]
 #[ignore = "requires an explicitly authorized Linux FUSE fixture"]
+fn a_standard_readdir_does_not_hide_changes_past_the_original_attribute_ttl() {
+    use std::os::unix::fs::MetadataExt;
+
+    let store = MemoryStore::new();
+    store.standard_listing.store(true, Ordering::Relaxed);
+    store.seed("file", b"old");
+    store
+        .objects
+        .lock()
+        .unwrap()
+        .get_mut("file")
+        .unwrap()
+        .metadata
+        .insert("mode".into(), (libc::S_IFREG | 0o640).to_string());
+    let mut config = MemoryStore::config(16);
+    config.stat_cache_ttl = Duration::from_secs(4);
+    let fs = Filesystem::new(config, store.clone()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let node = runtime.block_on(fs.lookup(1, "file")).unwrap();
+    mounted(fs, |path| {
+        node.state.lock().unwrap().fetched = Instant::now() - Duration::from_secs(3);
+        let started = Instant::now();
+        store
+            .objects
+            .lock()
+            .unwrap()
+            .get_mut("file")
+            .unwrap()
+            .metadata
+            .insert("mode".into(), (libc::S_IFREG | 0o600).to_string());
+        let names = std::fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["file"]);
+        assert_eq!(
+            std::fs::metadata(path.join("file")).unwrap().mode() & 0o7777,
+            0o640
+        );
+        std::thread::sleep(Duration::from_millis(1100));
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(
+            std::fs::metadata(path.join("file")).unwrap().mode() & 0o7777,
+            0o600
+        );
+    });
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Linux FUSE fixture"]
 fn exhausted_file_handles_reject_create_before_namespace_mutation() {
     let store = MemoryStore::new();
     store.seed("source", b"original bytes");

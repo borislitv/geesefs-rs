@@ -5,6 +5,15 @@ it separates confirmed mechanisms from hypotheses. See the latest
 [latest measurement tables](performance-directory-remainders.md),
 [architecture](architecture.md) and [comparison contract](performance.md).
 
+A subsequent expiry diagnostic exposes a correctness defect in those measured
+sources: a new standard-LIST page renews cached user metadata's observation time.
+The age regression and real permission-change regression fail before correction.
+Per-entry source timestamps now preserve remaining TTL without discarding exact
+metadata or changing configured policy. Both allocator suites pass 260 Rust
+cases and matching native clients; earlier numbers remain historical. Repeat
+current-source joint controls and attribute remaining requests without using
+freshness extension as an optimization.
+
 The latest directory remainder correction removes repeated validation/copies of
 already-emitted page prefixes without changing freshness or inode ownership.
 Its pressure regression fails before correction; stale-type and continuation

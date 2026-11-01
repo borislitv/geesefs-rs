@@ -205,6 +205,7 @@ pub struct Fuse {
     directories: Arc<Mutex<BTreeMap<u64, Arc<tokio::sync::Mutex<Directory>>>>>,
     files: Arc<Mutex<BTreeMap<u64, File>>>,
     file_slots: Arc<Semaphore>,
+    cache_retirement: Arc<Semaphore>,
     next_handle: Arc<AtomicU64>,
     pub notifier: Arc<Mutex<Option<Notifier>>>,
     pub shutdown_error: Arc<Mutex<Option<String>>>,
@@ -224,6 +225,7 @@ impl Fuse {
             directories: Arc::new(Mutex::new(BTreeMap::new())),
             files: Arc::new(Mutex::new(BTreeMap::new())),
             file_slots,
+            cache_retirement: Arc::new(Semaphore::new(1)),
             next_handle: Arc::new(AtomicU64::new(1)),
             notifier: Arc::new(Mutex::new(None)),
             shutdown_error: Arc::new(Mutex::new(None)),
@@ -274,6 +276,44 @@ impl Fuse {
             .clone()
             .try_acquire_owned()
             .map_err(|_| Error::Fs(libc::EMFILE))
+    }
+
+    fn retire_file_cache(&self, ino: INodeNo) {
+        let Ok(node) = self.fs.node(ino.0) else {
+            return;
+        };
+        if !closed_clean_file(&node) {
+            return;
+        }
+        let Some(notifier) = self.notifier.lock().unwrap().clone() else {
+            return;
+        };
+        let permit = {
+            let admission = self.admission.lock().unwrap();
+            if admission.closing {
+                return;
+            }
+            let Ok(permit) = self.cache_retirement.clone().try_acquire_owned() else {
+                return;
+            };
+            permit
+        };
+        // KEEP_CACHE is unset: these pages cannot survive the next open. Release
+        // them once no file/mmap owns them. Kernel notifications can block on
+        // writeback, so keep them off both the session and async worker threads.
+        // One separate slot bounds notifications without consuming the request
+        // admission needed by any kernel writeback; shutdown joins this owner.
+        self.runtime.spawn_blocking(move || {
+            let _permit = permit;
+            if closed_clean_file(&node)
+                && let Err(error) = notifier.inval_inode(ino, 0, 0)
+            {
+                eprintln!(
+                    "retiring closed inode {} kernel cache failed: {error}",
+                    ino.0
+                );
+            }
+        });
     }
 
     fn remove_entry(&self, parent: INodeNo, name: &OsStr, directory: bool, reply: ReplyEmpty) {
@@ -328,6 +368,14 @@ impl Fuse {
             }
         });
     }
+}
+
+fn closed_clean_file(node: &crate::inode::Inode) -> bool {
+    let state = node.state.lock().unwrap();
+    !state.deleted
+        && state.opens == 0
+        && state.version == state.durable
+        && state.mode & libc::S_IFMT == libc::S_IFREG
 }
 
 fn file_handle(
@@ -391,6 +439,11 @@ impl fuser::Filesystem for Fuse {
             tokio::time::timeout(self.fs.config.shutdown_timeout, async {
                 let _all = semaphore
                     .acquire_many(self.fs.config.max_requests as u32)
+                    .await
+                    .map_err(|_| Error::Cancelled)?;
+                let _retirement = self
+                    .cache_retirement
+                    .acquire()
                     .await
                     .map_err(|_| Error::Cancelled)?;
                 self.files.lock().unwrap().clear();
@@ -833,13 +886,21 @@ impl fuser::Filesystem for Fuse {
         _: bool,
         reply: ReplyEmpty,
     ) {
-        let mut files = self.files.lock().unwrap();
-        if files
-            .get(&fh.0)
-            .is_some_and(|entry| entry.file.ino() == ino.0)
-        {
-            files.remove(&fh.0);
+        let removed = {
+            let mut files = self.files.lock().unwrap();
+            if files
+                .get(&fh.0)
+                .is_some_and(|entry| entry.file.ino() == ino.0)
+            {
+                files.remove(&fh.0)
+            } else {
+                None
+            }
+        };
+        if let Some(file) = removed {
+            drop(file);
             reply.ok();
+            self.retire_file_cache(ino);
         } else {
             reply.error(Errno::EBADF);
         }

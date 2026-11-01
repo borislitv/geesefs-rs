@@ -125,6 +125,15 @@ history. Legacy inode-only APIs retain their separate inode pattern. Cache hits
 advance policy and can start next-window refill after publishing the reply, in
 the same owned future, request slot and deadline.
 
+`FOPEN_KEEP_CACHE` is unset. After releasing a clean regular file with no remaining
+open owners, the adapter asks fuser to invalidate its kernel pages rather than
+retaining pages that the next open will discard. One independent blocking slot
+bounds these potentially writeback-waiting notifications without taking request
+admission or holding userspace inode locks. Shutdown joins that slot. Eligibility
+is rechecked in the worker; concurrent reopen, retained readers or an occupied
+slot can defer or skip this best-effort reclamation. Kernel page locking and
+writeback govern a racing notification; dirty userspace extents are not discarded.
+
 The SDK range path preserves If-Match, exact range/EOF and body integrity.
 Unchecksummed responses can publish bounded fragments incrementally; a whole-body
 checksum retains its validation barrier before any bytes become reusable.

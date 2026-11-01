@@ -17,15 +17,16 @@ fn mounted(fs: Arc<Filesystem>, check: impl FnOnce(&Path)) {
         .unwrap();
     let directory = tempfile::tempdir().unwrap();
     let adapter = Fuse::new(fs, runtime.handle().clone());
+    let notifier = adapter.notifier.clone();
     let shutdown_error = adapter.shutdown_error.clone();
     let mut options = fuser::Config::default();
     options
         .mount_options
         .push(fuser::MountOption::DefaultPermissions);
     let session = fuser::Session::new(adapter, directory.path(), &options)
-        .expect("explicitly requested native FUSE mount must be available")
-        .spawn()
-        .unwrap();
+        .expect("explicitly requested native FUSE mount must be available");
+    *notifier.lock().unwrap() = Some(session.notifier());
+    let session = session.spawn().unwrap();
     let checked =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check(directory.path())));
     session

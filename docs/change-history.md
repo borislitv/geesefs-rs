@@ -4,6 +4,30 @@ This is the concise engineering context for the experimental Linux/S3 rewrite.
 Detailed results and operational logs stay outside tracked source files.
 Overall compatibility and comparative performance remain **UNACCEPTED**.
 
+## Closed-file kernel cache retirement, 2026-11-01
+
+- Owned-superblock page events and PFN-to-cgroup attribution show 256 MiB of
+  payload pages remaining after the last clean close. With `FOPEN_KEEP_CACHE`
+  unset, the next open discards these pages. Faster Rust completion increases
+  idle time retaining the full kernel working set, inflating temporal file-cache
+  means without a larger final page count than Go.
+- A checked native trace first fails on 268,435,456 retained bytes. Use supported
+  fuser `Notifier::inval_inode` after releasing the last clean regular-file handle.
+  A separate single-slot blocking owner avoids consuming FUSE request admission;
+  bounded shutdown joins it. Eligibility is rechecked without holding userspace
+  locks across kernel invalidation. Reclamation is best effort under reopen,
+  remaining read owners or concurrent retirement, not an immediate memory bound.
+- The same page assertion passes with zero final payload pages. Matching release
+  and jemalloc/System native clients pass, including mmap after closing its
+  original descriptor, rsync/nginx and durability/failure checks. Budgets, TTL,
+  allocator policy and Go GC policy are unchanged.
+- A separate 30-cycle, 10-second paced comparison gives late-half cgroup means
+  217.75 MiB for corrected Rust versus 355.43/371.88 MiB for experimental/packaged
+  Go; file-cache means are 19.23 versus 171.68/159.30 MiB. These are temporal means,
+  not plateaus. Rust metadata throughput remains 19,777 versus 36,314/40,259 ops/s;
+  writer throughput and some random-read metrics also lose. This single controlled
+  design does not close repeated joint performance, quality or compatibility gates.
+
 ## Integrated freshness, handle and accounting correction, 2026-10-31
 
 - A frozen-baseline FUSE/HTTP join attributes late metadata tails to name pages

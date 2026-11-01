@@ -134,6 +134,28 @@ The [checkpoint](performance-integrated.md) retains missing metrics, original
 controller errors, observer controls and previous-Rust-relative losses. Extend
 duration and repeated offered-rate designs before claiming a memory plateau.
 
+**Subsequent ownership attribution:** owned-superblock events and PFN-to-memcg
+tracking identify 256 MiB of final payload pages in Rust and both Go references.
+Rust finishes faster and spends more idle time retaining the full kernel cache.
+Because `FOPEN_KEEP_CACHE` is unset, these pages cannot survive the next open.
+Best-effort last-clean-close invalidation through supported fuser notifications
+passes the original retained-page failure and matching native client contracts.
+The separate 30x10-second control reduces Rust late cgroup/file means to
+217.75/19.23 MiB versus Go 355.43/171.68 and 371.88/159.30 MiB. Daemon late RSS
+153.29 MiB remains essentially equal to experimental Go153.27 MiB, not a robust
+process-memory win. Metadata throughput19,777 ops/s and writer throughput24.20 MiB/s
+still lose to both Go references. Repetition, isolated workloads, observer controls
+and the full joint gate remain open; the earlier checkpoint is not overwritten.
+
+**Next confirmed amplification:** the FUSE cursor consumes at most128 names while
+standard S3 LIST asks for up to1000. An expired1024-name traversal therefore makes
+nine overlapping LIST requests. Align bounded consumption with the supported
+backend-page size, preserving the namespace limit, small-limit/error behavior,
+exact attributes and kernel-buffer continuation; prove the request reduction
+before measuring another frozen candidate. Duplicate missing-name writer probes
+remain visible, but negative-cache policy and post-commit verification must not be
+bypassed simply to improve the comparison.
+
 ## 3. Resource and observer effects still qualify performance claims
 
 **Confirmed:** the earlier parent ceiling was only 8 CPU while daemon/client and

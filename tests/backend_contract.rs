@@ -11,6 +11,7 @@ use aws_sdk_s3::{
     primitives::ByteStream,
     types::CompletedPart,
 };
+use base64::Engine as _;
 use geesefs_rs::{
     backend::{
         RangeSink,
@@ -114,6 +115,10 @@ impl aws_smithy_runtime_api::client::interceptors::Intercept for CloseConnection
 }
 
 fn backend(endpoint: String) -> S3 {
+    retrying_backend(endpoint, 1)
+}
+
+fn retrying_backend(endpoint: String, attempts: u32) -> S3 {
     let config = aws_sdk_s3::Config::builder()
         .behavior_version(BehaviorVersion::latest())
         .region(Region::new("us-east-1"))
@@ -127,7 +132,7 @@ fn backend(endpoint: String) -> S3 {
         .endpoint_url(endpoint)
         .force_path_style(true)
         .interceptor(CloseConnection)
-        .retry_config(RetryConfig::standard().with_max_attempts(1))
+        .retry_config(RetryConfig::standard().with_max_attempts(attempts))
         .timeout_config(
             TimeoutConfig::builder()
                 .operation_timeout(Duration::from_secs(3))
@@ -1276,6 +1281,106 @@ async fn put_and_head_retain_explicit_metadata() {
     assert_eq!(object.etag, "\"head\"");
     assert_eq!(object.metadata["custom"], "escaped%25");
     assert_eq!(task.join().unwrap().method, "HEAD");
+}
+
+fn retried_put_server(size: usize) -> (S3, JoinHandle<Vec<Captured>>) {
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let store = retrying_backend(format!("http://{}", server.server_addr()), 2);
+    let task = std::thread::spawn(move || {
+        let mut puts = Vec::new();
+        loop {
+            let mut request = server
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .expect("filesystem did not finish its checked upload");
+            match request.method().as_str() {
+                "PUT" => {
+                    puts.push(capture(&mut request));
+                    let response = if puts.len() == 1 {
+                        Response::from_string("<Error><Code>ServiceUnavailable</Code></Error>")
+                            .with_status_code(503)
+                    } else {
+                        Response::from_data(Vec::<u8>::new())
+                            .with_header(Header::from_bytes("ETag", "\"committed\"").unwrap())
+                    };
+                    request.respond(response).unwrap();
+                }
+                "HEAD" if puts.len() == 2 => {
+                    assert_eq!(request.url(), "/bucket/prefix/new");
+                    request
+                        .respond(
+                            Response::new(
+                                StatusCode(200),
+                                vec![Header::from_bytes("ETag", "\"committed\"").unwrap()],
+                                Cursor::new(Vec::<u8>::new()),
+                                Some(size),
+                                None,
+                            )
+                            .with_chunked_threshold(usize::MAX),
+                        )
+                        .unwrap();
+                    return puts;
+                }
+                "HEAD" => request.respond(Response::empty(404)).unwrap(),
+                "GET" => request
+                    .respond(Response::from_string(
+                        "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>",
+                    ))
+                    .unwrap(),
+                method => panic!("unexpected request: {method}"),
+            }
+        }
+    });
+    (store, task)
+}
+
+#[tokio::test]
+async fn contiguous_dirty_put_retries_exact_bytes_with_signed_checksum_headers() {
+    // SHA-256 values independently calculated with Python hashlib.sha256.
+    for (payload, sha256) in [
+        (
+            b"1".to_vec(),
+            "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+        ),
+        (
+            b"123456789".to_vec(),
+            "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+        ),
+        (
+            vec![0xa5; 1024 * 1024],
+            "16c7f1d8a38b4b84560e558ab03b13c82e2ff374d87eaacb4df22f03604e7a4f",
+        ),
+    ] {
+        let size = payload.len();
+        let (store, task) = retried_put_server(size);
+        let fs = filesystem(store);
+        let node = fs
+            .create(1, "new", libc::S_IFREG | 0o600, None, 0)
+            .await
+            .unwrap();
+        fs.write(node.ino, 0, &payload).await.unwrap();
+        fs.fsync(node.ino).await.unwrap();
+        assert_eq!(node.attr().size, size as u64);
+        let puts = task.join().unwrap();
+        assert_eq!(puts.len(), 2);
+        for put in puts {
+            assert_eq!(put.url, "/bucket/prefix/new?x-id=PutObject");
+            assert_eq!(put.headers["content-length"], size.to_string());
+            assert_eq!(put.body, payload);
+            let crc = base64::engine::general_purpose::STANDARD
+                .encode(crc32fast::hash(&payload).to_be_bytes());
+            if size == 9 {
+                // The independent CRC-32/ISO-HDLC check vector is 0xcbf43926.
+                assert_eq!(crc, "y/Q5Jg==");
+            }
+            assert_eq!(put.headers["x-amz-checksum-crc32"], crc);
+            assert!(!put.headers.contains_key("x-amz-trailer"));
+            assert!(!put.headers.contains_key("content-encoding"));
+            assert!(put.headers["authorization"].starts_with("AWS4-HMAC-SHA256 "));
+            assert!(put.headers["authorization"].contains(";x-amz-checksum-crc32;"));
+            assert_eq!(put.headers["x-amz-content-sha256"], sha256);
+        }
+    }
 }
 
 fn listing_server(responses: Vec<(u16, Vec<u8>, bool)>) -> (S3, JoinHandle<Vec<Captured>>) {

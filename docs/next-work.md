@@ -166,6 +166,16 @@ path and writer wire/ownership costs next. Duplicate missing-name writer probes
 remain visible, but negative-cache policy, checksum/signing and post-commit
 verification must not be bypassed simply to improve the comparison.
 
+**Writer body correction:** a filesystem/S3 retry regression first sends 302 HTTP
+body bytes for nine dirty bytes. Reuse the already charged contiguous extent
+through supported known-body APIs, keeping its byte charge and upload activity
+until the last retry/frame owner drops. Exact payload/checksum/signing/HEAD tests
+and deliberate lifetime faults verify the correction; short mounted tracing
+confirms both 1 MiB writer PUTs use exact Content-Length. Sparse/composed/remote
+streaming, byte limits and negative-cache policy remain unchanged. The frozen
+comparative control is still pending; wire/allocation work alone is not a speed
+or whole-filesystem memory claim.
+
 ## 3. Resource and observer effects still qualify performance claims
 
 **Confirmed:** the earlier parent ceiling was only 8 CPU while daemon/client and

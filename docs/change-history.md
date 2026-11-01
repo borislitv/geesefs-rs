@@ -4,6 +4,25 @@ This is the concise engineering context for the experimental Linux/S3 rewrite.
 Detailed results and operational logs stay outside tracked source files.
 Overall compatibility and comparative performance remain **UNACCEPTED**.
 
+## Reusing owned contiguous upload bytes, 2026-11-01
+
+- A real filesystem create/write/fsync/retry regression first sends 302 HTTP body
+  bytes for nine dirty bytes. The generic streaming adapter forces checksum
+  trailers and aws-chunked encoding even when one charged extent covers the body.
+- Reuse supported bytes/Smithy known-body APIs for covered ranges up to 1 MiB.
+  Retain the original dirty allocation and upload activity through the last retry
+  or transport byte owner. Sparse/composed/remote ranges remain bounded streams;
+  signing, checksum policy, limits and post-commit HEAD are unchanged.
+- Wire tests check 1/9/1,048,576-byte bodies, independent CRC32/SHA256, signed
+  checksum headers, retry after 503 and verified completion. Cancellation/truncate
+  ownership tests reject deliberately lost activity and replaced byte charges;
+  multipart tests check a nonzero offset into a split dirty backing.
+- Both allocator suites pass 255 Rust cases; available matching release and
+  instrumented native contracts pass. A separate short checked mounted trace
+  observes exact 1,048,576-byte Content-Length for both writer PUTs. This proves
+  use of the new path, not sustained speed. Whole-file CRAP and surviving mutation
+  sites remain open; a new frozen four-binary paced comparison is pending.
+
 ## Backend-aligned directory batches, 2026-11-01
 
 - The bounded FUSE cursor consumed 128 names from each standard S3 page of up to

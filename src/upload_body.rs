@@ -18,6 +18,15 @@ use std::{
 
 pub const CHUNK_SIZE: usize = 1024 * 1024;
 type Pending = Pin<Box<dyn Future<Output = Result<Block>> + Send>>;
+struct OwnedUpload {
+    block: Block,
+    _lane: Budget,
+}
+impl AsRef<[u8]> for OwnedUpload {
+    fn as_ref(&self) -> &[u8] {
+        self.block.as_slice()
+    }
+}
 struct UploadBody {
     store: Arc<dyn Store>,
     snapshot: Arc<Snapshot>,
@@ -99,6 +108,20 @@ pub fn stream_snapshot(
     length: u64,
     lane: &Budget,
 ) -> ByteStream {
+    let end = start + length;
+    if length > 0
+        && length <= CHUNK_SIZE as u64
+        && let Some((&offset, extent)) = snapshot.extents.range(..=start).next_back()
+        && end <= extent.end
+    {
+        let left = extent.data_offset + (start - offset) as usize;
+        // Known bytes let the SDK sign checksum headers without aws-chunked
+        // trailers. Every retry/frame clone retains both charge and activity.
+        return ByteStream::from(Bytes::from_owner(OwnedUpload {
+            block: extent.data.slice(left..left + length as usize),
+            _lane: lane.clone(),
+        }));
+    }
     let (store, lane) = (store.clone(), lane.clone());
     ByteStream::new(SdkBody::retryable(move || {
         SdkBody::from_body_1_x(UploadBody {
@@ -106,7 +129,7 @@ pub fn stream_snapshot(
             snapshot: snapshot.clone(),
             lane: lane.clone(),
             offset: start,
-            end: start + length,
+            end,
             pending: Mutex::new(None),
         })
     }))

@@ -56,6 +56,8 @@ pub struct MemoryStore {
     pub put_calls: AtomicUsize,
     pub upload_part_sizes: Mutex<Vec<(i32, u64)>>,
     pub max_upload_frame: AtomicUsize,
+    pub retain_put_body: AtomicBool,
+    pub retained_put_body: Mutex<Option<aws_smithy_types::body::SdkBody>>,
     pub virtual_size: AtomicU64,
     pub copied_ranges: Mutex<Vec<std::ops::RangeInclusive<u64>>>,
     pub part_starts: AtomicUsize,
@@ -357,6 +359,11 @@ impl Store for MemoryStore {
         metadata: HashMap<String, String>,
     ) -> Result<String> {
         self.put_calls.fetch_add(1, Ordering::Relaxed);
+        if self.retain_put_body.swap(false, Ordering::Relaxed) {
+            let retryable = body.into_inner();
+            *self.retained_put_body.lock().unwrap() = Some(retryable.try_clone().unwrap());
+            body = ByteStream::new(retryable);
+        }
         let mut bytes = Vec::new();
         while let Some(frame) = body
             .try_next()

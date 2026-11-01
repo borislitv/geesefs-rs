@@ -157,6 +157,14 @@ semaphores bound work. `src/upload_body.rs` builds retryable SDK bodies from
 Output plus conditional-GET scratch is admitted atomically in the flush lane;
 emitted frames retain their charge through transport ownership.
 
+When one dirty extent already covers an upload range of at most 1 MiB, expose its
+immutable charged view through `Bytes::from_owner` instead of materializing a
+second frame. The byte owner also retains upload activity through retries,
+cancellation and retained transport bytes. The SDK's known-body path signs a
+checksum header without aws-chunked encoding. Sparse, composed and remote ranges
+still use bounded streaming; checksum policy and post-commit verification remain
+unchanged. A short final multipart range respects the extent's backing offset.
+
 Cancellation aborts/drains multipart tasks and retains the admission token until
 owned cleanup completes. Backend cleanup is drained before runtime teardown.
 FUSE destroy closes request admission, waits for active jobs under a shutdown

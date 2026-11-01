@@ -246,3 +246,71 @@ async fn cancelled_and_failed_uploads_release_activity_without_losing_dirty_data
         assert_eq!(fs.effective_budgets().flush_used_bytes, 0);
     }
 }
+
+async fn retained_cancelled_put(
+    store: &Arc<MemoryStore>,
+    fs: &Arc<Filesystem>,
+) -> aws_smithy_types::body::SdkBody {
+    let node = fs
+        .create(1, "written", libc::S_IFREG | 0o644, None, 0)
+        .await
+        .unwrap();
+    fs.write(node.ino, 0, b"retained").await.unwrap();
+    store.retain_put_body.store(true, Ordering::Relaxed);
+    let (entered, release) = store.pause_put();
+    let flushing = fs.clone();
+    let task = tokio::spawn(async move { flushing.fsync(node.ino).await });
+    tokio::time::timeout(Duration::from_secs(5), entered)
+        .await
+        .unwrap()
+        .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    drop(release);
+    assert!(!store.objects.lock().unwrap().contains_key("written"));
+    let ino = fs.lookup(1, "written").await.unwrap().ino;
+    fs.truncate(ino, 0).unwrap();
+    store.retained_put_body.lock().unwrap().take().unwrap()
+}
+
+#[tokio::test]
+async fn retained_retry_bytes_keep_original_dirty_charge_after_cancel_and_truncate() {
+    let store = MemoryStore::new();
+    let fs = store.filesystem(16);
+    let body = retained_cancelled_put(&store, &fs).await;
+    assert_eq!(fs.effective_budgets().data_used_bytes, 8);
+    let retry = body.try_clone().unwrap();
+    drop(body);
+    let bytes = aws_sdk_s3::primitives::ByteStream::new(retry)
+        .collect()
+        .await
+        .unwrap()
+        .into_bytes();
+    assert_eq!(bytes, b"retained"[..]);
+    assert_eq!(fs.effective_budgets().data_used_bytes, 8);
+    assert_eq!(fs.effective_budgets().flush_used_bytes, 0);
+    drop(bytes);
+    assert_eq!(fs.effective_budgets().data_used_bytes, 0);
+}
+
+#[tokio::test]
+async fn retained_retry_bytes_exclude_cache_loans_until_the_last_owner_drops() {
+    let (store, fs, expected) = fixture();
+    let ino = fs.lookup(1, "file").await.unwrap().ino;
+    let body = retained_cancelled_put(&store, &fs).await;
+    let bytes = aws_sdk_s3::primitives::ByteStream::new(body)
+        .collect()
+        .await
+        .unwrap()
+        .into_bytes();
+    assert_eq!(bytes, b"retained"[..]);
+    revisit(&fs, ino, &expected).await;
+    assert_eq!(
+        fs.effective_budgets().flush_used_bytes,
+        0,
+        "retained upload bytes must keep cache lending disabled after caller cancellation"
+    );
+    drop(bytes);
+    revisit(&fs, ino, &expected).await;
+    assert!(fs.effective_budgets().flush_used_bytes > 0);
+}

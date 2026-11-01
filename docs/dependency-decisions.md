@@ -105,6 +105,17 @@ and measured whole-filesystem acceptance remain separate gates.
   whole-part buffering. A narrow exact-length charged adapter is application
   materialization; HTTP/retries/checksums stay library-owned. crc32fast independently
   validates test wire trailers.
+- For an upload range already covered by one charged dirty extent, use bytes
+  1.12.1's supported `Bytes::from_owner` and Smithy 1.9.0's known-bytes body rather
+  than materializing another streaming frame. Keep the original block and upload
+  activity alive through every byte/body clone; retain the 1 MiB frame bound.
+  AWS SDK S3 1.155.0's checksum interceptor then signs a checksum header instead
+  of selecting aws-chunked trailers. Sparse/composed/remote ranges still stream;
+  checksum policy, retries, signing and post-commit HEAD remain library-owned.
+  [SDK #1349](https://github.com/awslabs/aws-sdk-rust/issues/1349) is a broader
+  performance report, not proof of a local transport bug; Bedrock/custom-client
+  [#1287](https://github.com/awslabs/aws-sdk-rust/issues/1287) does not justify
+  disabling S3 stalled-stream protection. No transport fork or new crate is needed.
 
 ## Investigation boundary
 

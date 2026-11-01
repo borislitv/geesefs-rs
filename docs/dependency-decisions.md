@@ -40,6 +40,10 @@ dependency: io_uring has credible small-core test configurations, but no candida
 has passed this filesystem's contracts or measured joint resource gate. Prefer
 an existing supported transport over local protocol/unsafe code. A few workers
 do not by themselves shrink possible-CPU queues or per-entry payload allocation.
+The operator excludes forks of shared libraries and prefers released upstream
+versions even at a modest performance cost (2026-11-01). The Skory fuser stack is
+therefore rejected; unreleased upstream fuse-backend-rs `fusedev-uring` is watched,
+not adopted. Use supported fuser 0.18.0 `n_threads`/`clone_fd` for transport work.
 
 The [metadata expiry diagnosis](metadata-expiry-diagnosis.md) uses standalone
 [TShark 4.6.4](https://www.wireshark.org/docs/man-pages/tshark.html) for TCP/HTTP

@@ -347,87 +347,72 @@ the documentation, verify the existing draft PR and its footer link, and report
 actual scope and remaining gaps in Tracker in Russian. Do not convert a
 reboot-required marker or package/build readiness into runtime acceptance.
 
-## Plans A-D with gates after the native smoke tests
+## Upstream-first review of all plans (2026-11-01)
 
-Each plan has an entry gate and a kill criterion. Plans are not exclusive: B and C
-run on the retained classic transport and do not wait for A. All comparisons stay
-same-kernel (7.3.1), full guest topology, local four-CPU placement applied equally
-to every implementation, rotated repetitions, no profiler during timing, and the
-unchanged workload/TTL/budget/signing/checksum/post-commit HEAD contract.
+Operator constraints added for this review: avoid forks of shared libraries and
+prefer released upstream libraries even at a modest performance cost. The
+[ticket](https://st.yandex-team.ru/MIRROR-188719) targets Kubernetes readers and
+writers for Mirror, with a long read-only run on real data still outstanding.
+Plan A had started (gate A1 was being located); it is stopped and nothing from
+it was changed. Upstream state was checked on 2026-11-01:
 
-### Plan A: FUSE-over-io_uring through a reused adapter
+| Source | State | Consequence |
+| --- | --- | --- |
+| fuser [#380](https://github.com/cberner/fuser/issues/380) | Open; transport exists only as the Skory fork PR stack; upstream accepts PRs only from collaborators. Latest crate 0.18.0, no ring transport. | Fork excluded by the new constraint. |
+| fuse-backend-rs [#247](https://github.com/cloud-hypervisor/fuse-backend-rs/pull/247) | Upstream (cloud-hypervisor, Apache-2.0 AND BSD-3-Clause) merged an experimental opt-in `fusedev-uring` transport on 2026-09-01; fixes #276/#280/#285 merged; 7.3 pools [#281](https://github.com/cloud-hypervisor/fuse-backend-rs/pull/281), zero-copy #282 and worker-failure #284 open. Released 0.14.0 (2026-02-26) predates it. | The only non-fork Rust path, but unreleased and a different filesystem API than fuser: adopting it replaces fuser and rewrites `src/fuse.rs`; notification support must be verified. |
+| fractal-fuse 0.6.1, fuser-iouring 0.1.2 | Released, small; compio runtime with eager `MAP_POPULATE` payloads; prototype missing fsync/flush/release. | Not suitable as a fuser replacement. |
+| libfuse | Released 3.18.3 predates bufpool PR1640; no maintained Rust binding to the ring loop. | C lab only; no Rust integration path. |
+| Linux 7.3 | `nr_queues = num_possible_cpus()`, all qids required; patches for fewer queues could not be checked (lore behind bot protection). | Queue memory scales with node possible CPUs. |
+| containerd [#9320](https://github.com/containerd/containerd/pull/9320), moby [#46762](https://github.com/moby/moby/pull/46762) | RuntimeDefault/default seccomp profiles block `io_uring_*` since 2023-11. | Pods need a seccomp exception plus node `fuse.enable_uring=1`, kernel >= 6.14 (7.3 for pools) and `kernel.io_uring_disabled=0`. |
+| fuser 0.18.0 | `Config::n_threads`/`clone_fd` supported; callbacks take `&self`; `ReplyOpen::open_backing` passthrough and writeback capability exposed through safe APIs. | Plans B and D need no new dependency. |
 
-1. Gate: quantify the transport share. From the retained calibrated perf/HTTP
-   profiles and a new cache-hit metadata and cached 4 KiB read run on 7.3.1,
-   attribute daemon CPU to /dev/fuse read/writev plus fuser dispatch versus
-   application work. Proceed only if that share is at least 10% of daemon CPU on
-   the cache-hit workloads; otherwise record the number and stop A.
-2. Quantify the memory floor on the C lab without patching: repeat the pool
-   control with `FUSE_URING_QUEUE_DEPTH=2` and `4` and `-o max_write=131072` /
-   `262144`. Kernel minimum payload is `max(8192, max_write, max_pages*PAGE_SIZE)`
-   (libfuse issue 1281), so 256 queues x depth 2 x 128 KiB is 64 MiB. Record RSS,
-   registration counts and the 14 checks per configuration.
-3. Prove routing, not only bytes: count requests per qid with kernel FUSE/io_uring
-   tracepoints (or the daemon's own per-queue counters) under readers pinned to
-   CPUs outside the daemon cpuset. Keep the 90 s/strace diagnostic separate from
-   any timing run.
-4. Adapter selection stays reuse-first and `unsafe_code = "forbid"` for this
-   package: the Skory fuser stack (unmerged; the design maps `MAP_NORESERVE`
-   rings, shares queues across `n_threads`, keeps a /dev/fuse reader for
-   INIT/FORGET/INTERRUPT/notifications, ends the session on registration failure)
-   is the only candidate with the required contracts. It is not on crates.io; the
-   public-source audit admits only the crates.io registry, so using a pinned Git
-   fork requires an explicit operator exception recorded in
-   [dependency decisions](dependency-decisions.md). Without it, A waits for an
-   upstream fuser release.
-5. If authorized: integrate behind a cargo feature and `Config::io_uring`, prove
-   full bytes, fresh modes/generations, fsync failure/recovery, cancellation and
-   unmount with entries held, mmap, delivered FORGET/PLUS references, notifications
-   and reply/write buffer ownership through completion. Transport threads keep
-   their own affinity, separate from Tokio workers.
-6. Kill criterion: no reproducible win in at least three of four rotated pairs on
-   cache-hit metadata ops/s, cached 4 KiB read p99 and daemon CPU per operation,
-   with peak/late RSS and cgroup memory not worse than the classic control.
+### Verdicts
 
-### Plan B: bounded multi-loop classic transport and dispatch cost
+- **A, FUSE-over-io_uring: stop integration; move to an upstream watch list.**
+  No released non-fork Rust transport fits the current fuser stack. The best
+  upstream candidate would replace the FUSE crate. Deployment also needs
+  node-wide kernel/module/seccomp changes outside this repository. The benefit
+  ceiling is cache-hit small requests (published +10-25% on in-memory
+  filesystems), not the S3-bound random-read and writer gaps. Queue memory scales
+  with node possible CPUs. Re-entry requires all of: a released crate with the
+  transport and notifications (fuser, or fuse-backend-rs >= 0.15 with
+  `fusedev-uring`), operator-confirmed node kernel/parameter/seccomp policy, and a
+  measured transport share >= 10% of daemon CPU on cache-hit workloads after B.
+  The Skory fork is rejected under the new constraint. The native C results stay
+  as evidence; no further lab work is planned.
+- **B, classic transport through supported fuser APIs: promote to the only
+  transport plan.** Try `n_threads` 2/4 with `clone_fd` (configuration only) and
+  synchronous cache-hit replies without a Tokio handoff (application code).
+  Re-check negotiated `max_write`/`max_readahead` through `KernelConfig`. Add
+  concurrency regressions for FORGET/LOOKUP, notification and unmount under
+  several loops. fuser #272 is open and #704 fixed a test-only stats race. The
+  cache-hit transport share (former gate A1) is measured in the same run to decide
+  A's re-entry.
+- **C, S3 request path: primary acceptance work.** Bounded prefetch for random
+  reads, necessary versus avoidable writer RPCs, and owners of late memory growth.
+  These are the measured gaps; they use the released SDK/Tokio and fit the
+  no-fork rule as recorded in dependency decisions.
+- **D, passthrough/writeback: remains deferred.** Supported by fuser 0.18.0 and
+  upstream kernels, but changes disk-cache/coherence/durability contracts the
+  operator deferred, and passthrough needs `CAP_SYS_ADMIN`. A VM with
+  possible == online CPUs is no longer needed because A has no lab follow-up.
+- **E, missing from the earlier plans: ticket acceptance item 4.** A long
+  correctness-checked read-only Kubernetes run on real `mirror/mirrors` with
+  varied file sizes and listings, plus actual-service IAM/SSE checks. It requires
+  operator authorization and cluster access; it cannot be replaced by VM results.
 
-1. Use the supported fuser 0.18.0 APIs the daemon does not use today:
-   `Config::n_threads` 2 and 4 with `Config::clone_fd` (`FUSE_DEV_IOC_CLONE`,
-   Linux 4.5+). Current `main.rs` runs one loop without clone_fd.
-2. Measure the fuser-thread to Tokio handoff per request on cache hits (task spawn,
-   admission permit, channel) and reply synchronously from the RAM cache where the
-   contract allows, keeping admission/backpressure for misses. This is the most
-   likely source of the cache-hit metadata gap and needs no kernel change.
-3. Re-check negotiated `max_write`/`max_readahead`/`FUSE_MAX_PAGES` on 7.3.1 so
-   sequential reads use fewer, larger requests; keep the bounded buffer budget.
-4. Kill criterion: same as A6. If B wins, A's gate (step 1) must be re-measured
-   on top of B before A proceeds.
+### Order and gates
 
-### Plan C: S3 request path for the random-read and writer losses
+1. B configuration control together with the cache-hit transport-share profile
+   (one rotated same-kernel series; kill if no win in three of four pairs or worse
+   peak/late memory).
+2. C attribution and corrections under the existing rejection rules.
+3. E once authorized; record node kernel, CPUs, seccomp and FUSE settings there,
+   which also answers A's deployment precondition.
+4. A only on all re-entry triggers. Upstream releases are re-checked at each
+   checkpoint instead of building a local transport.
 
-1. Random read: compare the Go readahead/prefetch heuristics with ours on the
-   retained traces; test a bounded prefetch window for detected random patterns,
-   and connection reuse/in-flight limits, with correctness-equivalent metadata.
-2. Writer: separate necessary checks (create validation, post-commit HEAD) from
-   avoidable per-actor HEAD/LIST cost using the retained RPC trace; remove only
-   requests whose absence keeps the proven contracts.
-3. Long-lived memory: attribute the v9/v10 late allocation growth to owners
-   (SDK connection pool, retained buffers, cache index) before any allocator
-   or budget change.
-4. Kill criterion: any pair that loses throughput/p99 twice or raises late RSS in
-   all repetitions is rejected, as for the earlier trials.
-
-### Plan D: deferred architecture options requiring operator approval
-
-- FUSE passthrough (Linux 6.9+) with a disk-backed cache, and kernel writeback
-  cache for writers, are deferred by the operator and change durability/coherence
-  semantics. They are listed as fallbacks only; no work starts without explicit
-  approval and a written contract for fsync/visibility behavior.
-- If libfuse-style eager queue memory must be tested at bounded size, the correct
-  lever is a disposable VM whose possible CPU count equals its online count, not a
-  guest `nr_cpus`/`maxcpus` limit or a cpuset.
-
-Resume the independent [remaining priorities](next-work.md) alongside these plans.
+Resume the independent [remaining priorities](next-work.md) within C and E.
 Neither a boot, standalone C mount nor a microbenchmark closes the complete
 Rust/S3 acceptance gate or authorizes deployment.
 

@@ -1,5 +1,9 @@
 # FUSE io_uring assessment, including small-core configurations — 2026-11-01
 
+Update 2026-11-01: integration is stopped under the upstream-first rule; see the
+[plan review](pr-context.md#upstream-first-review-of-all-plans-2026-11-01). The
+original decision follows.
+
 Decision: worth a bounded experiment, especially for cache-hit metadata/small I/O
 and concurrent request dispatch. It is not an established speedup for this S3
 filesystem. The operator explicitly permits a small CPU allocation; large-core
@@ -61,11 +65,16 @@ Reuse candidates inspected before any custom transport:
 | --- | --- |
 | [fuser issue 380 / Skory stack](https://github.com/cberner/fuser/issues/380) | MIT, closest API-compatible transport proposal, with a [transport benchmark](https://github.com/Skory/fuser/pull/8) at `0104570c50c45fc2065b64226b67735d7b032b19`. Still a contributor fork/PR stack, not merged upstream support. Its reported benchmark gains are not measurements of our filesystem. |
 | [fractal-fuse 0.6.1](https://github.com/fractalbits-labs/fractal-fuse/tree/d01dafc06a2ccd10701e62a19370b8d4c5e901b7) | Apache-2.0, actual io_uring transport; `with_worker_count` folds all qids over fewer compio workers. Different filesystem/runtime API from fuser/Tokio. Inspected transport still uses per-entry `MAP_POPULATE` payload buffers, not the new 7.3 pool commands. README buffer-registration wording does not prove 7.3 client-page zero-copy. |
+| [fuse-backend-rs](https://github.com/cloud-hypervisor/fuse-backend-rs/pull/247) | Upstream cloud-hypervisor crate (Apache-2.0 AND BSD-3-Clause) merged an experimental opt-in `fusedev-uring` transport on 2026-09-01; 7.3 pool/zero-copy PRs remain open and released 0.14.0 predates it. Not a fork, but a different filesystem API that would replace fuser. Re-check at its next release. |
 | [fuser-iouring](https://github.com/sdslabs/fuser-iouring/tree/d136eabee46e243fd62e41d4cb48ed2f5581df22) | Apache-2.0 prototype; the inspected public trait lacks our required fsync/flush/release contracts. Not a drop-in reader/writer replacement. |
 | [libfuse](https://github.com/libfuse/libfuse/releases/tag/fuse-3.18.3) | Established C transport; published 3.18.3 predates the [bufpool merge PR1640](https://github.com/libfuse/libfuse/pull/1640), merged 2026-09-29 after superseding unmerged PR1593. Reusing newer upstream is preferable to a new protocol implementation, but this requires a different binding/adapter; merely enabling fuser's libfuse mount feature does not use that event loop. |
 
 Keep local `unsafe_code = "forbid"`; a maintained dependency's safe public API is
-the reuse boundary. No candidate has yet passed our full owned-reply, write,
+the reuse boundary. Per the operator on 2026-11-01, forks of shared libraries are
+excluded and released upstream versions are preferred even at a modest
+performance cost; integration is stopped until a released transport exists (see
+the [plan review](pr-context.md#upstream-first-review-of-all-plans-2026-11-01)).
+No candidate has yet passed our full owned-reply, write,
 cancel/unmount, mmap, READDIRPLUS reference and notification contracts.
 
 ## Small-core design: a useful option, not a verdict

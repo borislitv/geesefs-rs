@@ -22,6 +22,11 @@ Overall compatibility and comparative performance remain **UNACCEPTED**.
   7.0–13.3%, but some tails and memory metrics lose. This short source attribution
   is not repeated sustained mixed acceptance. A separate AUTO experiment is
   rejected: three throughput losses and four pooled-p99 losses in four pairs.
+- The [two-repetition mixed comparison](performance-directory-remainders.md)
+  verifies 1,440 phases and eight dataset generations with clean counters and
+  cleanup. Metadata improves against prior Rust in one repetition and loses in
+  the other; random throughput and cgroup CPU lose in both. Go-relative metadata,
+  writer, tails and process-memory gates remain unaccepted.
 
 ## Reusing owned contiguous upload bytes, 2026-11-01
 

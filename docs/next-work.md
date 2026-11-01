@@ -2,7 +2,7 @@
 
 Overall status remains **UNACCEPTED**. This is the current working inventory;
 it separates confirmed mechanisms from hypotheses. See the latest
-[latest measurement tables](performance-owned-uploads.md),
+[latest measurement tables](performance-directory-remainders.md),
 [architecture](architecture.md) and [comparison contract](performance.md).
 
 The latest directory remainder correction removes repeated validation/copies of
@@ -11,8 +11,12 @@ Its pressure regression fails before correction; stale-type and continuation
 mutants are rejected. Four short rotated metadata pairs improve throughput
 7.0–13.3% but retain tail and memory losses. The supported READDIRPLUS_AUTO
 experiment is rejected after adverse paired results. Repeated joint mixed
-comparison against both Go references remains required; earlier tables keep
-their original source and scope.
+comparison now verifies 1,440 phases across two repetitions with eight final
+full-byte/generation checks. Metadata improves against prior Rust in one
+repetition and loses in the other; random throughput and cgroup CPU lose in both.
+Metadata/writer and process-RSS acceptance against Go remain open. Attribute the
+metadata bursts and writer request amplification before another change; earlier
+tables retain their source and scope.
 
 The subsequent [native VM checkpoint](performance.md#native-vm-admissiondirectory-checkpoint--2026-10-31)
 attributes and corrects the admission and global-directory-invalidation mechanisms

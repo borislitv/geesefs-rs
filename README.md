@@ -37,6 +37,18 @@ rsync/nginx and failure probes cover the implemented subset; hardlink emulation,
 actual-service paths and whole-file CRAP remain open. Its joint performance is
 reported in the new checkpoint below. Older tables retain their binary/source scope.
 
+## Directory remainder checkpoint — 2026-11-01
+
+The subsequent source removes consumed-prefix validation/copies without extending
+metadata TTL or pinning inodes. Two rotated 300-second mixed repetitions verify
+1,440 phases and eight full-byte/generation checks. Metadata is 29,013/36,153 ops/s
+versus experimental Go 37,895/42,475; writer remains slower. Late Rust cgroup memory
+is 222.32/217.54 MiB versus Go 357.34/354.38, but daemon RSS is not a reproducible
+win and prior-Rust-relative random throughput and CPU lose in both repetitions.
+Both allocator suites pass 258 Rust cases and matching native client variants;
+whole-file quality and compatibility gates remain open. See the complete
+[rates, tails, CPU and process/cgroup memory tables](docs/performance-directory-remainders.md).
+
 ## Integrated metadata/handle checkpoint — 2026-11-01
 
 The frozen integrated release has 240 independently verified healthy cold/warm

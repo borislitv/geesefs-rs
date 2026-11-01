@@ -48,6 +48,11 @@ A subsequent [lookup-probe overlap experiment](docs/performance-lookup-probes.md
 is rejected: four writer pairs retain tail losses and higher daemon RSS in every
 repetition. Its runtime changes are discarded; observation-age source is retained.
 
+A [cached-observation reuse trial](docs/performance-cached-observations.md) also
+removes a demonstrated redundant reconstruction but fails to establish a joint
+win in four short metadata pairs. It is discarded; current runtime remains
+`1b13033`. These short controls do not measure sustained expiry or beat Go.
+
 These measurements precede the subsequent user-metadata observation-age fix.
 Its native permission regression rejects restarting cached metadata TTL on a
 standard LIST; current allocator suites pass 260 Rust cases. Historical rates

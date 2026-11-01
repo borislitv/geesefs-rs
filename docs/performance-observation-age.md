@@ -3,6 +3,10 @@
 Status: **UNACCEPTED**. This source corrects cached user-metadata freshness; it
 does not demonstrate the required joint performance and compatibility win.
 
+The subsequent [cached-observation reuse experiment](performance-cached-observations.md)
+is discarded after short paired losses. Runtime/test inputs are restored exactly;
+the source scope and current mixed measurements on this page remain applicable.
+
 ## Correction and verification
 
 Standard LIST contains basic object fields, not arbitrary user metadata. A new

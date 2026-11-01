@@ -33,6 +33,13 @@ snapshot. Sampling overhead remains part of the observed server cost.
 
 ## Narrow application state
 
+The rejected [cached-observation trial](performance-cached-observations.md) uses
+Rust 1.99's supported [`Arc`/`Weak`](https://doc.rust-lang.org/1.99.0/std/sync/struct.Arc.html)
+ownership APIs rather than a custom metadata cache or SDK replacement. Strong
+references pin namespace eviction victims; weak identity plus a bounded original
+observation avoids that contract change. Correctness passes, but the short paired
+joint gate does not; neither trial representation nor dependency change is retained.
+
 Inode lifetime, namespace bindings, dirty generations, flush ownership, sparse
 overlays and fsync barriers are filesystem state, not replacement infrastructure.
 Existing Tokio permits/watch/JoinSet bound work, coalesce overlapping fills and

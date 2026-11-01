@@ -26,6 +26,15 @@ unchanged requests is enough for a joint win. Attribute request/setup and retain
 allocation lifetimes before another scheduling variant; the RSS cause is not yet
 proved. Do not skip validation or introduce a cached miss to remove measured work.
 
+The [cached directory observation trial](performance-cached-observations.md) then
+proves redundant inode reconstruction, but does not establish a joint win in four
+short cached-metadata pairs: throughput/p99 lose twice and late live allocation
+increases four times. The initial strong-reference version also prevents eviction;
+the weak-reference correction passes that regression. Both trial runtime/tests
+are discarded and all 85 v8 inputs are restored. Ordinary payload-cache hits do
+not create read snapshots. Isolate actual expiry/setup phases and allocation
+owners next; short cached traversal is not evidence about the 1,002-HEAD burst.
+
 The latest directory remainder correction removes repeated validation/copies of
 already-emitted page prefixes without changing freshness or inode ownership.
 Its pressure regression fails before correction; stale-type and continuation

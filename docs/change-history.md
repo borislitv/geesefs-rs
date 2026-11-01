@@ -4,6 +4,21 @@ This is the concise engineering context for the experimental Linux/S3 rewrite.
 Detailed results and operational logs stay outside tracked source files.
 Overall compatibility and comparative performance remain **UNACCEPTED**.
 
+## Rejected cached directory observation reuse, 2026-11-01
+
+- Public ownership regression exposes copying/decoding an already published inode
+  observation back into itself during directory publication. A strong-Arc trial
+  additionally fails namespace-pressure eviction; its corrected weak-reference
+  form preserves original observation age and the bounded fallback metadata.
+- Experimental 262-case allocator suites, matching native clients and three
+  selected mutations pass. Four short metadata pairs verify 8,000 phases and
+  eight final generations, but throughput/p99 each lose twice and late allocation
+  increases every time. These short cached traversals do not measure sustained
+  expiry. [All rates, tails, CPU, memory and limitations](performance-cached-observations.md).
+- Discard the experimental runtime/tests and verify exact restoration of all 85
+  v8 inputs. Retain `1b13033` and its 260-case source scope; overall acceptance
+  remains open. Attribute the actual expiry/request burst before another variant.
+
 ## Rejected lookup-probe overlap, 2026-11-01
 
 - Trace/source attribution separates kernel LOOKUP, create validation and mandatory

@@ -1,11 +1,12 @@
 # Performance acceptance: UNACCEPTED
 
-The latest [integrated metadata/handle checkpoint](performance-integrated.md)
-measures the combined freshness/PLUS/LIST, per-open history and clean-fsync fixes:
-240 independently verified healthy cold/warm records and 2,880 mixed phases.
-Metadata tails improve in sustained controls, but throughput, concurrent memory
-and equal-rate cgroup memory retain losses. Original controller failures and
-missing short-window measurements remain failures/gaps.
+The latest [observation-age checkpoint](performance-observation-age.md) verifies
+1,440 mixed phases and eight final generations for retained runtime `1b13033`.
+The [expiry diagnosis](metadata-expiry-diagnosis.md) then establishes a specific
+permission-freshness difference from Go, not a new runtime performance result.
+The earlier [integrated metadata/handle checkpoint](performance-integrated.md)
+retains its 240 healthy cold/warm records and 2,880 mixed phases, original
+controller failures and missing short-window measurements under its source scope.
 
 The earlier [native admission/directory checkpoint](#native-vm-admissiondirectory-checkpoint--2026-10-31)
 and cache-policy observations retain their original scopes. None establishes
@@ -16,6 +17,12 @@ and [change history](change-history.md) for corrections.
 
 ## Comparison contract
 
+- Require correctness-equivalent behavior for Go-relative superiority, per the
+  operator's 2026-11-01 clarification. Do not treat demonstrated stale permission
+  metadata or weaker durability as a target to reproduce. Preserve raw rates,
+  identify the exact semantic difference and separate required work from avoidable
+  overhead. This does not excuse unrelated losses or regressions against
+  correctness-equivalent Rust controls, and does not establish overall acceptance.
 - Pin public source revisions, compiler versions, executable hashes, dataset
   manifest/generations, kernel, mount arguments and workload order.
 - Compare both Go references: experimental

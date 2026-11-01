@@ -33,6 +33,14 @@ snapshot. Sampling overhead remains part of the observed server cost.
 
 ## Narrow application state
 
+The [Linux 7.3 assessment](fuse-io-uring-assessment.md) compares versioned kernel
+UAPI, installed fuser 0.18.0, the unmerged Skory transport stack, Apache-2.0
+fractal-fuse/fuser-iouring and released versus newer libfuse. Keep the current
+dependency: io_uring has credible small-core test configurations, but no candidate
+has passed this filesystem's contracts or measured joint resource gate. Prefer
+an existing supported transport over local protocol/unsafe code. A few workers
+do not by themselves shrink possible-CPU queues or per-entry payload allocation.
+
 The [metadata expiry diagnosis](metadata-expiry-diagnosis.md) uses standalone
 [TShark 4.6.4](https://www.wireshark.org/docs/man-pages/tshark.html) for TCP/HTTP
 reassembly instead of implementing a packet decoder. Public distro packages are

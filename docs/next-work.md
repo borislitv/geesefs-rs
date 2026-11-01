@@ -5,6 +5,32 @@ it separates confirmed mechanisms from hypotheses. See the
 [latest measurement tables](performance-observation-age.md),
 [architecture](architecture.md) and [comparison contract](performance.md).
 
+## Current priorities after the correctness-equivalence clarification
+
+The operator clarified on 2026-11-01 that Rust need not beat Go where Go is
+demonstrably logically weaker. The permission-expiry gap below makes that path's
+raw Go rates non-equivalent, not a target to reproduce by removing required work.
+Keep its numbers, but do not treat that difference alone as a performance failure.
+Historical checkpoint judgements below retain their original scope; this does not
+close unrelated performance, compatibility or quality gaps.
+
+1. Separate unavoidable metadata/durability checks from avoidable SDK setup,
+   duplicate create probes and scheduling costs. Writer rates remain 23.39/26.13
+   MiB/s in the current mixed control, but unequal validation must not be assumed
+   to be an equivalent Go speed target. Overlap alone already failed a joint gate.
+2. Attribute random-read and concurrent-read tails/CPU at equal byte/generation
+   behavior. Current random rates are 1.73/1.79 MiB/s versus experimental Go
+   1.91/1.97; no demonstrated permission-freshness difference excuses that result.
+3. Establish long-lived memory ownership and a stable operating envelope. Current
+   daemon late RSS is 157.26/159.03 MiB and live allocation 78.00/77.09 MiB; payload
+   admission is bounded, but it is not a whole-process RSS bound or a plateau proof.
+4. Complete actual-service and remaining Linux/S3 contracts, observer/source-bound
+   controls and whole-file quality checks. A safe unsupported LINK is preferable
+   to the reference's post-error alias mutation, but is not implemented LINK support.
+
+The [Linux 7.3 FUSE io_uring assessment](fuse-io-uring-assessment.md) evaluates
+transport and buffer-pool opportunities separately from these backend contracts.
+
 An expiry diagnostic exposed a correctness defect in the earlier measured
 sources: a new standard-LIST page renewed cached user metadata's observation time.
 The age regression and real permission-change regression fail before correction.

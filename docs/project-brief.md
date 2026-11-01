@@ -61,6 +61,14 @@ that Go cannot be optimized or that Rust automatically improves memory or speed.
    reproduction commands and explicit remaining gaps are committed to a task
    branch and delivered through a draft PR. Production acceptance is separate.
 
+Operator clarification, 2026-11-01: Go-relative superiority is required only for
+correctness-equivalent behavior. Where a reference is demonstrably logically
+weaker, such as missing a permission-only change at an unchanged content ETag,
+Rust need not outrun that weaker operation. Preserve raw rates and resource
+measurements, document the specific semantic difference and distinguish necessary
+work from avoidable overhead. Do not exempt unrelated payload, writer or memory
+losses without evidence, or claim a joint pass from this clarification alone.
+
 ## Working boundaries
 
 Use dedicated disposable fixtures for writes and failure injection. Existing

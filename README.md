@@ -8,6 +8,11 @@ The goal is preserved filesystem/S3 behavior with lower memory use and faster
 normal, sustained operation than both identified Go references. A language change,
 passing unit tests or one favorable workload does not satisfy that goal.
 
+Go comparisons require equivalent correctness. A reference's demonstrated stale
+metadata or weaker durability is not a speed target Rust must match by reproducing
+the gap. Raw results remain visible; unrelated losses and Rust non-regressions
+still require investigation.
+
 ## Development
 
 Use Rust 1.96.0 or newer with rustfmt/clippy and Python 3.12+ with dependencies
@@ -41,8 +46,9 @@ reported in the new checkpoint below. Older tables retain their binary/source sc
 
 The latest [observation-age checkpoint](docs/performance-observation-age.md)
 verifies another 1,440 mixed phases/eight generations after the permission-TTL
-correction. Metadata/writer throughput and process-memory gates still fail;
-all current rates, tails, CPU and memory components are published separately.
+correction. Raw metadata/writer rates are lower and process memory is not a
+reproducible win; the freshness diagnosis below qualifies metadata equivalence.
+All current rates, tails, CPU and memory components remain published separately.
 
 A subsequent [lookup-probe overlap experiment](docs/performance-lookup-probes.md)
 is rejected: four writer pairs retain tail losses and higher daemon RSS in every
@@ -58,6 +64,11 @@ now verifies 42 instrumented metadata phases and six native mutation probes.
 Both Go references miss a mode-only update at unchanged ETag after an equal TTL;
 all three pass a changed-ETag control. Lower request count is not equivalent
 permission freshness. Runtime and current mixed performance results stay unchanged.
+
+The [Linux 7.3 FUSE io_uring assessment](docs/fuse-io-uring-assessment.md) finds a
+credible small-core experiment, not an established S3 speedup. It distinguishes
+possible-CPU queues from worker count, new buffer pools from basic transport and
+kernel zero-copy from our SDK ownership path. Current fuser remains unchanged.
 
 These measurements precede the subsequent user-metadata observation-age fix.
 Its native permission regression rejects restarting cached metadata TTL on a

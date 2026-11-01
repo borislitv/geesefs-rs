@@ -37,6 +37,13 @@ The Rust implementation must use less memory and run faster than the Go
 reference on equivalent, reproducible workloads while preserving the required
 filesystem and S3 behavior. A language change alone does not satisfy this goal.
 
+The operator's 2026-11-01 clarification limits Go-relative speed/memory gates to
+correctness-equivalent behavior. Do not require Rust to beat a reference by
+reproducing demonstrated stale metadata, weaker durability or other logical gaps.
+Keep the raw measurements, identify the precise unequal contract and judge its
+necessary cost separately. This is not a blanket exemption for unrelated losses;
+equivalent-behavior comparisons and Rust-relative non-regressions still apply.
+
 - Fix datasets, object generations, machine/kernel, CPU quota, concurrency,
   cache budgets, working-set size and cold/warm state in paired comparisons.
 - Measure steady-state and peak RSS, allocator/heap use where available, total

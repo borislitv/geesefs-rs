@@ -4,6 +4,21 @@ This is the concise engineering context for the experimental Linux/S3 rewrite.
 Detailed results and operational logs stay outside tracked source files.
 Overall compatibility and comparative performance remain **UNACCEPTED**.
 
+## Correctness-equivalent gates and small-core io_uring assessment, 2026-11-01
+
+- Record the operator's clarification: Rust need not beat Go where Go is
+  demonstrably logically weaker. Preserve raw reference rates, identify the
+  unequal contract and retain unrelated performance/non-regression obligations.
+- Verify Linux 7.3/7.3.1 release dates and versioned FUSE code: the transport
+  predates 7.3; buffer pools, registered pools and per-open page-backed zero-copy
+  are the new opportunities. Installed fuser has constants, not a ring transport.
+- Inspect public reuse candidates and small-core queue/worker sizing. Fewer
+  possible vCPUs plus shallow queues are viable experiment parameters; CPU quota
+  or worker count alone does not reduce possible-CPU queue coverage. New pools
+  decouple parked entries from payload owners. Keep transport, pool and end-to-end
+  zero-copy claims separate; no kernel/runtime change or measured gain is claimed.
+  [Evidence, benefit assessment and comparison design](fuse-io-uring-assessment.md).
+
 ## Metadata expiry and reference freshness attribution, 2026-11-01
 
 - Reassemble bidirectional HTTP with maintained TShark and join calibrated 999 Hz

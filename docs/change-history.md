@@ -4,6 +4,27 @@ This is the concise engineering context for the experimental Linux/S3 rewrite.
 Detailed results and operational logs stay outside tracked source files.
 Overall compatibility and comparative performance remain **UNACCEPTED**.
 
+## Backend-aligned directory batches, 2026-11-01
+
+- The bounded FUSE cursor consumed 128 names from each standard S3 page of up to
+  1,000, then requested overlapping pages. An 8,192-name native traversal first
+  fails with 65 LIST calls instead of 10, including EOF.
+- Consume up to the supported backend-page limit while retaining the namespace
+  capacity bound. The cursor still resumes across smaller kernel frames; accurate
+  attributes, lookup ownership, small-capacity errors and cancellation remain
+  covered by all nine native directory cases.
+- Matching default/System suites and release/instrumented native clients pass.
+  A separate 30x10-second mixed control verifies 720 phases and four complete
+  full-byte/generation checks. Metadata throughput is 31,315 ops/s, versus 42,015/42,256
+  for experimental/packaged Go; pooled p99 is 0.03241 versus 0.02656/0.02799 ms.
+  The earlier retirement-only control measured 19,777 ops/s, but separate runs
+  on a shared host do not isolate the batch change's performance effect.
+- Rust late cgroup/file means remain 216.25/19.54 MiB versus Go 357.97/173.84
+  and 371.53/156.78 MiB; these are temporal means, not memory plateaus. Writer and
+  random-read losses remain. Experimental Go misses three offered-rate deadlines;
+  the other binaries miss none. Whole-file CRAP and broader compatibility remain
+  open; this single control does not pass the repeated joint acceptance gate.
+
 ## Closed-file kernel cache retirement, 2026-11-01
 
 - Owned-superblock page events and PFN-to-cgroup attribution show 256 MiB of

@@ -147,14 +147,24 @@ process-memory win. Metadata throughput19,777 ops/s and writer throughput24.20 M
 still lose to both Go references. Repetition, isolated workloads, observer controls
 and the full joint gate remain open; the earlier checkpoint is not overwritten.
 
-**Next confirmed amplification:** the FUSE cursor consumes at most128 names while
-standard S3 LIST asks for up to1000. An expired1024-name traversal therefore makes
-nine overlapping LIST requests. Align bounded consumption with the supported
-backend-page size, preserving the namespace limit, small-limit/error behavior,
-exact attributes and kernel-buffer continuation; prove the request reduction
-before measuring another frozen candidate. Duplicate missing-name writer probes
-remain visible, but negative-cache policy and post-commit verification must not be
-bypassed simply to improve the comparison.
+**Further confirmed amplification/correction:** the FUSE cursor consumed at most
+128 names while standard S3 LIST asked for up to 1,000. An expired 1,024-name
+traversal therefore made nine overlapping requests. Align bounded consumption
+with the supported backend-page size, preserving namespace capacity, exact types,
+small-limit/error behavior and kernel-buffer continuation. The native 8,192-name
+regression first fails on 65 LIST calls instead of 10, then passes alongside all
+nine directory contracts.
+
+**Subsequent outcome:** a new 30x10-second mixed control verifies 720 phases/four
+full-byte/generation checks. Rust metadata throughput is 31,315 ops/s versus Go
+42,015/42,256; pooled p99 is 0.03241 versus 0.02656/0.02799 ms. Late cgroup/file
+means are 216.25/19.54 MiB versus Go 357.97/173.84 and 371.53/156.78 MiB.
+Experimental Go misses three cycle deadlines; other implementations miss none.
+Shared-host ordering and one design do not establish repeatability or a plateau.
+Writer/random metrics and some tails still lose; inspect the warm metadata CPU
+path and writer wire/ownership costs next. Duplicate missing-name writer probes
+remain visible, but negative-cache policy, checksum/signing and post-commit
+verification must not be bypassed simply to improve the comparison.
 
 ## 3. Resource and observer effects still qualify performance claims
 

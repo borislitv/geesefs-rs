@@ -76,8 +76,8 @@ fn plus_pages_deliver_attributes_and_lookup_ownership_without_overlapping_lists(
         );
         assert_eq!(
             store.list_calls.load(Ordering::Relaxed),
-            65, // 64 bounded chunks plus EOF; no rescanning from the prefix start.
-            "small kernel reply frames must resume the same bounded backend page"
+            10, // Nine <=1000-name backend pages plus EOF, despite smaller FUSE frames.
+            "kernel frames must not split backend pages into overlapping LIST requests"
         );
         for name in &names {
             assert_eq!(std::fs::metadata(path.join(name)).unwrap().len(), 17);

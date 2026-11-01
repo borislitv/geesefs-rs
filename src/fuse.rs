@@ -354,9 +354,11 @@ impl Fuse {
                 let mut cursor = cursor.lock().await;
                 cursor.seek(offset);
                 if !cursor.dots(&fs, ino, offset, &mut reply).await? {
+                    // The cursor resumes a backend page across smaller kernel
+                    // frames; truncating it here causes overlapping S3 LISTs.
                     let limit = (fs.config.entry_limit as usize)
                         .saturating_sub(1)
-                        .clamp(1, 128);
+                        .clamp(1, crate::backend::extended_list::MAX_PAGE_ENTRIES);
                     while cursor.page(&fs, ino, offset, limit, &mut reply).await? {}
                 }
                 Ok::<(), Error>(())

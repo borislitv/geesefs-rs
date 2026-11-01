@@ -17,8 +17,8 @@ remain [project brief](project-brief.md) and [AGENTS.md](../AGENTS.md).
   documentation and test-environment preparation, not a new application runtime.
 - Retained runtime: `1b13033c3f161b9502c7a23870b645ca871ab2e3`.
   Release SHA256: `df24b6bdd42920b7989db2ed7c44855b9fc2bb1cf53292ee60ce023eb42138a8`.
-  All 85 frozen source/build/test inputs matched committed blobs at the preceding
-  checkpoint. Do not restore the rejected experimental runtime/test changes.
+  All 85 frozen source/build/test inputs and the binary still match after package
+  installation. Do not restore the rejected experimental runtime/test changes.
 - The retained verification scope is 260 Rust cases per allocator, 75 benchmark
   Python cases, ten native directory contracts and three matching native variants.
   These results belong to that runtime, not to an untested io_uring integration.
@@ -56,11 +56,13 @@ win. Keep raw measurements and distinguish required checks from avoidable cost.
   broader survivors. Positive LINK, full CLI/imported multipart layouts and
   actual-service IAM/SSE/signing/PATCH are not claimed complete.
 
-## Immediate task: install experiment prerequisites without rebooting
+## Completed task: install experiment prerequisites without rebooting
 
 The operator authorized installing the required packages, **without a reboot**.
-At this checkpoint installation has not started. Do not reboot, schedule a
-reboot, kexec, replace served mounts or modify production data/credentials.
+Installation and available no-reboot checks are complete. The system still runs
+`7.0.0-38-generic`, with unchanged boot identity and running parameters. Do not
+reboot, schedule a reboot, kexec, replace served mounts or modify production
+data/credentials. A 7.3 boot/runtime test requires separate authorization.
 
 ### Verified host and package plan
 
@@ -73,10 +75,11 @@ reboot, kexec, replace served mounts or modify production data/credentials.
 - Normal generic/HWE APT candidates are still 7.0, not the required 7.3 pool UAPI.
   [Canonical mainline 7.3.1 amd64](https://kernel.ubuntu.com/mainline/v7.3.1/amd64/)
   provides matching image/modules version `7.3.1-070301.202610301300`.
-- Install only `linux-image-unsigned-7.3.1-070301-generic`,
+- Installed only `linux-image-unsigned-7.3.1-070301-generic`,
   `linux-modules-7.3.1-070301-generic` and `liburing-dev=2.14-1`.
-  `liburing2=2.14-1` is already installed. The verified solver plan is three new
-  packages, zero upgrades and zero removals; repeat it immediately before install.
+  Both kernel packages have version `7.3.1-070301.202610301300`.
+  `liburing2=2.14-1` was already installed. The fresh solver and actual installation
+  both show three new packages, zero upgrades and zero removals.
 - Do not use the four-package headers wildcard. Mainline generic headers require
   unavailable `libssl4>=4.0.0`; no external module is being built and the userspace
   build succeeds without those headers. Do not mix distributions to satisfy it.
@@ -94,44 +97,66 @@ build failed for missing build dependencies/targets; neither a passed runtime te
 nor a FUSE runtime failure is established. Follow the
 [current Canonical instructions](https://canonical-kernel-docs.readthedocs-hosted.com/how-to/testing-verification/test-with-mainline-kernel/).
 
-### Userspace already proved locally
+Dracut created `/boot/initrd.img-7.3.1-070301-generic` (44,525,163 bytes). The matching
+vmlinuz, config, System.map, modules.dep and initrd contents are verified; package
+integrity, `dpkg --audit`, `apt-get check` and `grub-script-check` pass. Both normal
+7.0 kernels and their boot entries remain. Standard package hooks regenerated GRUB:
+its first/default entry now selects 7.3.1, with no pending one-shot selection.
+**The generated entries do not yet contain `fuse.enable_uring=1` or `nr_cpus=4`.**
+The existing cloud-image GRUB snippet supplies console arguments; use the effective
+generated entry when preparing an authorized test boot, not `/etc/default/grub`
+in isolation. No manually managed boot configuration was edited by this task.
+
+### Installed isolated userspace
 
 Pinned libfuse source `fe66006fbbe2ba32e8e1252df610a948b30c3f43` identifies as
 3.19.0-rc0 and includes the pool merge. Archive SHA256 is
 `995e04d9d439e12af1301041f15f0e1eb001a6bb78dacdf85a0f77602d5aebbb`.
-A private build against extracted Ubuntu liburing 2.14 packages successfully
-builds `example/hello_ll` and runs `--help`, using:
+The initial private-prefix build was followed by an installation against system
+liburing 2.14 at **`/opt/libfuse-3.19.0-rc0-fe66006`**. Its build uses:
 
 ```text
 meson setup <build> <source> --buildtype=release --prefix=<isolated-prefix> \
+  --libdir=lib --bindir=/usr/bin \
   -Dutils=false -Dtests=false -Dexamples=true -Denable-io-uring=true -Duseroot=false
-ninja -C <build> -j2 example/hello_ll
+ninja -C <build> -j2 example/hello_ll example/passthrough_ll example/notify_inval_inode
+meson install -C <build> --no-rebuild
 ```
 
 Check `HAVE_URING` in generated private `fuse_config.h`, not the version-only
-public `libfuse_config.h`. The initial wrong-header verifier failure is retained.
-Nothing has been installed system-wide. Keep system libfuse3 3.18.2-1 and helpers;
-use a separate versioned prefix for the experimental userspace. Existing perf
-7.0.14 must pass a recording smoke test on the eventual kernel before reuse.
+public `libfuse_config.h`; Meson emits the defined boolean without a numeric 1.
+Both checking mistakes remain in private receipts, not reclassified as library
+build failures. Every Meson install destination was verified inside the prefix;
+`--bindir=/usr/bin` selects the existing mount helper, with utils installation off.
+
+The unmodified upstream `hello_ll`, `passthrough_ll` and `notify_inval_inode`
+examples were then compiled against that installed API into its `bin/` directory.
+All three help checks and the hello version check pass. Relative
+`$ORIGIN/../lib` runpaths and ldd resolve the isolated libfuse and system liburing,
+without the ignored build tree. Source archive, licenses, config and provenance
+are in `share/libfuse-lab/`. System libfuse3 3.18.2-1 and mount-helper hashes are
+unchanged; no global loader path, helper or service was replaced.
+
+Existing perf 7.0.14 records and decodes a bounded child-only CPU smoke test
+(six samples) on the **current 7.0 kernel**; tcpdump is available. Repeat the perf
+recording smoke test after the future 7.3 boot. No example was mounted, no new
+Rust transport was selected and no 7.3 runtime/performance result is claimed.
 
 ### Execution checklist
 
-- [ ] Capture running kernel, boot identity/cmdline, installed package and boot
-  state; repeat signature/hash verification, package health and the exact solver
-  plan. Preflight currently has clean `dpkg --audit` / `apt-get check` and enough
-  root/boot space. Historical failed benchmark units are not package failures.
-- [ ] Install the three verified packages with finite deadlines, noninteractive
-  APT, process-local `NEEDRESTART_SUSPEND=1` and the verified shutdown inhibitor.
-  Do not perform a broad upgrade/autoremove, change running sysctls or reboot.
-- [ ] Build/install the pinned userspace into an isolated versioned prefix with
-  system liburing-dev; verify HAVE_URING, linkage, example help and profiling tools.
-- [ ] Verify package health, matching vmlinuz/config/System.map/initrd/modules.dep
-  and generated GRUB entries, retaining a normal-kernel recovery entry. Confirm
-  running kernel and boot identity are unchanged. A reboot-required marker is not
-  evidence that a reboot occurred or authorization to perform one.
-- [ ] Update this checkpoint, append the private action/reason log, commit/push
-  the documentation and update the existing draft PR. Report actual installation
-  scope and remaining boot/integration gaps in Tracker in Russian.
+- [x] Capture pre-install boot/package state; repeat signed hash/control checks,
+  package health, free-space checks and the exact three-package solver plan.
+- [x] Install with finite deadlines, noninteractive APT, process-local
+  `NEEDRESTART_SUSPEND=1` and shutdown inhibitor, without upgrades/removals/reboot.
+- [x] Install and verify the isolated pinned userspace, examples and profiling
+  tools, retaining system library/helper hashes and upstream source/licenses.
+- [x] Verify package integrity/health, boot artifacts, initrd, GRUB/recovery
+  entries and unchanged running kernel, boot identity, possible CPUs and sysctls.
+
+For each checkpoint delivery, append the private action/reason log, commit/push
+the documentation, verify the existing draft PR and its footer link, and report
+actual scope and remaining gaps in Tracker in Russian. Do not convert a
+reboot-required marker or package/build readiness into runtime acceptance.
 
 ## Subsequent work after an authorized test boot
 
@@ -170,7 +195,11 @@ use a separate versioned prefix for the experimental userspace. Existing perf
 Ignored evidence root: `benchmark-results/private/vm-20261031-integrated/`.
 Relevant groups are `candidate-v8`, `kernel73-research-v1`, `kernel73-reuse-v1`,
 `ubuntu-uring-prerequisites-v1`, `ubuntu-uring-kernel-plan-v1` and
-`ubuntu-uring-userspace-v1`; `actions.md` records actions/reasons. Raw sources,
+`ubuntu-uring-userspace-v1`. Completed installation receipts are in
+`ubuntu-uring-installed-v1`, `ubuntu-uring-userspace-installed-v1` and
+`ubuntu-uring-installation-checked-v1`; `actions.md` records actions/reasons.
+The bounded helpers are `install_uring_without_reboot.py`,
+`install_uring_userspace.py` and `verify_uring_installation.py`. Raw sources,
 commands, failures and hashes remain there; they are not public PR attachments.
 Use new output labels/directories: earlier receipts are immutable and helpers
 often use exclusive creation. Do not rerun an old label over an existing result.

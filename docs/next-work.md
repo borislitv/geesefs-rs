@@ -2,7 +2,7 @@
 
 Overall status remains **UNACCEPTED**. This is the current working inventory;
 it separates confirmed mechanisms from hypotheses. See the latest
-[measurement tables](performance-integrated.md),
+[latest measurement tables](performance-owned-uploads.md),
 [architecture](architecture.md) and [comparison contract](performance.md).
 
 The subsequent [native VM checkpoint](performance.md#native-vm-admissiondirectory-checkpoint--2026-10-31)
@@ -173,8 +173,19 @@ until the last retry/frame owner drops. Exact payload/checksum/signing/HEAD test
 and deliberate lifetime faults verify the correction; short mounted tracing
 confirms both 1 MiB writer PUTs use exact Content-Length. Sparse/composed/remote
 streaming, byte limits and negative-cache policy remain unchanged. The frozen
-comparative control is still pending; wire/allocation work alone is not a speed
-or whole-filesystem memory claim.
+comparative control verifies 720 phases/four full-byte-generation checks, without
+lateness or adverse quota/reclaim/OOM interval counters. Rust writer22.04 MiB/s
+still loses Go31.87/28.55, as do metadata27119 versus37422/36151 ops/s and some
+random/concurrent/tail metrics. Late cgroup221.96 MiB beats Go359.96/371.42, but
+daemon RSS157.38 MiB is essentially equal to experimental Go157.29. CPU119.49s
+beats Go444.41/658.81 but loses prior Rust114.04. See the full scoped
+[tables](performance-owned-uploads.md). This one shared-host design does not prove
+an upload speedup or memory plateau. Subsequent rotated writer-only attribution
+checks1,200 phases/eight final byte-generation checks with only upload_body.rs
+changed: throughput improves2.1-8.1% in all four pairs, with lower p50/p95/p99,
+daemon/cgroup CPU and sampled RSS. Some allocator/file/kernel components still
+lose. This supports the narrow correction, not full Go-relative acceptance;
+duplicate metadata probes and warm directory processing remain attribution work.
 
 ## 3. Resource and observer effects still qualify performance claims
 

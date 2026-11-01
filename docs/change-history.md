@@ -20,8 +20,10 @@ Overall compatibility and comparative performance remain **UNACCEPTED**.
 - Both allocator suites pass 255 Rust cases; available matching release and
   instrumented native contracts pass. A separate short checked mounted trace
   observes exact 1,048,576-byte Content-Length for both writer PUTs. This proves
-  use of the new path, not sustained speed. Whole-file CRAP and surviving mutation
-  sites remain open; a new frozen four-binary paced comparison is pending.
+  use of the new path, not sustained speed. The subsequent
+  [four-binary comparison](performance-owned-uploads.md) verifies 720 phases but
+  still loses metadata/writer/random throughput and some tails. Whole-file CRAP,
+  surviving mutation sites and repeated joint acceptance remain open.
 
 ## Backend-aligned directory batches, 2026-11-01
 

@@ -115,6 +115,120 @@ fn concurrent_receivers_preserve_lookup_read_write_and_unmount_bytes() {
 
 #[test]
 #[ignore = "requires an explicitly authorized Linux FUSE fixture"]
+fn a_contended_inode_read_does_not_block_unrelated_receiver_work() {
+    use std::{io::Read, os::unix::fs::MetadataExt, sync::mpsc};
+
+    let store = MemoryStore::new();
+    store.seed("slow", b"independent slow bytes");
+    store.seed("fast", b"independent fast bytes");
+    let mut config = MemoryStore::config(32);
+    config.read_only_direct_io = true;
+    config.mount_options.push("ro".into());
+    let fs = Filesystem::new(config, store).unwrap();
+    mounted(fs.clone(), |path| {
+        let mut slow = std::fs::File::open(path.join("slow")).unwrap();
+        let fast = path.join("fast");
+        std::fs::metadata(&fast).unwrap();
+        let node = fs.node(slow.metadata().unwrap().ino()).unwrap();
+        // Model a preempted owner of a real inode critical section. The unrelated
+        // xattr needs no inode/backend lock; it must still reach the receiver.
+        let guard = node.state.lock().unwrap();
+        std::thread::scope(|scope| {
+            let (thread_sender, thread_receiver) = mpsc::channel();
+            let reader = scope.spawn(move || {
+                thread_sender
+                    .send(std::fs::read_link("/proc/thread-self").unwrap())
+                    .unwrap();
+                let mut bytes = [0_u8; b"independent slow bytes".len()];
+                slow.read_exact(&mut bytes).unwrap();
+                assert_eq!(&bytes, b"independent slow bytes");
+            });
+            let thread = thread_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap();
+            let wchan = Path::new("/proc").join(thread).join("wchan");
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let queued = loop {
+                let state = std::fs::read_to_string(&wchan).unwrap_or_default();
+                if state.contains("request_wait") || state.contains("fuse") {
+                    break true;
+                }
+                if Instant::now() >= deadline {
+                    break false;
+                }
+                std::thread::yield_now();
+            };
+            let (sender, receiver) = mpsc::channel();
+            let probe = scope.spawn(move || {
+                let mut value = [0_u8; 128];
+                sender
+                    .send(
+                        rustix::fs::getxattr(&fast, "geesefs", &mut value[..])
+                            .map(|length| value[..length].to_vec()),
+                    )
+                    .unwrap();
+            });
+            let result = receiver.recv_timeout(Duration::from_secs(2));
+            drop(guard);
+            reader.join().unwrap();
+            probe.join().unwrap();
+            assert!(
+                queued,
+                "fixture must observe the slow FUSE request queued in the kernel"
+            );
+            assert_eq!(
+                result.unwrap().unwrap(),
+                env!("CARGO_PKG_VERSION").as_bytes()
+            );
+        });
+    });
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Linux FUSE fixture"]
+fn native_xattr_control_names_and_disabled_attributes_preserve_errors() {
+    use std::os::unix::ffi::OsStrExt;
+    for disabled in [false, true] {
+        let store = MemoryStore::new();
+        store.seed("file", b"unchanged bytes");
+        let mut config = MemoryStore::config(16);
+        config.disable_xattr = disabled;
+        let reserved = format!("user.{}", config.symlink_attr);
+        mounted(Filesystem::new(config, store.clone()).unwrap(), |path| {
+            let file = path.join("file");
+            let mut value = [0_u8; 128];
+            assert_eq!(
+                rustix::fs::getxattr(&file, "geesefs", &mut value[..0]).unwrap(),
+                env!("CARGO_PKG_VERSION").len()
+            );
+            assert_eq!(
+                rustix::fs::getxattr(&file, reserved.as_str(), &mut value[..]),
+                Err(rustix::io::Errno::NODATA)
+            );
+            assert_eq!(
+                rustix::fs::getxattr(
+                    &file,
+                    std::ffi::OsStr::from_bytes(b"user.\xff"),
+                    &mut value[..]
+                ),
+                Err(rustix::io::Errno::ILSEQ)
+            );
+            let expected = if disabled {
+                rustix::io::Errno::OPNOTSUPP
+            } else {
+                rustix::io::Errno::NODATA
+            };
+            assert_eq!(
+                rustix::fs::getxattr(&file, "user.missing", &mut value[..]),
+                Err(expected)
+            );
+        });
+        assert_eq!(store.bytes("file"), b"unchanged bytes");
+    }
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Linux FUSE fixture"]
 fn plus_pages_deliver_attributes_and_lookup_ownership_without_overlapping_lists() {
     let store = MemoryStore::new();
     for number in 0..8192 {

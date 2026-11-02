@@ -30,13 +30,17 @@ pub fn errno(error: Error) -> Errno {
         Error::Budget { .. } => Errno::ENOMEM,
         Error::Timeout(_) => Errno::ETIMEDOUT,
         Error::Cancelled => Errno::EINTR,
-        Error::Backend { code, .. } => match code.as_str() {
-            "NoSuchKey" | "NotFound" | "404" => Errno::ENOENT,
-            "AccessDenied" | "InvalidAccessKeyId" | "SignatureDoesNotMatch" => Errno::EACCES,
-            "PreconditionFailed" => Errno::ESTALE,
-            _ => Errno::EIO,
-        },
+        Error::Backend { code, .. } => backend_errno(&code),
         Error::InvalidResponse(_) => Errno::EIO,
+    }
+}
+
+fn backend_errno(code: &str) -> Errno {
+    match code {
+        "NoSuchKey" | "NotFound" | "404" => Errno::ENOENT,
+        "AccessDenied" | "InvalidAccessKeyId" | "SignatureDoesNotMatch" => Errno::EACCES,
+        "PreconditionFailed" => Errno::ESTALE,
+        _ => Errno::EIO,
     }
 }
 
@@ -275,6 +279,25 @@ impl Fuse {
             .clone()
             .try_acquire_owned()
             .map_err(|_| Error::Fs(libc::EMFILE))
+    }
+
+    fn allocate(
+        &self,
+        ino: INodeNo,
+        offset: u64,
+        length: u64,
+        mode: i32,
+    ) -> crate::error::Result<()> {
+        if mode != 0 && mode != libc::FALLOC_FL_KEEP_SIZE {
+            return Err(Error::Fs(libc::EOPNOTSUPP));
+        }
+        self.fs.check_write()?;
+        let end = offset.checked_add(length).ok_or(Error::Fs(libc::EFBIG))?;
+        let size = self.fs.node(ino.0)?.attr().size;
+        if mode == 0 && end > size {
+            self.fs.truncate(ino.0, end)?;
+        }
+        Ok(())
     }
 
     fn retire_file_cache(&self, ino: INodeNo) {
@@ -1055,20 +1078,7 @@ impl fuser::Filesystem for Fuse {
         mode: i32,
         reply: ReplyEmpty,
     ) {
-        if mode != 0 && mode != libc::FALLOC_FL_KEEP_SIZE {
-            reply.error(Errno::EOPNOTSUPP);
-            return;
-        }
-        let result = (|| {
-            self.fs.check_write()?;
-            let end = offset.checked_add(length).ok_or(Error::Fs(libc::EFBIG))?;
-            let size = self.fs.node(ino.0)?.attr().size;
-            if mode == 0 && end > size {
-                self.fs.truncate(ino.0, end)?;
-            }
-            Ok::<_, Error>(())
-        })();
-        match result {
+        match self.allocate(ino, offset, length, mode) {
             Ok(()) => reply.ok(),
             Err(error) => reply.error(errno(error)),
         }

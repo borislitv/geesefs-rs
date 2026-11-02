@@ -11,11 +11,13 @@ it separates confirmed mechanisms from hypotheses. See the
 the [revised paired protocol](performance-methodology.md), including actual A/A
 arms and eight mounts. Lookup overlap and cached-observation trials are
 suspended/inconclusive; first-poll is rejected for receive-thread liveness. Their
-source remains absent. Do not infer causation
-or acceptance from their old all-metric/all-pair predicate. First diagnose writer
-RPC actors and calibrate the measurement, then reassess mechanisms. **Read-only
-serving is the operator's primary target**: prioritize random/concurrent read,
-metadata and cache-residency work over writer RPCs.
+source remains absent. Do not infer causation or acceptance from their old
+all-metric/all-pair predicate. Writer RPC actors and an identical-binary control
+are now recorded. **Read-only serving is the operator's primary target**:
+prioritize random/concurrent read, metadata and cache-residency work over writer
+RPCs. The [actual LXC preflight](performance-target-preflight.md) passes isolated
+nginx/rsync byte contracts, but its existing reader is idle. Obtain a current
+loaded trace before deriving a representative read workload from that host.
 
 The operator clarified on 2026-11-01 that Rust need not beat Go where Go is
 demonstrably logically weaker. The permission-expiry gap below makes that path's
@@ -35,13 +37,13 @@ Continue the S3/setup and retained-memory-owner attribution below; do not repeat
 an uncalibrated dispatch decision. io_uring still waits for fitting official releases
 and actual LXC policy even though the isolated transport-share condition is observed.
 
-1. Separate unavoidable metadata/durability checks from avoidable SDK setup,
-   duplicate create probes and scheduling costs. Writer rates remain 23.39/26.13
-   MiB/s in the current mixed control, but unequal validation must not be assumed
-   to be an equivalent Go speed target. Overlap alone already failed a joint gate.
-2. Attribute random-read and concurrent-read tails/CPU at equal byte/generation
+1. Attribute random-read and concurrent-read tails/CPU at equal byte/generation
    behavior. Current random rates are 1.73/1.79 MiB/s versus experimental Go
    1.91/1.97; no demonstrated permission-freshness difference excuses that result.
+2. Separate unavoidable metadata/durability checks from avoidable SDK setup,
+   duplicate create probes and scheduling costs. Writer rates remain 23.39/26.13
+   MiB/s in the recorded mixed control, but unequal validation must not be assumed
+   to be an equivalent Go speed target. Overlap's four-pair effect is inconclusive.
 3. Establish long-lived memory ownership and a stable operating envelope. Current
    daemon late RSS is 157.26/159.03 MiB and live allocation 78.00/77.09 MiB; payload
    admission is bounded, but it is not a whole-process RSS bound or a plateau proof.

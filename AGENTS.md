@@ -54,6 +54,9 @@ equivalent-behavior comparisons and Rust-relative non-regressions still apply.
   publish cgroup/file/kernel memory and label process scope and missing metrics.
 - Include metadata-heavy traversal, sequential/random payload reads, concurrent
   readers, cache eviction and writer/fsync workloads, including dependency errors.
+- Operator priority, 2026-11-02: optimize read-only serving first. Preserve writer
+  correctness and its verification while prioritizing payload reads, metadata and
+  cache residency over writer performance experiments.
 - Require reproducible improvement rather than one favorable sample; retain raw
   measurements, failures, variance and baseline executable provenance.
 - Operator clarification, 2026-11-02: use paired confidence intervals and

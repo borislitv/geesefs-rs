@@ -12,7 +12,10 @@ strict four-pair rejection below. Lookup overlap and observation
 reuse are suspended/inconclusive; implementations remain absent. A real A/A arm,
 eight independent mount pairs and paired CIs replace strict wins in every sample.
 Extra loops retain independent buffer/rate objections. Actual LXC access is now
-authorized; private host/mount identifiers stay outside public source.
+authorized and an isolated read-only nginx/rsync fixture passes on the actual
+kernel. The existing reader is idle; loaded-neighbor access still needs a live
+SSH agent. See [target preflight](performance-target-preflight.md). Private
+host/mount identifiers stay outside public source.
 
 - Deliver a Linux/S3 Rust replacement for both readers and writers, reusing an
   existing FUSE implementation and public dependencies. FUSE passthrough and a
@@ -20,11 +23,14 @@ authorized; private host/mount identifiers stay outside public source.
 - Overall status: **UNACCEPTED**. Keep the PR open and draft, targeting `main`,
   without auto-merge. Library CI is not native-filesystem or production acceptance.
 - Branch: `perf/prove-read-bottlenecks-20261030`. Plan B below is now measured.
-  Current runtime differs from observation-age source only by removing redundant
-  post-rename entry notifications in `src/fuse.rs`; a native concurrent-client
-  regression covers the demonstrated deadlock. No new dependency or CLI is retained.
-  Runtime commit: `0e44bd84f0a6498afd852339a41cacccf2381972`; release SHA256
-  `9949ad9f8041397d5ca7583dbb163af621de51228472901e1ca17d37f5de0200`.
+  The retained runtime removes redundant post-rename entry notifications and
+  splits backend errno/fallocate validation without changing their behavior.
+  Native regressions cover the deadlock, receive-thread isolation and xattr errors.
+  No performance fast path, new dependency or CLI is retained. Runtime commit:
+  `4a06749`; current verified jemalloc release SHA256
+  `8cd8d48f8a1546d54cf46e6e52252eaca10e6b4dac6317e37a65a5542a388c62`.
+  The earlier rename-only runtime `0e44bd8` and release `9949ad9f...` remain
+  historical evidence, not the current build identity.
 - Historical observation-age baseline: `1b13033c3f161b9502c7a23870b645ca871ab2e3`,
   release SHA256 `df24b6bdd42920b7989db2ed7c44855b9fc2bb1cf53292ee60ce023eb42138a8`.
   Its 85 frozen inputs matched after installation/reboot/native C tests. Rejected
@@ -60,11 +66,12 @@ win. Keep raw measurements and distinguish required checks from avoidable cost.
   permission-freshness difference. SDK/kernel CPU categories are not additive
   wall-time or proof that all kernel cost is FUSE. No supported prepared-SDK API
   or justified minimal runtime correction was established.
-- Independent priorities remain random/concurrent-read tails and CPU, writer
+- The first performance priority is read-only serving: random/concurrent-read tails
+  and CPU, metadata and cache residency. Remaining work also includes writer
   request/setup attribution, long-lived memory ownership, actual-service and
   remaining Linux/S3 contracts, observer/source-bound controls and whole-file
-  quality. Whole-file CRAP still fails; targeted mutation results do not close
-  broader survivors. Positive LINK, full CLI/imported multipart layouts and
+  quality. Adapter CRAP passes; Python orchestration still fails. Targeted mutation
+  results do not close broader survivors. Positive LINK, full CLI/imported multipart layouts and
   actual-service IAM/SSE/signing/PATCH are not claimed complete.
 
 ## CPU-scope correction and authorized reboot

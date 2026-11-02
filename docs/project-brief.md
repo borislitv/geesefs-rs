@@ -24,6 +24,8 @@ that Go cannot be optimized or that Rust automatically improves memory or speed.
   serving nginx, rsync and golist. Kubernetes/containerd is not a prerequisite;
   actual container confinement and host-kernel support must be checked in LXC.
   Prefer official upstream libraries over forks, including at a modest speed cost.
+- Priority clarification, 2026-11-02: read-only serving is the first performance
+  target. Preserve writer correctness; prioritize read, metadata and cache work.
 - Go reference: `yandex-cloud/geesefs`, including the reproducible experimental
   revision `5c0884c9e8799bbab93e2d4102fdc15e9c079e0d` and an identified upstream
   packaged baseline. Preserve exact source/build hashes with benchmark results.

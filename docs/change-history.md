@@ -4,6 +4,22 @@ This is the concise engineering context for the experimental Linux/S3 rewrite.
 Detailed results and operational logs stay outside tracked source files.
 Overall compatibility and comparative performance remain **UNACCEPTED**.
 
+## Read-only target preflight and verification correction, 2026-11-02
+
+- Record read-only serving as the operator's first performance priority. Inspect
+  the authorized LXC read-only: the common reader is idle, while historical HTTP
+  samples predate its current layout. Low RSS and HTTP timings are not loaded
+  filesystem performance evidence. [Target findings](performance-target-preflight.md).
+- The exact current release passes disposable nginx/rsync read contracts on the
+  actual 5.15 LXC kernel, both buffered and direct I/O. Shared mmap works buffered
+  and returns `ENODEV` with direct I/O. A one-byte corruption control fails the
+  checksum oracle; unchanged data pass. All owned resources are removed.
+- Add a public paired-assessment case at the exact loss boundary. It kills a
+  mutation previously declared indistinguishable: 40/42 sites now killed. Leave
+  the two undetected percentile-rank mutations explicitly open, and correct the
+  claim about new benchmark orchestration having integration coverage. No runtime
+  optimization is introduced by this verification/documentation checkpoint.
+
 ## Corrected statistical inference, 2026-11-02
 
 - Near-A/A variability exposes the strict all-metric/all-pair predicate's lack of

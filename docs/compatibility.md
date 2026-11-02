@@ -98,3 +98,12 @@ to reproduce the reference's lower HEAD count.
 No atomic S3 rename or writable-unlinked POSIX behavior is promised by the
 reference. A failure of required optional behavior leaves overall compatibility
 unaccepted even when ordinary operations work.
+
+## Actual LXC read-only scope — 2026-11-02
+
+An isolated fixture on Linux `5.15.179-15.2mds` passes the installed nginx 1.24.0
+full/Range/EOF/416 and rsync 3.2.7 full/delta byte checks with buffered and opt-in
+read-only direct I/O. Shared read-only mmap passes buffered, but returns `ENODEV`
+with direct I/O on this kernel. Do not treat the modes as equivalent for mmap
+consumers. These checks use a disposable local backend, not production S3 or the
+served nginx/golist configuration. [Scope and provenance](performance-target-preflight.md).

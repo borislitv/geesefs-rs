@@ -8,11 +8,13 @@ served mounts or production credentials. Use finite subprocess/operation deadlin
 ## Statistical gate and adapter quality — 2026-11-02
 
 `bench/paired.py` and `bench/compare.py` now require eight mount pairs, a real
-same-executable control arm and predeclared practical margins; 15 paired-assessment
+same-executable control arm and predeclared practical margins; 17 paired-assessment
 cases plus three-arm scheduling, margin, zero/overflow and writer-file cases pass
-with the whole Python suite. Mutation of `bench/paired.py` kills 39 of 42 sites;
-the survivors are a bootstrap rank off-by-one of 4,096 resamples and an exact
-lower-bound equality that no honest finite fixture can distinguish.
+with the whole 99-case Python suite. Mutation of `bench/paired.py` kills 40 of 42
+sites. A public `assess` boundary case distinguishes an interval touching the loss
+limit from a demonstrated regression, killing the previously surviving `> -> >=`
+mutation. The two bootstrap percentile-rank mutations remain undetected; they are
+an open test gap, not proven equivalent or impossible to distinguish.
 
 Both allocator LLVM runs pass **265 Rust cases**, including thirteen native
 directory contracts (new receive-thread liveness and xattr error contracts) and
@@ -21,10 +23,29 @@ the public `errno` mapping. CLI child profiles are now merged into both reports.
 `fallocate` delegate to `backend_errno`/`allocate`, `getxattr` is covered natively.
 `compare.py` orchestration functions that need real mounts (`_measure_run`,
 `_run_case`, `main` and helpers) still exceed CRAP 10 at 0-50% unit coverage;
-they are exercised by integration runs, not honest unit tests. Clippy, formatting
-and `dryer --threshold 0.8` pass.
+the updated three-arm native matrix is still unverified end to end. Earlier
+integration runs do not establish coverage of the changed orchestration. Clippy,
+formatting and `dryer --threshold 0.8` pass in the recorded review scope.
+
+## Actual LXC read-only preflight — 2026-11-02
+
+The exact current jemalloc release passes available rw/ro nginx, rsync and failure
+contracts on the development VM. It also passes an isolated read-only fixture on
+the authorized LXC kernel `5.15.179-15.2mds`, with the installed nginx 1.24.0 and
+rsync 3.2.7. Buffered and direct-I/O mounts pass byte checks, four-client unaligned
+Range/EOF, implicit listings, `EROFS`, nginx full/Range/416 and rsync full/delta.
+Buffered shared mmap passes; direct-I/O shared mmap returns `ENODEV` on this kernel.
+A changed backend byte causes the expected SHA256 assertion failure; restoring
+the fixture passes. Both success and failure clean up normally.
+
+The fixture uses an owned private mount namespace, temporary paths, a 1 GiB unit
+with a two-CPU quota, and a disposable backend reached through a temporary SSH forward.
+It does not test the served configuration, golist, real S3 or sustained load.
+See [target evidence and remaining measurements](performance-target-preflight.md).
 
 ## Retained rename correction — 2026-11-02
+
+This block records the earlier rename-only source and verification scope.
 
 The reduced source retains only removal of redundant post-rename entry
 notifications; receive-loop CLI and first-poll read trials are discarded.

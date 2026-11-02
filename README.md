@@ -47,13 +47,19 @@ reported in the new checkpoint below. Older tables retain their binary/source sc
 The primary target is LXC serving nginx, rsync and golist. The
 [measured classic dispatch investigation](docs/performance-classic-dispatch.md)
 disfavors additional receive loops through allocation/rate evidence. Inline
-first-poll reads are **rejected as implemented**: their performance verdict was
-noise (an identical-binary writer control finds no distinguishable effect), but a
-native contract shows a contended read stalling the sole receive thread. See the
-[statistical review and revised protocol](docs/performance-methodology.md). Both trials remain absent; retain the confirmed
-post-rename notification deadlock correction and its native concurrency regression.
+first-poll reads are **rejected as implemented**. An identical-binary writer control
+leaves their mixed-workload performance effect inconclusive; a native contract
+shows a contended read stalling the sole receive thread. See the
+[statistical review and revised protocol](docs/performance-methodology.md). Both
+trials remain absent; retain the confirmed post-rename notification deadlock
+correction and its native concurrency regression.
 Official upstream dependencies, one receive loop, freshness and budgets remain.
 Actual LXC/service, sustained-memory, compatibility and comparative gates stay open.
+
+The [read-only target preflight](docs/performance-target-preflight.md) now verifies
+the current release on the actual LXC kernel with its nginx/rsync binaries in
+disposable buffered and direct-I/O fixtures. It also records why the idle reader
+and historical HTTP logs cannot establish a representative performance win.
 
 ## Directory remainder checkpoint — 2026-11-01
 

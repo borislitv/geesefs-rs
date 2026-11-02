@@ -21,7 +21,8 @@ METRICS = ["throughput", "elapsed_seconds", "rss_peak_bytes", "rss_steady_bytes"
            "cgroup_throttled_seconds", "cgroup_nr_throttled", "cgroup_nr_periods"]
 PUBLIC_LIMITS = ["schema", "repetitions", "memory_limit_mb", "entry_limit", "dataset_bytes",
                  "metadata_entries", "concurrency", "random_operations", "random_block_bytes",
-                 "writer_bytes", "cpu_quota_us", "cpu_period_us", "cgroup_memory_max_mb", "states", "workloads"]
+                  "writer_bytes", "writer_files", "cpu_quota_us", "cpu_period_us", "cgroup_memory_max_mb", "states", "workloads",
+                  "non_inferiority_margins"]
 
 
 def summarize_metric(runs, metric):

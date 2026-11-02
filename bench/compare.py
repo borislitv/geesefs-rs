@@ -30,6 +30,7 @@ import uuid
 from accounting import CpuWindow, cpu_efficiency
 from go_heap import GoHeapSampler
 from metrics import SampledBytes, finite_nonnegative, latency_percentiles, latency_samples
+from paired import assess
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -52,6 +53,7 @@ class BenchmarkDeadline(TimeoutError):
 
 def validate(config):
     _validate_schema(config)
+    _validate_optional(config)
     for key in ["memory_limit_mb", "entry_limit", "dataset_bytes", "metadata_entries", "concurrency",
                 "random_operations", "random_block_bytes", "writer_bytes", "cpu_quota_us", "cpu_period_us", "cgroup_memory_max_mb"]:
         if type(config.get(key)) is not int or config[key] <= 0:
@@ -64,11 +66,20 @@ def validate(config):
         raise ValueError("complete workload matrix is required")
 
 
+def _validate_optional(config):
+    if type(config.get("writer_files", 1)) is not int or config.get("writer_files", 1) <= 0:
+        raise ValueError("positive integer required: writer_files")
+    margins = config.get("non_inferiority_margins", {})
+    if not isinstance(margins, dict) or any(key not in REQUIRED_METRICS or not finite_nonnegative(value) or value < 1
+                                            for key, value in margins.items()):
+        raise ValueError("non_inferiority_margins must map known metrics to finite cost factors >= 1")
+
+
 def _validate_schema(config):
     if type(config.get("schema")) is not int or config["schema"] != 1:
-        raise ValueError("schema 1 and at least five repetitions are required")
-    if type(config.get("repetitions")) is not int or config["repetitions"] < 5:
-        raise ValueError("schema 1 and at least five repetitions are required")
+        raise ValueError("schema 1 and at least eight repetitions are required")
+    if type(config.get("repetitions")) is not int or config["repetitions"] < 8:
+        raise ValueError("schema 1 and at least eight repetitions are required")
 
 
 def _compatibility_errors(compatibility):
@@ -131,7 +142,8 @@ def _metric_ratio(left, right):
     if not finite_nonnegative(left) or not finite_nonnegative(right):
         return None
     if right > 0:
-        return left / right
+        value = left / right
+        return value if finite_nonnegative(value) else None
     return 1.0 if left == 0 else None
 
 
@@ -159,54 +171,63 @@ def _ratio_summary(ratios):
 
 def _group_summary(config, indexed, key):
     ratios = {metric: [] for metric in REQUIRED_METRICS}
-    pooled = {"go": [], "rust": []}
+    controls = {metric: [] for metric in REQUIRED_METRICS}
+    pooled = {"go": [], "go-control": [], "rust": []}
     errors = []
     for repetition in range(config["repetitions"]):
         go = indexed.get((*key, repetition, "go"))
         rust = indexed.get((*key, repetition, "rust"))
+        control = indexed.get((*key, repetition, "go-control"))
         if not go or not rust:
             continue
         if not _equivalent_pair(go, rust):
             errors.append(f"non-equivalent data/machine {key}")
         _include_pair(ratios, pooled, go, rust)
+        if control:
+            errors.extend(_include_control(controls, pooled, go, control, key))
     summary = _ratio_summary(ratios)
     summary["pooled_latency_ms"] = {implementation: latency_percentiles(values)
                                     for implementation, values in pooled.items() if values}
+    summary["paired_assessments"] = _assessments(config, ratios, controls)
     return summary, errors
 
 
-def _strict_gain(values, count, higher=False):
-    return len(values) == count and all(value > 1 if higher else value < 1 for value in values)
+def _include_control(controls, pooled, go, control, key):
+    """Collect A'/A ratios from the same executable as the reference arm."""
+    samples = latency_samples(control.get("metrics", {}))
+    if samples is not None:
+        pooled["go-control"].extend(samples)
+    for metric in REQUIRED_METRICS:
+        ratio = _metric_ratio(control.get("metrics", {}).get(metric), go.get("metrics", {}).get(metric))
+        if ratio is not None:
+            controls[metric].append(ratio)
+    return [] if _equivalent_pair(go, control) else [f"non-equivalent A/A data/machine {key}"]
 
 
-def _mean_non_regression(values, count):
-    return len(values) == count and statistics.mean(values) <= 1
+def _cost_ratios(metric, values):
+    """Zero cannot form a log ratio; omission leaves too few pairs to pass."""
+    positive = [value for value in values if value > 0]
+    return [1 / value for value in positive] if metric == "throughput" else positive
 
 
-def _tail_errors(key, summary, repetitions):
+def _assessments(config, ratios, controls):
+    margins = config.get("non_inferiority_margins", {})
+    return {metric: assess(_cost_ratios(metric, values), _cost_ratios(metric, controls[metric]),
+                           margin=margins.get(metric))
+            for metric, values in ratios.items()}
+
+
+def _warm_group_errors(key, summary):
     errors = []
-    tails = summary["pooled_latency_ms"]
-    for metric in ["p50_ms", "p95_ms", "p99_ms"]:
-        if not _mean_non_regression(summary.get(metric, {}).get("ratios", []), repetitions):
-            errors.append(f"tail latency non-regression not established: {key} {metric}")
-        if len(tails) != 2 or tails["rust"][metric] > tails["go"][metric]:
-            errors.append(f"pooled tail latency non-regression not established: {key} {metric}")
-    return errors
-
-
-def _warm_group_errors(key, summary, repetitions):
-    errors = _tail_errors(key, summary, repetitions)
-    for metric in ["rss_peak_bytes", "rss_steady_bytes", "daemon_rss_peak_bytes", "daemon_rss_steady_bytes",
-                   "cgroup_peak_bytes", "cgroup_steady_bytes", "allocator_peak_bytes", "allocator_steady_bytes"]:
-        if not _strict_gain(summary.get(metric, {}).get("ratios", []), repetitions):
-            errors.append(f"lower memory not established: {key} {metric}")
-    if not _strict_gain(summary.get("throughput", {}).get("ratios", []), repetitions, higher=True):
-        errors.append(f"faster operation not established: {key}")
-    for message, metrics in [("memory component", ["file_cache_steady_bytes", "kernel_steady_bytes"]),
-                             ("CPU", ["daemon_cpu_seconds", "cgroup_cpu_seconds"])]:
-        for metric in metrics:
-            if not _mean_non_regression(summary.get(metric, {}).get("ratios", []), repetitions):
-                errors.append(f"{message} non-regression not established: {key} {metric}")
+    for metric, result in summary["paired_assessments"].items():
+        allowed = {"improved"} if metric in {"throughput", "rss_steady_bytes"} else {"improved", "non_inferior"}
+        if result["status"] not in allowed:
+            errors.append(f"paired performance not established: {key} {metric}: {result['status']}")
+        if metric in {"p50_ms", "p95_ms", "p99_ms"}:
+            tails = summary["pooled_latency_ms"]
+            ratio = _metric_ratio(tails.get("rust", {}).get(metric), tails.get("go", {}).get(metric))
+            if ratio is None or result["noise_ratio"] is None or ratio > result["noise_ratio"]:
+                errors.append(f"pooled tail exceeds calibrated noise or is unavailable: {key} {metric}")
     return errors
 
 
@@ -218,7 +239,7 @@ def evaluate(config, runs, compatibility, provenance):
         return {"accepted": False, "errors": [str(error)], "summaries": {}}
     errors = _compatibility_errors(compatibility) + _provenance_errors(provenance)
     expected = set(product(REVISIONS, config["states"], config["workloads"],
-                           range(config["repetitions"]), ["go", "rust"]))
+                            range(config["repetitions"]), ["go", "go-control", "rust"]))
     indexed, summaries = {}, {}
     for run in runs:
         key = tuple(run.get(k) for k in ["baseline", "state", "workload", "repetition", "implementation"])
@@ -235,7 +256,7 @@ def evaluate(config, runs, compatibility, provenance):
         # Cold work is still complete and correct; comparisons concern sustained
         # warm operation, not initial mount/listing speed.
         if key[1] == "warm":
-            errors.extend(_warm_group_errors(key, summary, config["repetitions"]))
+            errors.extend(_warm_group_errors(key, summary))
     return {"accepted": not errors, "errors": errors, "summaries": summaries}
 
 
@@ -474,7 +495,7 @@ def _check_remote(client, bucket, key, expected):
     assert actual.digest() == expected, "fresh writer/fsync backend checksum"
 
 
-def _writer(path, name, config, client, bucket, prefix, endpoint, local):
+def _writer_file(path, name, config, client, bucket, prefix, endpoint, local):
     failing = name == "writer_failure"
     if failing and not local:
         raise RuntimeError("writer failure benchmark needs a controlled disposable fault injector")
@@ -493,6 +514,16 @@ def _writer(path, name, config, client, bucket, prefix, endpoint, local):
     finally:
         if failing:
             integration.fault(endpoint)
+
+
+def _writer(path, name, config, client, bucket, prefix, endpoint, local):
+    count = config.get("writer_files", 1) if name == "writer_fsync" else 1
+    latencies, transferred = [], 0
+    for _ in range(count):
+        calls, size = _writer_file(path, name, config, client, bucket, prefix, endpoint, local)
+        latencies.extend(calls)
+        transferred += size
+    return latencies, transferred
 
 
 def workload(path, name, config, client, bucket, prefix, endpoint, local, expected_sha):
@@ -625,7 +656,10 @@ def _cases(config, selected, smoke):
     for revision, state, name, repetition in product(REVISIONS, config["states"], config["workloads"], range(config["repetitions"])):
         if selected and name not in selected:
             continue
-        order = ["go", "rust"] if repetition % 2 == 0 else ["rust", "go"]
+        orders = [("go", "rust", "go-control"), ("rust", "go-control", "go"),
+                  ("go-control", "go", "rust"), ("go", "go-control", "rust"),
+                  ("go-control", "rust", "go"), ("rust", "go", "go-control")]
+        order = orders[repetition % len(orders)]
         for implementation in order:
             yield dict(baseline=revision, state=state, workload=name, repetition=repetition, implementation=implementation)
         if smoke:
@@ -635,10 +669,10 @@ def _cases(config, selected, smoke):
 def _measure_run(args, group_root, binaries, work, fixture, record):
     config, implementation = record["limits"], record["implementation"]
     label = _label(record)
-    binary = binaries[record["baseline"]] if implementation == "go" else args.rust_binary.resolve()
+    binary = binaries[record["baseline"]] if implementation.startswith("go") else args.rust_binary.resolve()
     stats = args.output / (label + "-allocator.jsonl")
     pprof = integration.free_port()
-    extra = ["--pprof", f"127.0.0.1:{pprof}"] if implementation == "go" else ["--stats-file", str(stats.resolve())]
+    extra = ["--pprof", f"127.0.0.1:{pprof}"] if implementation.startswith("go") else ["--stats-file", str(stats.resolve())]
     extra += ["--entry-limit", str(config["entry_limit"])]
     environment = fixture["environment"]
     with cgroup(group_root, config) as group:
@@ -647,7 +681,7 @@ def _measure_run(args, group_root, binaries, work, fixture, record):
             spec = {key: fixture[key] for key in ["bucket", "prefix", "endpoint", "local", "expected_sha"]}
             spec.update(path=str(path), name=record["workload"], config=config, warmup=record["state"] == "warm")
             with worker(spec, environment, group, args.output / (label + "-client.log")) as consumer:
-                heap_observer = GoHeapSampler(pprof, args.output / (label + "-heap.jsonl")) if implementation == "go" else contextlib.nullcontext()
+                heap_observer = GoHeapSampler(pprof, args.output / (label + "-heap.jsonl")) if implementation.startswith("go") else contextlib.nullcontext()
                 with heap_observer as heap:
                     with Sampler(process.pid, consumer.pid, group, args.output / (label + "-memory.jsonl")) as sampler:
                         started_ns = time.time_ns()

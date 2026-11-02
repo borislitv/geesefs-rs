@@ -35,7 +35,7 @@ class CommandLineTests(unittest.TestCase):
             self.assertEqual(status, 1)
             report = json.loads((work / "evidence/report.json").read_text())
             self.assertFalse(report["gate"]["accepted"])
-            self.assertIn("at least five repetitions", report["gate"]["errors"][0])
+            self.assertIn("at least eight repetitions", report["gate"]["errors"][0])
             self.assertEqual(report["runs"], [])
             self.assertFalse(json.loads(output)["accepted"])
             self.assertEqual(os.sched_getaffinity(0), affinity)

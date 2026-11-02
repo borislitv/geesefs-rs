@@ -61,10 +61,12 @@ class WorkloadTests(unittest.TestCase):
 
         class Remote:
             body = None
+            keys = []
 
             def get_object(self, *, Bucket, Key):
                 owner.assertEqual(Bucket, "bucket")
                 owner.assertTrue(Key.startswith("prefix/"))
+                self.keys.append(Key)
                 written = (owner.path / Key.removeprefix("prefix/")).read_bytes()
                 owner.assertEqual(written, owner.payload[:64])
                 self.body = io.BytesIO(b"wrong remote generation" if wrong_bytes else written)
@@ -81,6 +83,13 @@ class WorkloadTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "fresh writer/fsync backend checksum"):
             self.execute("writer_fsync", remote)
         self.assertTrue(remote.body.closed)
+
+    def test_repeated_writer_files_verify_distinct_remote_keys_and_clean_up_all_files(self):
+        self.config["writer_files"] = 32
+        remote = self.remote()
+        self.assert_metrics(self.execute("writer_fsync", remote), 32, 32 * 64)
+        self.assertEqual(len(set(remote.keys)), 32)
+        self.assertEqual(sorted(path.name for path in self.path.iterdir()), ["implicit", "payload"])
 
     def test_faulted_writer_requires_injection_and_recovers_before_remote_verification(self):
         with self.assertRaisesRegex(RuntimeError, "controlled disposable fault injector"):

@@ -56,9 +56,10 @@ aggregate median under differing cache/load conditions. HTTP 500 and `open`/`pre
 checks can both return that errno; their live contributions are not attributed.
 These before/after observations do not replace independent paired acceptance.
 
-Anonymous memory continues growing at a slowing rate. Live cache/namespace
-occupancy, eviction and allocator retention are not attributed; neither a leak nor
-its absence is established. A short interval does not prove a sustained plateau.
+Anonymous memory continues growing across later samples, with a variable rate.
+Live cache/namespace occupancy, eviction and allocator retention are not attributed;
+neither a leak nor its absence is established. A short interval does not prove a
+sustained plateau.
 Cache enlargement to 64 GiB is deferred pending that evidence. Deployment
 identities, raw traces and operational journals remain private.
 

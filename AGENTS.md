@@ -118,6 +118,10 @@ solutions; convenience or unfamiliarity is not sufficient justification.
 - Do not deploy, replace served mounts, modify production data or reuse private
   credentials in this development workflow. Integration writes use dedicated
   disposable test data only.
+- Operator exception, 2026-11-02: one read-only serving trial was explicitly
+  authorized; see the [scoped trial](docs/pr-context.md#scoped-serving-trial--2026-11-02).
+  This does not authorize changes to other readers or writers, additional failure
+  injection, or general deployment before acceptance.
 - Keep credentials, private receipts and production identifiers out of source
   and shared artifacts. Preserve upstream licenses and attribution.
 

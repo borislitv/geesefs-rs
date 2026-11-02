@@ -38,6 +38,30 @@ bytes, default denial and private-file denial, including an omitted-wiring fault
 Earlier access failures and performance measurements describe their frozen
 pre-fix executable, not this source.
 
+## Scoped serving trial — 2026-11-02
+
+The operator explicitly authorized replacing one read-only served reader with
+the source-matching `allow_other` build. The trial retains traffic and the existing
+payload/entry limits. This addressed exception does not accept the implementation
+generally or authorize changes to other readers and writers.
+
+External failure recovery is configured to quiesce filesystem consumers, replace
+only a verified disconnected mount and restore its consumers, excluding native-S3
+listings. Deployment-helper regressions and a real healthy-event no-op pass;
+production crash/OOM recovery was not injected and remains unobserved end to end.
+
+Passive successful-request comparisons show a lower upper tail but a higher
+aggregate median under differing cache/load conditions. HTTP 500 and `open`/`pread`
+`EAGAIN` errors remain correctness gaps. FUSE admission pressure and metadata race
+checks can both return that errno; their live contributions are not attributed.
+These before/after observations do not replace independent paired acceptance.
+
+Anonymous memory continues growing at a slowing rate. Live cache/namespace
+occupancy, eviction and allocator retention are not attributed; neither a leak nor
+its absence is established. A short interval does not prove a sustained plateau.
+Cache enlargement to 64 GiB is deferred pending that evidence. Deployment
+identities, raw traces and operational journals remain private.
+
 ## Remaining work
 
 - [Read-only target measurements](performance-read-shape.md) and
@@ -45,7 +69,7 @@ pre-fix executable, not this source.
   workloads. The bounded real-S3 attempt has only five complete blocks; it cannot
   pass the eight-pair gate. No short-window memory result proves a plateau.
 - Verify the exact target profile, service UIDs, signing/extended metadata and
-  sustained large-namespace memory envelope before any serving handoff.
+  sustained large-namespace memory envelope before general deployment acceptance.
 - Continue the [specific unresolved performance/compatibility work](next-work.md).
   Whole-file CRAP, broader mutation and the public generic matrix remain open.
 - FUSE io_uring is an [upstream watch](fuse-io-uring-assessment.md), not an active

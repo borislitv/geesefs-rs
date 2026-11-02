@@ -27,6 +27,11 @@ proven single SDK defect. Preserve checksums, If-Match, exact metadata, ownershi
 and durability. Higher equal CPU allocation is a sensitivity control, not a
 source-code speedup. See [current accounting and scopes](performance.md).
 
+Attribute the [scoped serving trial's](pr-context.md#scoped-serving-trial--2026-11-02)
+`open`/`pread` `EAGAIN` and HTTP 500 before claiming equivalent correctness. Separate
+admission pressure, metadata races and backend failures; retain failed responses
+alongside successful-request timings and distinguish post-header read failures.
+
 ## 2. Target access and large-namespace memory
 
 Explicit `allow_other` wiring and the three local cross-UID cases are complete;
@@ -42,6 +47,11 @@ heap-owner attribution. Payload budgets, soft Go limits and small short-window
 RSS do not bound whole-process memory. Rust entry pressure can return `ENOMEM`
 when every candidate remains referenced. Do not shrink caches, drop metadata or
 force reclamation to manufacture a win.
+
+For the serving trial, attribute namespace/cache occupancy, eviction and allocator
+retention alongside anonymous memory over time. TTL refresh does not itself evict
+the namespace. Establish a sustained envelope before enlarging caches; slowing
+growth alone neither proves nor excludes a leak.
 
 ## 3. Compatibility and writer behavior
 

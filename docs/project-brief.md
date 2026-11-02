@@ -98,9 +98,12 @@ comparisons. More granular cache TTL controls are future work, not a prerequisit
 
 Use dedicated disposable fixtures for writes and failure injection. Existing
 readers, mounts, data, writer schedules and credentials are not part of this
-development change. The user changed the repository to public and confirmed
-that choice. Source, plans and reproducible test/benchmark artifacts are public;
-credentials and private operational evidence are not project artifacts.
+general development workflow. On 2026-11-02 the operator explicitly authorized one
+[read-only serving trial](pr-context.md#scoped-serving-trial--2026-11-02), retaining
+traffic and existing cache limits. It does not authorize broader rollout or
+production failure injection, and does not close acceptance. The user confirmed
+the public repository: source and reproducible fixtures are public; credentials,
+deployment identities and private operational evidence are not project artifacts.
 
 Use public upstream code and public crates only. Do not export internal Arcadia
 libraries, translated internal code or internal-only dependencies without

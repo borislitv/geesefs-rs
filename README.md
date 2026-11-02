@@ -2,7 +2,9 @@
 
 Experimental Linux/S3 GeeseFS replacement for readers and writers.
 **Not accepted for production:** compatibility and comparative performance remain
-incomplete. Do not replace a served mount with this implementation.
+incomplete. One
+[operator-authorized serving trial](docs/pr-context.md#scoped-serving-trial--2026-11-02)
+is a scoped exception, not general deployment acceptance.
 
 The goal is preserved filesystem/S3 behavior with lower memory use and faster
 normal, sustained operation than **Go 0.43.9**, the primary reference. Earlier
@@ -55,7 +57,7 @@ See [architecture](docs/architecture.md) for delivered mechanisms and
 - [Actual LXC checks](docs/performance-target-preflight.md) cover disposable
   nginx/rsync contracts. Target profile/service-user compatibility, sustained
   large-namespace memory, broad quality and representative comparative gates
-  remain open. Existing production readers are not replaced by this checkpoint.
+  remain open.
 
 ## Measurements and remaining work
 

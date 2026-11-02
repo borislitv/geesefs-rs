@@ -5,6 +5,16 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## Scoped serving trial and recovery boundary — 2026-11-02
+
+The operator authorized one read-only served-reader replacement, separately from
+general acceptance. Deployment recovery now recognizes the addressed Rust mount,
+quiesces filesystem consumers and preserves native-S3 listings; healthy delivery
+does not restart the reader. Actual production crash/OOM recovery is unobserved.
+Live errors and slowing anonymous-memory growth still need attribution; defer
+cache enlargement.
+[Trial scope and remaining uncertainty](pr-context.md#scoped-serving-trial--2026-11-02).
+
 ## Cross-UID mount access — 2026-11-02
 
 Owner-only fixtures missed a serving contract: the frozen Rust binary rejected

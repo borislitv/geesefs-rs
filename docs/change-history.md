@@ -4,6 +4,20 @@ This is the concise engineering context for the experimental Linux/S3 rewrite.
 Detailed results and operational logs stay outside tracked source files.
 Overall compatibility and comparative performance remain **UNACCEPTED**.
 
+## Go cache parity and serving-option scope, 2026-11-02
+
+- Record the operator's accepted cache contract: bounded negative caching with
+  Go 0.43.9's configured metadata TTL is compatible behavior. Use the measured
+  explicit Rust configuration, not immediate visibility, as the read-only target.
+  Both CLI TTL defaults and the main comparison use one minute; five seconds was
+  only an expiry probe, while 64 is the miss capacity per directory. More granular
+  cache TTL settings remain future work. Runtime defaults and measurements stay
+  unchanged.
+- Clarify the access finding: the working Go serving reader already enables
+  `allow_other`. The rejection and cross-UID `EACCES` belong to the measured Rust
+  rewrite and its missing supported-library option wiring, not to that Go mount.
+  [Exact configuration and scope](performance-listing-diagnosis.md).
+
 ## Listing attribution and concrete serving gaps, 2026-11-02
 
 - Make Go 0.43.9 the primary reference at the operator's request; archive the

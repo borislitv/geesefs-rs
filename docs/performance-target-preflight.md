@@ -74,8 +74,9 @@ direct-I/O policies must remain separately labelled, especially for mmap users.
 ## Subsequent serving-readiness findings
 
 The [listing and reader diagnosis](performance-listing-diagnosis.md) exposes
-requirements these owner-run fixtures did not cover. The current binary rejects
-`allow_other`, `dev` and `suid`; fuser remains configured for the mounting UID
+requirements these owner-run fixtures did not cover. The Go serving reader
+already uses `allow_other`; the measured Rust executable rejects
+`allow_other`, `dev` and `suid`. Rust's fuser remains configured for the mounting UID
 only. A disposable non-owner read gets `EACCES` despite a `0644` file and `0755`
 mount root. Exact profile/signing/extended metadata and a realistic namespace
 under pinned-inode pressure also remain unverified. A private owner-only side

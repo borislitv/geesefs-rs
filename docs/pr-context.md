@@ -20,10 +20,14 @@ See [historical read-shape results](performance-read-shape.md). The latest
 [listing/reader diagnosis](performance-listing-diagnosis.md) uses Go 0.43.9 as
 the primary reference, excluding the unmerged Go experiment from acceptance.
 Eight configuration-controlled blocks attribute the listing loss to repeated
-absent-name probes. Explicit negative caching removes the requests but delays
-external creates until TTL; default-zero stays unchanged. Loaded reader memory
-is anonymous, but heap owners remain unprofiled. Cross-UID access is a concrete
-serving blocker: `allow_other` is rejected and a non-owner gets `EACCES`.
+absent-name probes. Explicit negative caching removes the requests; the operator
+accepts its TTL-bounded external-create delay as Go-parity behavior. Use 64 misses
+per directory and the same one-minute metadata TTL in read-only comparisons;
+five seconds was only an expiry probe. Separate cache TTL controls are future
+work, and the cache-size default remains zero. Loaded reader memory is anonymous,
+but heap owners remain unprofiled. Cross-UID access is missing in the measured
+Rust executable: it rejects `allow_other` and a non-owner gets `EACCES`. The Go
+serving reader already enables that option; this is Rust option wiring.
 Private identities and detailed execution/cleanup records stay outside source.
 
 - Deliver a Linux/S3 Rust replacement for both readers and writers, reusing an

@@ -15,6 +15,10 @@ metadata or weaker durability is not a speed target Rust must match by reproduci
 the gap. Raw results remain visible; unrelated losses and Rust non-regressions
 still require investigation.
 
+The operator accepts negative caching with Go's configured metadata TTL as
+compatible behavior. Immediate external-create visibility is not an extra gate;
+more granular cache TTL settings are future work.
+
 ## Development
 
 Use Rust 1.96.0 or newer with rustfmt/clippy and Python 3.12+ with dependencies
@@ -49,12 +53,16 @@ reported in the new checkpoint below. Older tables retain their binary/source sc
 The [listing diagnosis](docs/performance-listing-diagnosis.md) identifies five
 absent-name checks making 15 S3 requests per warm default-Rust listing. Eight
 controlled blocks measure **18.493 ms** default Rust, **3.095 ms** with the existing
-explicit negative-cache option, and **4.190 ms** Go 0.43.9. The option removes warm
-S3 probes, but delays externally created names until TTL; real FUSE probes observe
-that delay in both configured Rust and Go. Default-zero remains unchanged.
+explicit negative-cache option, and **4.190 ms** Go 0.43.9. Use this explicit
+negative-cache configuration for Go-parity comparisons: the observed delay of
+externally created names until TTL is accepted reference behavior. Both use
+`--stat-cache-ttl=1m`; 64 is the miss capacity per directory, not a TTL. Five seconds
+was used only for a separate expiry probe. The cache-size default remains zero.
 
-Root-owned fixtures also missed a service-access gap: `allow_other` is rejected
-and another UID receives `EACCES` on a readable file. A loaded Go reader retains
+Root-owned fixtures also missed a Rust service-access gap: the measured Rust
+executable rejects `allow_other` and another UID receives `EACCES` on a readable
+file. The Go serving reader already has `allow_other`; this is missing Rust
+option wiring, not a failure of that serving mount. A loaded Go reader retains
 about 217 GiB anonymous PSS, with only 1.44 MiB cgroup file memory; live-heap owners
 remain unprofiled. These are concrete diagnostics and remaining contracts, not a
 runtime correction, a sustained memory win or permission to switch serving.

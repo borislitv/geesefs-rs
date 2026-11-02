@@ -22,8 +22,9 @@ attribution and a 40-mount transformed comparison. Go 0.43.9 is now the primary
 reference; the unmerged Go experiment is excluded from acceptance and retained
 as history. A subsequent eight-block configuration control attributes the default
 listing loss to repeated absent-name probes: the existing explicit negative
-cache removes them, but real FUSE checks expose delayed external-create visibility
-until TTL, also observed with Go. Default-zero stays unchanged. The bounded
+cache removes them. The operator accepts the observed TTL-bounded external-create
+delay as Go-parity behavior. Use 64 misses per directory and the same one-minute
+stat TTL for read-only comparisons; the cache-size default stays zero. The bounded
 native-S3 attempt stops after five complete blocks on a dependency timeout;
 sustained target-environment performance remains unproved.
 
@@ -45,13 +46,15 @@ Continue the S3/setup and retained-memory-owner attribution below; do not repeat
 an uncalibrated dispatch decision. io_uring still waits for fitting official releases
 and actual LXC policy even though the isolated transport-share condition is observed.
 
-1. Establish the caller's required external-create visibility before recommending
-   negative caching. Preserve default-zero and explicit TTL/race contracts; compare
-   Go 0.43.9 only where behavior is equivalent. Keep random/concurrent tails and
-   CPU under the same byte/generation checks.
+1. Continue read-only comparisons with the existing explicit negative cache and
+   Go 0.43.9's configured metadata TTL. Its bounded external-create delay is
+   accepted; do not add immediate visibility as a new gate. Preserve local-create
+   race checks, random/concurrent tails, CPU and independent byte/generation checks.
+   More granular cache TTL controls are future work.
 2. Wire and verify cross-UID serving access through supported fuser APIs. The
-   current binary rejects `allow_other` and returns `EACCES` to another UID even
-   for a readable file. Root-only nginx/rsync fixtures do not cover service users.
+   measured Rust binary rejects `allow_other` and returns `EACCES` to another UID
+   even for a readable file; the working Go serving reader already enables it.
+   Root-only nginx/rsync fixtures do not cover service users.
    Translate required mount policies explicitly rather than dropping options.
 3. Establish a realistic large-namespace/long-lived memory envelope. The loaded
    Go reader's approximately 217 GiB footprint is anonymous, not file cache;

@@ -60,6 +60,11 @@ equivalent-behavior comparisons and Rust-relative non-regressions still apply.
 - Operator reference clarification, 2026-11-02: Go 0.43.9 is the primary acceptance
   reference. The unmerged Go optimization experiment is historical evidence only;
   preserve its measurements without making it an acceptance candidate.
+- Operator cache clarification, 2026-11-02: bounded negative caching with the Go
+  reference's configured metadata TTL is accepted behavior, not a freshness defect
+  blocking comparison. Use the explicit Rust negative-cache configuration for
+  read-only Go-parity comparisons. Separate cache TTL controls are future work;
+  immediate visibility of external creates is not an additional requirement.
 - Require reproducible improvement rather than one favorable sample; retain raw
   measurements, failures, variance and baseline executable provenance.
 - Operator clarification, 2026-11-02: use paired confidence intervals and

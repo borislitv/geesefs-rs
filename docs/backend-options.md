@@ -123,12 +123,17 @@ deterministic core/wire checks, not a new mounted or actual-service acceptance r
   marker HEADs and does not create markers. Empty markerless directories and their
   attributes are local until child objects make them discoverable.
 - `--stat-cache-ttl` controls clean userspace metadata refresh (default one minute,
-  zero forces refresh). Kernel/FUSE reply-cache policy remains a separate review.
+  zero forces refresh), matching Go 0.43.9's CLI default. Kernel/FUSE reply-cache
+  policy remains a separate review.
 - `--negative-lookup-cache-size` defaults to zero (disabled). A positive value
   bounds authoritative misses per directory, using metadata TTL and epoch-safe
   publication. Concurrent creation cannot be hidden by a stale miss; remotely
   deleted clean names can be recreated; dirty local children keep markerless
   parents visible across metadata refresh.
+- The accepted read-only Go-parity comparison explicitly uses a negative-cache
+  size of 64 with the same one-minute stat TTL as Go. The size is not a TTL;
+  external creates may remain invisible until cache expiry, as observed with Go.
+  Separate TTL settings for individual caches are future work.
 - A 32 GiB byte-budget capacity is admitted without preallocation. Individual
   reservations over u32::MAX are rejected before semaphore-count conversion.
 - Pending rename prefixes remain bounded/indexed across errors, blocking child

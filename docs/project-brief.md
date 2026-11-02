@@ -88,6 +88,12 @@ four-pair experiments cannot be promoted to acceptance by reanalysis. An A/A
 noise allowance is not a practical production regression budget or a substitute
 for sustained correctness-equivalent target-environment acceptance.
 
+Operator cache clarification, 2026-11-02: parity with Go 0.43.9 is the primary
+cache contract. Bounded negative caching under the same configured metadata TTL
+is accepted; do not require immediate external-create visibility beyond Go's
+behavior. Use the existing explicit Rust negative-cache configuration in read-only
+comparisons. More granular cache TTL controls are future work, not a prerequisite.
+
 ## Working boundaries
 
 Use dedicated disposable fixtures for writes and failure injection. Existing
@@ -121,10 +127,13 @@ CPU is a resource-sensitivity result, not evidence of a source-code optimization
 
 The latest [listing and reader-memory diagnosis](performance-listing-diagnosis.md)
 attributes the large golist loss to repeated absent-name S3 probes. The existing
-explicit negative-cache option removes that cost in eight controlled blocks, but
-real FUSE probes show delayed external-create visibility until TTL, also observed
-with Go 0.43.9. Default-zero remains unchanged. Serving readiness also needs
-cross-UID mount access and a large-namespace memory envelope; root-only fixtures
+explicit negative-cache option removes that cost in eight controlled blocks.
+Its observed external-create delay is accepted Go-parity cache behavior. Both CLI
+defaults and the main comparison use a one-minute metadata TTL; five seconds was
+only a separate expiry probe. The cache-size default remains zero; comparisons
+explicitly enable 64 misses per directory. The Go serving reader already uses
+`allow_other`; the measured Rust executable still needs that cross-UID wiring and
+a large-namespace memory envelope. Root-only fixtures
 do not establish those contracts. Anonymous reader memory is identified, but its
 live-heap owners remain unprofiled because the configured listener is absent.
 

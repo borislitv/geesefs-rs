@@ -61,6 +61,14 @@ the current release on the actual LXC kernel with its nginx/rsync binaries in
 disposable buffered and direct-I/O fixtures. It also records why the idle reader
 and historical HTTP logs cannot establish a representative performance win.
 
+The [loaded read-shape checkpoint](docs/performance-read-shape.md) now completes
+40 isolated mounts with real Go A/A controls and independent nginx/golist/rsync
+checks. Rust HTTP throughput is 472.43 MiB/s versus experimental/packaged Go
+642.10/245.17; daemon late RSS is 87.55 versus 110.46/118.94 MiB. Experimental-Go
+payload/tail/CPU and both-reference listing losses remain. A bounded real-S3
+three-LXC attempt stops on a dependency timeout with five complete blocks, below
+the required eight. Lower short-window memory is not a sustained acceptance win.
+
 ## Directory remainder checkpoint — 2026-11-01
 
 The [observation-age checkpoint](docs/performance-observation-age.md)

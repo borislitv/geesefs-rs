@@ -4,6 +4,24 @@ This is the concise engineering context for the experimental Linux/S3 rewrite.
 Detailed results and operational logs stay outside tracked source files.
 Overall compatibility and comparative performance remain **UNACCEPTED**.
 
+## Loaded read comparison, bounded native attempt and cleanup, 2026-11-02
+
+- Attribute a live loaded trace through nginx, rsync, golist and the actual
+  GeeseFS reader journal. Complete eight five-arm isolated blocks with genuine
+  Go A/A controls and independent byte/generation checks. Rust uses less memory
+  in this transformed shape, but payload/tail/CPU losses against experimental Go
+  and listing losses against both remain. [Results](performance-read-shape.md).
+- Bound a separate three-LXC anonymous S3 control globally. Preserve the initial
+  SDK-query guard setup error and mtime mismatch; test the corrected payload
+  cohort without claiming metadata parity. An upstream HEAD timeout stops the
+  run after five complete blocks, below the eight-block gate. Retain failures,
+  cumulative traffic limits and unchanged served-reader/cleanup checks.
+- Correct a cleanup verification gap: older timed-out rename tests retain
+  kernel-blocked threads and mounts despite failed units, blocking host `df`.
+  Prove ownership, release only the disposable connections and ordinarily
+  unmount them. Verify task exit, restored `df` and unchanged unrelated mounts;
+  require private namespaces and actual cleanup checks. No runtime change.
+
 ## Read-only target preflight and verification correction, 2026-11-02
 
 - Record read-only serving as the operator's first performance priority. Inspect

@@ -16,8 +16,13 @@ all-metric/all-pair predicate. Writer RPC actors and an identical-binary control
 are now recorded. **Read-only serving is the operator's primary target**:
 prioritize random/concurrent read, metadata and cache-residency work over writer
 RPCs. The [actual LXC preflight](performance-target-preflight.md) passes isolated
-nginx/rsync byte contracts, but its existing reader is idle. Obtain a current
-loaded trace before deriving a representative read workload from that host.
+nginx/rsync byte contracts, while its initial reader inventory is idle. A later
+[loaded-neighbor capture](performance-read-shape.md) now supplies four-source
+attribution and a 40-mount transformed comparison. Payload/tail/daemon-CPU losses
+against experimental Go and listing losses against both remain. The bounded
+native-S3 attempt stops after five complete blocks on a dependency timeout;
+complete the eight-block gate and sustained working-set measurements before
+claiming target-environment superiority.
 
 The operator clarified on 2026-11-01 that Rust need not beat Go where Go is
 demonstrably logically weaker. The permission-expiry gap below makes that path's

@@ -29,8 +29,9 @@ Do not assign their whole-vhost mix or elapsed HTTP time to the current FUSE mou
 The log records request duration and bytes sent, but not exact Range offsets,
 object generations, FUSE operations or S3 durations. Bytes sent include headers
 and error/conditional responses. They cannot reconstruct a checksum-verified
-filesystem replay, a cache working set or a daemon-latency distribution. Current
-loaded-neighbor logs still require a live SSH authentication agent.
+filesystem replay, a cache working set or a daemon-latency distribution. A
+[subsequent loaded-neighbor capture and bounded native attempt](performance-read-shape.md)
+now add four-source attribution and explicitly transformed read comparisons.
 
 ## Actual-kernel interoperability result
 
@@ -72,10 +73,11 @@ direct-I/O policies must remain separately labelled, especially for mmap users.
 
 ## Next measurement boundary
 
-Obtain a current loaded read trace with route attribution: filesystem-backed
-payload, direct backend/origin responses and listing-service responses are
-different actors. Establish byte/generation oracles, concurrency, working-set
-size, actual FUSE activity and cache policy before paired measurements. Separate
-resident reads, cache misses and metadata expiry; preserve freshness and budgets.
-Use the [eight-mount A/A protocol](performance-methodology.md), keeping live
-performance claims open until representative sustained evidence exists.
+The subsequent loaded trace separates filesystem payload, direct backend/origin
+and listing-service actors, then completes 40 isolated mounts with genuine Go
+A/A controls. Its transformed inputs and adverse results are reported in the
+[read-shape checkpoint](performance-read-shape.md). The real-S3 LXC attempt stops
+on an upstream timeout with only five complete blocks, not the required eight.
+Complete independent native pairs under a stable dependency window, then extend
+working set and duration while preserving freshness/budgets. Separate resident
+reads, misses and expiry; neither checkpoint establishes sustained acceptance.

@@ -13,9 +13,13 @@ reuse are suspended/inconclusive; implementations remain absent. A real A/A arm,
 eight independent mount pairs and paired CIs replace strict wins in every sample.
 Extra loops retain independent buffer/rate objections. Actual LXC access is now
 authorized and an isolated read-only nginx/rsync fixture passes on the actual
-kernel. The existing reader is idle; loaded-neighbor access still needs a live
-SSH agent. See [target preflight](performance-target-preflight.md). Private
-host/mount identifiers stay outside public source.
+kernel. The initial reader inventory is idle. A subsequent loaded-neighbor
+capture now completes four-source attribution and a 40-mount transformed replay;
+the native-S3 attempt stops on an upstream timeout with five complete A/A blocks.
+See [read-shape results and gaps](performance-read-shape.md). Historical failed
+test mounts that blocked host `df` are identified and removed; future native
+fixtures require private mount namespaces and actual task/mount cleanup checks.
+Private host/mount identifiers stay outside public source.
 
 - Deliver a Linux/S3 Rust replacement for both readers and writers, reusing an
   existing FUSE implementation and public dependencies. FUSE passthrough and a

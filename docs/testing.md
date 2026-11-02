@@ -43,6 +43,32 @@ with a two-CPU quota, and a disposable backend reached through a temporary SSH f
 It does not test the served configuration, golist, real S3 or sustained load.
 See [target evidence and remaining measurements](performance-target-preflight.md).
 
+## Loaded read controls and mount cleanup — 2026-11-02
+
+The [read-shape checkpoint](performance-read-shape.md) completes a private
+40-mount nginx/golist/rsync design with actual Go A/A controls, independent bytes
+and final backend generation checks. A separate real-S3 LXC attempt stops on a
+dependency timeout with five complete blocks; it does not meet the eight-pair
+gate. The guard's twelve local-wire cases and ten relevant faults verify request,
+byte, concurrency, rate, path, credential and redirect boundaries. Full/partial
+body corruption and removed-oracle controls verify the native client byte checks.
+These private runners do not verify the public generic matrix end to end.
+
+A host audit finds three stale disposable mounts. Two retain kernel-blocked
+threads under zombie leaders from earlier failed rename tests; `df` waits in
+FUSE getattr. The idle mount unmounts normally, but the other two return busy.
+After ownership is proved, only those two disposable connections are aborted
+and ordinarily unmounted; the tasks exit and bounded `df` passes again.
+Unrelated FUSE mounts are unchanged. This corrects the earlier cleanup conclusion:
+inactive/failed units and `MainPID=0` do not establish absence of live threads.
+
+Run native tests in a private mount namespace or a dedicated unit with
+`PrivateMounts=yes`, with finite run/stop deadlines. Verify actual remaining
+processes/cgroups and mount identities after failures, including zombie leaders
+with live threads. Never infer ownership from a connection number or abort all
+FUSE connections; preserve unrelated/served mounts. A private namespace prevents
+host mount propagation, but does not replace verifying that blocked tasks exit.
+
 ## Retained rename correction — 2026-11-02
 
 This block records the earlier rename-only source and verification scope.
@@ -123,7 +149,8 @@ fallocate/truncate/rename/removal and durable close. Run separately on an author
 Linux fixture:
 
 ```bash
-timeout 180s cargo test --locked --test fuse_directory -- --ignored --test-threads=1
+timeout --kill-after=10s 180s unshare --mount --propagation private \
+  cargo test --locked --test fuse_directory -- --ignored --test-threads=1
 python3 -m unittest discover -s bench -p 'test_*.py'
 ```
 

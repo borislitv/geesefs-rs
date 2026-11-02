@@ -58,6 +58,13 @@ class PairedAssessmentTests(unittest.TestCase):
         self.assertEqual(result["ci95"], [1.0, 1.0])
         self.assertEqual(result["status"], "within_noise")
 
+    def test_interval_touching_the_loss_boundary_is_inconclusive(self):
+        # Seven unchanged mounts plus one slowdown permit a resampled mean of one.
+        result = paired.assess([1.0] * 7 + [1.5], [1.0] * 8, margin=1)
+        self.assertEqual(result["ci95"][0], 1.0)
+        self.assertGreater(result["ci95"][1], 1.0)
+        self.assertEqual(result["status"], "inconclusive")
+
     def test_unit_margin_is_a_valid_no_extra_cost_requirement(self):
         self.assertEqual(paired.assess([1.0] * 8, [0.98, 1.02] * 4, margin=1)["status"], "non_inferior")
 

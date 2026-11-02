@@ -132,6 +132,11 @@ reader restart is used to manufacture that evidence.
 
 ## What still prevents a serving-equivalent side mount
 
+Current-source update: explicit `allow_other` now uses supported fuser session
+access and passes the [three-case native regression](testing.md#cross-uid-mount-access--2026-11-02).
+The frozen-binary rejection below remains valid for that measured executable;
+it does not describe the corrected source or establish deployment acceptance.
+
 The Go serving reader already uses `allow_other`. The gap below is in the
 measured Rust rewrite, not a fault in the working Go mount or an architectural
 restriction on serving. An isolated Rust mount for its owner already works; that

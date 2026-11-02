@@ -75,12 +75,13 @@ direct-I/O policies must remain separately labelled, especially for mmap users.
 
 The [listing and reader diagnosis](performance-listing-diagnosis.md) exposes
 requirements these owner-run fixtures did not cover. The Go serving reader
-already uses `allow_other`; the measured Rust executable rejects
-`allow_other`, `dev` and `suid`. Rust's fuser remains configured for the mounting UID
-only. A disposable non-owner read gets `EACCES` despite a `0644` file and `0755`
-mount root. Exact profile/signing/extended metadata and a realistic namespace
-under pinned-inode pressure also remain unverified. A private owner-only side
-mount is possible, but the existing serving configuration is not a drop-in match.
+already uses `allow_other`; the frozen pre-fix Rust executable rejects
+`allow_other`, `dev` and `suid`. A disposable non-owner read gets `EACCES` despite
+a `0644` file and `0755` mount root. Current explicit `allow_other` wiring passes
+the [local cross-UID regression](testing.md#cross-uid-mount-access--2026-11-02);
+the earlier result remains scoped to its pre-fix executable. Exact target service
+users, profile/signing/extended metadata and a realistic namespace under pinned-
+inode pressure remain unverified. `dev` and `suid` are still unsupported.
 The loaded reader's large anonymous footprint is distinct from the idle-reader
 snapshot above; its live-heap owners remain blocked by the absent profiler.
 

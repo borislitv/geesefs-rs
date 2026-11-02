@@ -1,14 +1,10 @@
-# FUSE io_uring assessment, including small-core configurations — 2026-11-01
+# FUSE io_uring assessment and upstream watch — 2026-11-02
 
-Update 2026-11-01: integration is stopped under the upstream-first rule; see the
-[plan review](pr-context.md#upstream-first-review-of-all-plans-2026-11-01). The
-original decision follows.
-
-Decision: worth a bounded experiment, especially for cache-hit metadata/small I/O
-and concurrent request dispatch. It is not an established speedup for this S3
-filesystem. The operator explicitly permits a small CPU allocation; large-core
-defaults are not a reason to reject the design. No kernel, transport or runtime
-change is made by this assessment.
+**Decision: no integration or further standalone laboratory work.** The reviewed
+released public Rust crates do not provide a fitting transport for the current
+fuser stack. Retain the public-source analysis and completed native C controls;
+kernel installation/boot recipes and execution journals stay in ignored evidence.
+Re-entry requires the [upstream-watch conditions](#upstream-watch).
 
 Go-relative comparisons now require equivalent correctness, per the
 [operator clarification](project-brief.md#acceptance-gates). The
@@ -72,8 +68,7 @@ Reuse candidates inspected before any custom transport:
 Keep local `unsafe_code = "forbid"`; a maintained dependency's safe public API is
 the reuse boundary. Per the operator on 2026-11-01, forks of shared libraries are
 excluded and released upstream versions are preferred even at a modest
-performance cost; integration is stopped until a released transport exists (see
-the [plan review](pr-context.md#upstream-first-review-of-all-plans-2026-11-01)).
+performance cost; integration is stopped until a fitting released transport exists.
 No candidate has yet passed our full owned-reply, write,
 cancel/unmount, mmap, READDIRPLUS reference and notification contracts.
 
@@ -115,10 +110,39 @@ vCPUs nominally need 4/8 MiB of pool payload space; this is a sizing example, no
 a demonstrated sufficient concurrency setting. Pool starvation/backpressure and
 metadata progressing alongside data I/O still need testing.
 
-The present VM has kernel `7.0.0-38-generic`, possible CPUs `0-255`,
-`fuse.enable_uring=N` and `kernel.io_uring_disabled=0`. It is not a small-possible-
-CPU 7.3 test environment. No module parameter, host CPU setting or kernel was
-changed, and no 7.3 A/B result is claimed.
+The completed standalone C lab uses Linux 7.3.1 and upstream libfuse
+`fe66006fbbe2ba32e8e1252df610a948b30c3f43` (3.19.0-rc0), with 256 possible CPUs,
+64 online CPUs and a child restricted to four CPUs. The guest itself is not
+CPU-capped. This placement does not reduce the 256 queues or their payload backing.
+
+## Native C controls and limits
+
+Classic, basic uring and pool controls each pass 14 local-backed filesystem
+checks, including bytes, mutation/fsync, mmap and symlinks. INIT and syscall traces
+confirm actual uring negotiation and all 256 rings, not a constant or build flag.
+Legacy inode notifications remain functional while ordinary requests use uring;
+omitting the notification fails the cached-byte freshness assertion.
+
+| Diagnostic control | Daemon threads | Fixed pools | RSS / peak RSS, MiB | Owned daemon-scope peak, MiB |
+| --- | ---: | ---: | ---: | ---: |
+| Classic, memlock 64 MiB | 6 | n/a | 3.01 / 3.57 | 5.68 |
+| Basic uring, memlock 64 MiB | 258 | n/a | 2,064.13 / 2,064.13 | 2,081.65 |
+| Pool, `CAP_IPC_LOCK`, memlock 64 MiB | 258 | 256/256 | 2,064.13 / 2,064.13 | 2,081.84 |
+| Pool, no `CAP_IPC_LOCK`, memlock 64 MiB | 258 | 8/256 | 2,064.13 / 2,064.13 | 2,081.65 |
+| Pool, no `CAP_IPC_LOCK`, memlock 3 GiB | 258 | 256/256 | 2,064.12 / 2,064.12 | 2,081.92 |
+
+These instrumented short footprints exclude the client/backing fixture and are
+not acceptance timings or memory plateaus. Eager libfuse payload population causes
+the approximately 2 GiB RSS; it is not a kernel requirement or proof that pools
+save application memory. Root's `CAP_IPC_LOCK` bypasses memlock. Dropping it makes
+248 registrations fail with `ENOMEM`; unregistered fallback still passes bytes,
+while the full-registration gate fails as intended. Raising child-only memlock
+restores registration. All mounts/tasks clean up normally.
+
+The four-CPU cpuset holds 256 qid workers and rejects 252 attempted bindings, so
+timing that layout would include thread contention. Cross-CPU byte checks are not
+per-qid routing counters. Rust still uses unchanged classic fuser transport; no
+native C result establishes Rust/S3 interoperability or a speedup.
 
 ## Expected benefit and useful comparison
 
@@ -140,18 +164,18 @@ changed, and no 7.3 A/B result is claimed.
   application cache budget. Fewer cores can trade CPU cost against saturation
   and queue tails; it is an experiment axis, not an assumed improvement.
 
-The appropriate experiment uses a dedicated 7.3.x guest with **verified** 2 and 4
-possible vCPUs, then 1/2 transport workers and depths 4/8. Hold application/Tokio
-workers and payload budgets constant between transports. On the same kernel and CPU budget,
-compare existing fuser one-loop and bounded multi-loop controls against a reused
-io_uring transport; separate basic transport, buffer pools and zero-copy. First
-prove full bytes, fresh modes, generations, fsync failure/recovery, cancellation,
-FORGET/PLUS ownership and notification/shutdown behavior. Then rotate repeated
-cache-hit metadata/4 KiB reads, expired metadata, S3 misses and writer/fsync runs,
-reporting throughput, pooled tails, CPU/work, all memory and pressure counters.
-Select a transport only for a reproducible correctness-equivalent improvement.
+## Upstream watch
 
-Versioned public sources and local-configuration receipts are retained in ignored
-`benchmark-results/private/vm-20261031-integrated/kernel73-{research,reuse}-v1`.
-This assessment establishes feasibility and constraints, not integration or a
-measured performance result.
+The 2026-11-02 review still finds fuser 0.18.0 and fuse-backend-rs 0.14.0 as latest
+stable, with no fitting released non-fork transport. Revisit only when a released
+API supplies transport and required notifications, actual LXC host/confinement
+supports it, and cache-hit profiles attribute at least 10% of daemon CPU to
+transport. The isolated classic probe observes 26.99% inclusive transport CPU,
+but that does not close the API or deployment conditions.
+
+The [classic dispatch checkpoint](performance-classic-dispatch.md) completes the
+supported-API controls; do not repeat them without new evidence. Any future
+transport comparison must retain byte/generation, cancellation, owned-reply,
+durability, notification and shutdown proofs, plus unchanged budgets and the
+[paired statistical protocol](performance-methodology.md). Public sources, raw
+native receipts and original failures remain in ignored evidence.

@@ -1,19 +1,19 @@
 # Performance acceptance: UNACCEPTED
 
-The latest [observation-age checkpoint](performance-observation-age.md) verifies
-1,440 mixed phases and eight final generations for retained runtime `1b13033`.
-The [expiry diagnosis](metadata-expiry-diagnosis.md) then establishes a specific
-permission-freshness difference from Go, not a new runtime performance result.
-The earlier [integrated metadata/handle checkpoint](performance-integrated.md)
-retains its 240 healthy cold/warm records and 2,880 mixed phases, original
-controller failures and missing short-window measurements under its source scope.
+The latest [listing controls](performance-listing-diagnosis.md) attribute the
+default-Rust loss to repeated absent-name probes; the existing explicit negative
+cache removes them under the accepted Go-parity TTL contract. The
+[read-shape matrix](performance-read-shape.md) is a transformed local workload;
+its bounded real-S3 follow-up stops after five complete blocks. Neither closes
+sustained target-environment or whole-filesystem acceptance.
 
-The earlier [native admission/directory checkpoint](#native-vm-admissiondirectory-checkpoint--2026-10-31)
-and cache-policy observations retain their original scopes. None establishes
-a memory plateau or an all-metrics win.
-Full compatibility and comparative acceptance remain open. Cold-start
-superiority is not required. See [next work](next-work.md) for confirmed causes
-and [change history](change-history.md) for corrections.
+Earlier [integrated](performance-integrated.md),
+[observation-age](performance-observation-age.md),
+[admission/directory](#native-vm-admissiondirectory-checkpoint--2026-10-31) and
+[cache-policy](performance-cache-policy.md) results retain their exact source
+scopes, failures and tables. Current access wiring is verified separately in
+[testing](testing.md). Cold-start superiority is not required; see
+[next work](next-work.md) for remaining gates.
 
 ## Comparison contract
 
@@ -25,10 +25,13 @@ and [change history](change-history.md) for corrections.
   correctness-equivalent Rust controls, and does not establish overall acceptance.
 - Pin public source revisions, compiler versions, executable hashes, dataset
   manifest/generations, kernel, mount arguments and workload order.
-- Compare both Go references: experimental
-  `5c0884c9e8799bbab93e2d4102fdc15e9c079e0d` and packaged
-  `80c214ef14f620d93407454fc76ca01dd71fa25f`. Retained Go binaries use Go 1.25.9;
+- Use Go 0.43.9 source `80c214ef14f620d93407454fc76ca01dd71fa25f` as the primary
+  reference. The unmerged `5c0884c9e8799bbab93e2d4102fdc15e9c079e0d` experiment
+  remains historical evidence only. Retained benchmark builds use Go 1.25.9;
   an earlier report incorrectly identified its Go 1.22.2 launcher as the compiler.
+- Use the [paired protocol](performance-methodology.md): eight independent mount
+  pairs, genuine same-executable/configuration A/A controls and predeclared
+  practical non-inferiority margins. Earlier short controls are descriptive.
 - Hold budgets, concurrency and resources equal. The earlier sealed diagnostic
   uses 512 MiB application payload, 100,000 entries, four 128 KiB readers and eight
   runtime workers; filesystem/client has 8 CPU / 16 GiB, backend 16 CPU / 12 GiB,
@@ -52,7 +55,7 @@ and [change history](change-history.md) for corrections.
   memory separately. Missing metrics remain missing. RSS is not cgroup memory;
   final-fifth RSS is not proof of a plateau; wall time is not CPU cost.
 - Keep arithmetic mean rates separate from total work divided by total measured
-  time. The 2026-10-30 README tables use the latter for throughput, but report mean
+  time. The [2026-10-30 tables](performance-cache-policy.md) use the latter for throughput, but report mean
   run percentiles. Rare 30-second successful reads make the distinction material:
   that candidate's sequential mean rate is 238.84 MiB/s, whereas total-work/time is
   115.93. The new VM tables use pooled percentiles. Preserve both aggregations,
@@ -110,8 +113,8 @@ Do not remove If-Match, checksum validation or bounded ownership to match a weak
 reference path. FUSE passthrough and disk-backed caching remain deferred.
 
 Store raw results, traces, provenance and failures in ignored evidence directories.
-Source documentation keeps conclusions and reasons. The operator-requested
-README checkpoint contains aggregate timing/RSS/CPU tables; per-run results,
+Source documentation keeps conclusions and reasons. The retained
+checkpoint pages contain aggregate timing/RSS/CPU tables; per-run results,
 expanded JSON exports, generated flamegraphs and execution journals stay ignored.
 
 ## Executable identities

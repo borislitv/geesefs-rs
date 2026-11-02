@@ -117,71 +117,28 @@ questions or authentication prompts.
 
 ## Current diagnostic priority
 
-Attribute substantial CPU costs and read waits through CPU/off-CPU profiles,
-FUSE/scheduler events and controlled comparisons before another runtime fix.
-Keep instrumented timings separate from acceptance measurements. The operator
-permits testing higher CPU allocations: apply each allocation equally to Rust and
-Go 0.43.9, report filesystem/client, backend and parent-group limits,
-and keep worker counts and memory budgets explicit. An improvement after adding
-CPU is a resource-sensitivity result, not evidence of a source-code optimization.
+Attribute substantial CPU costs and read waits through profiles, FUSE/scheduler
+events and controlled comparisons before another runtime fix. Keep instrumented
+timings separate from acceptance. Higher CPU allocations are allowed when applied
+equally to Rust and Go 0.43.9; report actual filesystem/client, backend and parent
+limits, workers and pressure counters. Resource sensitivity is not a source fix.
 
-The latest [listing and reader-memory diagnosis](performance-listing-diagnosis.md)
-attributes the large golist loss to repeated absent-name S3 probes. The existing
-explicit negative-cache option removes that cost in eight controlled blocks.
-Its observed external-create delay is accepted Go-parity cache behavior. Both CLI
-defaults and the main comparison use a one-minute metadata TTL; five seconds was
-only a separate expiry probe. The cache-size default remains zero; comparisons
-explicitly enable 64 misses per directory. The Go serving reader already uses
-`allow_other`; the measured Rust executable still needs that cross-UID wiring and
-a large-namespace memory envelope. Root-only fixtures
-do not establish those contracts. Anonymous reader memory is identified, but its
-live-heap owners remain unprofiled because the configured listener is absent.
+The [listing diagnosis](performance-listing-diagnosis.md) attributes the default
+loss to repeated absent-name probes. Eight controlled blocks verify the existing
+explicit negative cache; use 64 misses per directory and one-minute stat TTL.
+The default stays zero and five seconds was only a separate expiry probe.
 
-The earlier verified code-diagnosis fixture uses 8 CPU / 16 GiB for filesystem plus
-client and 16 CPU / 12 GiB for the synthetic S3 backend, with parent ceilings of
-24 CPU / 28 GiB. An intermediate 8 GiB filesystem/client limit still caused
-page reclaim despite low daemon RSS. Verify actual limits and pressure counters
-for each new fixture instead of assuming these numbers guarantee headroom.
-Keep the application payload budget and worker counts explicit and unchanged
-when comparing fixed-binary resource effects.
+The earlier frozen Rust executable lacked cross-UID wiring. Current explicit
+`allow_other` uses the supported fuser access policy, with owner-only and file-mode
+controls in a [public native fixture](testing.md#cross-uid-mount-access--2026-11-02).
+Target service/profile compatibility and large-namespace memory remain open.
+Observed reader memory is anonymous; the absent existing listener still blocks
+live-heap-owner attribution. Small fixtures do not establish a whole-process bound.
 
-The [change history](change-history.md) summarizes confirmed refill, cross-reader
-eviction and read-history lifetime corrections. Warm duplicate payload disappears
-in the selected comparison, but both Go mean p99 values remain lower. Initial-read
-joins point to before-request and after-socket client work for further attribution.
-These observations do not pass acceptance or explain every wait. The subsequent
-64 MiB representative matrix and persistent mixed run expose substantial random
-read and sustained-rate losses. Current checkpoint tables are in the
-[README](../README.md); [architecture](architecture.md) describes the delivered
-design and [next work](next-work.md) records confirmed causes and unresolved
-attribution. Subsequent fixed-binary native GET/FUSE profiles confirm the repeated
-warm cache misses without quota throttling or reclaim. Required admission can now
-use revocable idle flush capacity without changing the total payload limit;
-owned replies and active uploads retain their separate progress guarantees.
-The subsequent 120-record healthy-warm comparison eliminates repeated random GETs
-but retains tail, concurrent-read and memory losses. All four binaries complete
-60 persistent mixed cycles; candidate Rust takes 709 seconds versus 600 for both
-Go references. Rare successful approximately 30-second Rust reads are a new
-attribution priority, not yet a proven SDK/admission defect. Full comparative and
-compatibility acceptance remains open; current numbers and scopes are in the README.
-
-The subsequent native VM investigation joins the 30-second read to admission
-missing cache owners published after its initial reclamation sweep, and observes
-a deterministic failing test before correction. Source `67f7aec` reclaims on
-publication without losing FIFO position; directory-local epochs also preserve
-fresh listings across unrelated writes. Its fixed-work control improves elapsed
-and metadata work. The reverse-order equal-rate control meets its schedule, but
-exposes a late-run metadata-tail regression and higher late cgroup memory than Go.
-Tail/throughput losses and full compatibility remain open; neither control proves
-a memory plateau. See the separate [2026-10-31 checkpoint](performance.md#native-vm-admissiondirectory-checkpoint--2026-10-31).
-
-The first-stage scope still excludes FUSE passthrough and disk-backed caching.
-No single profile proves that every possible optimization is exhausted; report
-covered workloads, unresolved attribution and remaining compatibility gaps.
-
-The [integrated 2026-11-01 checkpoint](performance-integrated.md) measures the
-subsequent freshness/PLUS/LIST, per-open history and clean-fsync changes together.
-Its 240 healthy records and 2,880 mixed phases are independently byte/generation
-verified, while original isolated-controller errors and short-window accounting
-gaps remain retained. Paced metadata tails improve; metadata/writer throughput
-and concurrent/equal-rate cgroup memory still lose. Full acceptance remains open.
+[Architecture](architecture.md) describes retained corrections, and
+[history](change-history.md) records their confirmed causes. Frozen
+[measurement pages](performance.md) preserve exact-source tables and limitations;
+[next work](next-work.md) lists actionable gaps. Short controls, missing/noisy
+observations and a partial native-S3 run do not establish sustained acceptance.
+FUSE io_uring remains an upstream watch; passthrough and disk-backed cache are
+deferred. No single profile proves that all optimization opportunities are exhausted.

@@ -78,6 +78,7 @@ to reproduce the reference's lower HEAD count.
 | Contract | Reference requirement | Status |
 | --- | --- | --- |
 | fstab | Exactly `program bucket mount -o comma-options`: dash-prefixed tokens become CLI flags, other tokens stay mount options | Normalizer/parser tests; foreground mount dispatch implemented |
+| cross-UID access | Explicit `allow_other` admits other UIDs while preserving kernel permission checks; default remains owner-only | Supported fuser session policy, parser regression and three real-FUSE UID/mode byte-access cases; full target-service acceptance outstanding |
 | metadata | Lowercase escaped names before path-unescape; malformed key/value escapes omit that pair; plus is literal; empty decoded map is known empty | Adapter tests include Unicode printing categories, invalid UTF-8 RuneError and per-byte escaping |
 | defaults | endpoint https://storage.yandexcloud.net; region us-east-1; memory 1000 MiB; entry 100000; modes 0755/0644; symlink key --symlink-target | Parsed subset tested |
 | attributes | Configurable keys uid/gid/mode/rdev/mtime; integer Unix seconds, POSIX mode conversion, cloud/user xattrs; symlink target in metadata | Implemented subset; mounted mode/mtime/symlink/user xattr/FIFO checks on Rust and Go; full cloud/attribute matrix outstanding |
@@ -93,7 +94,7 @@ to reproduce the reference's lower HEAD count.
 | pressure | Pinned and queued allocations charged, reserved flush progress, bounded admission | Owner charging, reserved flush lane, full dirty-budget progress and cancelled multipart cleanup tests; not a whole-process RSS bound |
 | FUSE | Exactly-once owned replies, bounded scheduling, xattrs/fallocate/fsyncdir/mmap/RO/shutdown | fuser callbacks implemented; actual mount/unmount, mmap, fsyncdir exercised; full callback/failure matrix outstanding |
 | clients | rsync full/delta, nginx full/Range, concurrent writers, injected upload/copy/completion failures | Actual rsync, aiohttp and nginx 1.28.3 full/Range/EOF checks on Rust and both Go binaries; Rust mounted fsync recovery passes; Go open-file recovery remains EAGAIN through 75-second deadline; no all-xfstests claim |
-| performance | Both verified Go baselines, unchanged budgets, repeated cold/warm work, all accounting and tails | Selected read comparisons measured; representative matrix and p99 gate remain unaccepted |
+| performance | Go 0.43.9 primary reference, unchanged budgets, repeated cold/warm work, all accounting and tails; unmerged Go experiment historical only | Selected read comparisons measured; representative matrix and p99 gate remain unaccepted |
 
 No atomic S3 rename or writable-unlinked POSIX behavior is promised by the
 reference. A failure of required optional behavior leaves overall compatibility

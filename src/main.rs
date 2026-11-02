@@ -104,6 +104,17 @@ fn spawn_stats(
     })))
 }
 
+fn kernel_mount_option(option: &str) -> Result<fuser::MountOption, Box<dyn std::error::Error>> {
+    Ok(match option {
+        "ro" => fuser::MountOption::RO,
+        "rw" => fuser::MountOption::RW,
+        "nosuid" => fuser::MountOption::NoSuid,
+        "nodev" => fuser::MountOption::NoDev,
+        "noexec" => fuser::MountOption::NoExec,
+        _ => return Err("unsupported mount option".into()),
+    })
+}
+
 fn mount_options(config: &Config) -> Result<fuser::Config, Box<dyn std::error::Error>> {
     let mut options = fuser::Config::default();
     options
@@ -113,15 +124,11 @@ fn mount_options(config: &Config) -> Result<fuser::Config, Box<dyn std::error::E
         .mount_options
         .push(fuser::MountOption::DefaultPermissions);
     for option in &config.mount_options {
-        options.mount_options.push(match option.as_str() {
-            "ro" => fuser::MountOption::RO,
-            "rw" => fuser::MountOption::RW,
-            "nosuid" => fuser::MountOption::NoSuid,
-            "nodev" => fuser::MountOption::NoDev,
-            "noexec" => fuser::MountOption::NoExec,
-            "default_permissions" => continue,
-            _ => return Err("unsupported mount option".into()),
-        });
+        match option.as_str() {
+            "allow_other" => options.acl = fuser::SessionACL::All,
+            "default_permissions" => {}
+            option => options.mount_options.push(kernel_mount_option(option)?),
+        }
     }
     Ok(options)
 }

@@ -482,6 +482,7 @@ impl Config {
             if ![
                 "ro",
                 "rw",
+                "allow_other",
                 "nosuid",
                 "nodev",
                 "noexec",

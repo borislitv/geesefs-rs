@@ -31,6 +31,20 @@ passes final size, not current part length or a preferred-upload prefix length.
 Reference SDK per-delay tuning flags and other missing reference CLI options
 remain rejected rather than silently ignored.
 
+## Cross-UID mount access
+
+`-o allow_other` selects the supported fuser `SessionACL::All` policy. Without
+that explicit option, access remains restricted to the mounting UID. Kernel
+`default_permissions` is always enabled: allowing another UID through the FUSE
+session does not bypass directory or file modes. `ro`, `rw`, `nosuid`, `nodev`
+and `noexec` retain their kernel mappings; unknown options fail validation.
+`dev`, `suid` and Go's `--pprof` remain unsupported.
+
+The [native access regression](testing.md#cross-uid-mount-access--2026-11-02)
+checks independent bytes for a readable file, owner-only denial and mode-0600
+denial through an explicit disposable fixture. This closes option wiring, not
+full service-user, target-environment or production compatibility.
+
 ## PATCH writer integration
 
 The backend now exposes:

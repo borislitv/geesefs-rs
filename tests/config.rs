@@ -52,6 +52,25 @@ fn exact_fstab_shape_normalizes_reference_flags() {
     c.validate().unwrap();
 }
 
+#[test]
+fn allow_other_survives_reference_fstab_normalization() {
+    let arguments = [
+        "geesefs-rs",
+        "bucket",
+        "/tmp/mount",
+        "-o",
+        "ro,allow_other,--f,--memory-limit=64",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+    let config = Config::try_parse_from(normalize_fstab(arguments)).unwrap();
+    config.validate().unwrap();
+    assert!(config.foreground);
+    assert_eq!(config.memory_limit, 64);
+    assert_eq!(config.mount_options, ["ro", "allow_other"]);
+}
+
 #[tokio::test]
 async fn rejects_unsupported_options_in_actual_binary() {
     for flag in [
@@ -81,7 +100,7 @@ fn validates_boundary_values_without_contacting_backend() {
         vec!["geesefs-rs", "--max-flushers=0", "bucket", "/tmp/mount"],
         vec!["geesefs-rs", "--max-flushers=4097", "bucket", "/tmp/mount"],
         vec!["geesefs-rs", "bucket:../escape", "/tmp/mount"],
-        vec!["geesefs-rs", "-o", "allow_other", "bucket", "/tmp/mount"],
+        vec!["geesefs-rs", "-o", "allow_others", "bucket", "/tmp/mount"],
     ] {
         assert!(Config::try_parse_from(args).unwrap().validate().is_err());
     }

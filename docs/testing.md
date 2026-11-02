@@ -5,6 +5,42 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Cross-UID mount access — 2026-11-02
+
+The public `scripts/mount_access.py` fixture requires explicit root, private mount
+and network namespaces, a disposable local backend and a finite deadline. For
+example, inside an owned resource-limited test unit:
+
+```bash
+timeout --kill-after=5s 130s unshare --mount --net --propagation private \
+  python3 scripts/mount_access.py --binary "$GEESEFS_RUST_BINARY" \
+  --output "$GEESEFS_ACCESS_RESULTS"
+```
+
+The output directory must not already exist. A child with UID/GID 65534 and no
+supplementary groups reads via an inherited mount-root descriptor, so private
+fixture ancestors cannot explain `EACCES`. All three real-FUSE cases pass:
+
+- Default owner-only session: readable mode-0644 file is denied to the other UID.
+- Explicit `ro,allow_other`: the other UID reads the independently specified bytes.
+- Explicit `allow_other` plus mode 0600: the other UID is still denied by kernel
+  permissions. The mount also retains `nodev,nosuid,noexec,default_permissions`.
+
+The normalization test first rejects `allow_other` on the original parser. After
+accepting it, an entrypoint fault that omits `SessionACL::All` makes the native
+readable-file assertion fail with `EACCES`; restoring the wiring passes. A prior
+interpreter-path setup failure is retained separately, not counted as fault
+sensitivity. All positive mounts unmount normally and daemons/scopes exit.
+
+For this source, both allocator suites pass 253 cases with 13 native tests ignored
+by default; the explicit access fixture supplies the three cases above. Formatting,
+all-target/all-feature Clippy, release build and all 99 benchmark Python tests pass.
+Fresh LLVM/Python profiles give affected CRAP scores at most 8.3; affected
+duplication at 0.8 is absent. The broader-file CRAP gate still fails. The automated
+mutation scan found zero eligible sites and supplies no mutation score; the native
+omitted-ACL fault is the failure-sensitivity evidence. These local checks do not
+establish a new performance result or production deployment.
+
 ## Listing configuration and reader-access diagnosis — 2026-11-02
 
 The [latest diagnostic checkpoint](performance-listing-diagnosis.md) uses the
@@ -17,7 +53,7 @@ used for performance screening. New Go RSS controls are biased, not a memory win
 
 A real-FUSE external-create probe demonstrates the option's natural TTL delay.
 Omitting the cache option makes its visibility assertion fail; restoring the
-correct configuration passes again. Offline option probes reject `allow_other`,
+correct configuration passes again. That frozen executable's option probes reject `allow_other`,
 `dev`, `suid` and Go's `--pprof`; a separate mount returns correct bytes to its
 owner but `EACCES` to UID 65534 via an inherited mount-root descriptor. These are
 observed integration gaps, not passing full serving compatibility. Read-only

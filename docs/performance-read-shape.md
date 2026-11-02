@@ -6,6 +6,12 @@ Detailed commands, inputs, object names, operational traces and receipts remain
 private. The [earlier target preflight](performance-target-preflight.md) retains
 its actual-kernel client contracts and initial idle-reader scope.
 
+**Reference update:** Go 0.43.9 is now the primary acceptance reference. The
+unmerged Go optimization experiment is historical evidence only. This page
+preserves the original three-implementation measurements; the subsequent
+[listing diagnosis and configuration control](performance-listing-diagnosis.md)
+explain the default-Rust loss and its freshness tradeoff.
+
 ## Loaded-neighbor evidence and transformation
 
 A bounded live capture now includes nginx access/error logs and routing, rsync
@@ -31,8 +37,8 @@ oracles. It is downscaled and unpaced, not an exact production replay.
 
 ## Completed isolated comparison
 
-Eight rotated blocks have five independent mounts each: Rust, experimental Go,
-packaged Go and an identical-executable control for each Go reference. Every mount
+Eight rotated blocks have five independent mounts each: Rust, the historical Go
+experiment, Go 0.43.9 and an identical-executable control for each Go arm. Every mount
 has one cold and five warm cycles. HTTP, golist and rsync phases run sequentially;
 the HTTP phase has four concurrent lanes. This is not simultaneous production
 traffic from all three clients.
@@ -48,8 +54,10 @@ The nginx fixture disables open-file caching; it is not the complete served conf
 
 The current Rust release SHA256 is
 `8cd8d48f8a1546d54cf46e6e52252eaca10e6b4dac6317e37a65a5542a388c62`.
-Go sources are experimental `5c0884c9e8799bbab93e2d4102fdc15e9c079e0d` and
-packaged `80c214ef14f620d93407454fc76ca01dd71fa25f`, built with Go 1.25.9.
+The historical Go experiment is `5c0884c9e8799bbab93e2d4102fdc15e9c079e0d`;
+Go 0.43.9 is `80c214ef14f620d93407454fc76ca01dd71fa25f`. Both are rebuilt with
+Go 1.25.9. The former's [PR239](https://github.com/yandex-cloud/geesefs/pull/239)
+is closed without merge; it is excluded from acceptance comparisons.
 
 All 40 mounts complete: 61,440 HTTP checks, 3,840 rsync file checks and 1,920
 complete listing checks. Full/partial HTTP bytes and rsync full/delta results are
@@ -65,7 +73,7 @@ These are means of eight mount endpoints. Throughput is verified HTTP body bytes
 divided by HTTP phase time; latency endpoints average per-cycle quantiles within
 a mount, not pooled population percentiles. Listing/rsync values are phase means.
 
-| Endpoint | Rust | Experimental Go | Packaged Go |
+| Endpoint | Rust | Historical Go experiment | Go 0.43.9 |
 | --- | ---: | ---: | ---: |
 | HTTP MiB/s | 472.43 | 642.10 | 245.17 |
 | HTTP p50 ms | 3.437 | 0.818 | 8.293 |
@@ -89,7 +97,7 @@ checks and 80 rsync file checks. The Python client row excludes its rsync childr
 whole-cgroup CPU includes those children and the serving processes. Normalized
 cost below includes all phases of that fixed mix, not only HTTP processing.
 
-| Endpoint | Rust | Experimental Go | Packaged Go |
+| Endpoint | Rust | Historical Go experiment | Go 0.43.9 |
 | --- | ---: | ---: | ---: |
 | Daemon RSS peak / late MiB | 87.94 / 87.55 | 112.65 / 110.46 | 119.66 / 118.94 |
 | All-process RSS peak / late MiB | 162.76 / 147.99 | 188.28 / 174.12 | 194.47 / 179.50 |
@@ -110,7 +118,7 @@ Cost ratios below one favor Rust; HTTP throughput is inverted into cost. The
 [paired protocol](performance-methodology.md) uses eight real controls per
 reference, mount bootstrap confidence intervals and no invented practical margin.
 
-| Cost endpoint | Versus experimental: ratio [95% CI], screen | Versus packaged: ratio [95% CI], screen |
+| Cost endpoint | Versus historical experiment: ratio [95% CI], screen | Versus Go 0.43.9: ratio [95% CI], screen |
 | --- | --- | --- |
 | HTTP throughput cost | 1.366 [1.244, 1.504], regressed | 0.521 [0.495, 0.553], improved |
 | HTTP p50 | 4.181 [3.806, 4.608], regressed | 0.412 [0.392, 0.434], improved |
@@ -123,8 +131,9 @@ reference, mount bootstrap confidence intervals and no invented practical margin
 | Rsync phase latency | 0.894 [0.857, 0.938], improved | 0.874 [0.837, 0.910], improved |
 
 The kernel-memory comparison against experimental Go also has biased controls.
-Lower observed memory does not remove the experimental-Go payload/tail/CPU or
-both-reference listing losses. Short windows, synthetic directory/rsync shapes
+The experimental-Go losses remain historical, not current acceptance targets.
+The default-Rust listing loss to Go 0.43.9 remains measured; the subsequent
+diagnosis explains it without silently changing policy. Short windows, synthetic directory/rsync shapes
 and the workload transformation prevent sustained or production acceptance.
 Sampler/allocator observer overhead is not separately isolated in this fixture.
 
@@ -152,7 +161,8 @@ the expected mtime-based 304. The subsequent comparable payload cohort explicitl
 tests GET/HEAD/Range, with metadata recorded separately rather than weakening the
 mtime expectation or changing the filesystem.
 
-The corrected attempt stops on one 15-second upstream HEAD timeout. No upstream
+The corrected attempt stops on one 15-second upstream HEAD timeout in the
+Go 0.43.9 control arm, not a Rust crash or byte-check failure. No upstream
 429/5xx is observed; this is not proof of storage overload. Both attempts together
 use 507 requests and 37,432,447 response bytes, with peak concurrency two and
 observed start gaps at least 0.250 s. No new upstream work is started after the
@@ -165,7 +175,7 @@ The full eight-block design and final generation HEADs are incomplete. All
 successful mounts contribute 11,520 HTTP and 1,440 rsync file checks; measured warm
 cycles of the five complete blocks start zero upstream requests of their own.
 
-| Five-block descriptive warm mean | Rust | Experimental Go | Packaged Go |
+| Five-block descriptive warm mean | Rust | Historical Go experiment | Go 0.43.9 |
 | --- | ---: | ---: | ---: |
 | HTTP MiB/s | 210.38 | 204.15 | 204.98 |
 | HTTP p50 ms | 1.658 | 1.677 | 1.712 |

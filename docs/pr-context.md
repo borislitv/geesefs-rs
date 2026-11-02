@@ -16,16 +16,24 @@ authorized and an isolated read-only nginx/rsync fixture passes on the actual
 kernel. The initial reader inventory is idle. A subsequent loaded-neighbor
 capture now completes four-source attribution and a 40-mount transformed replay;
 the native-S3 attempt stops on an upstream timeout with five complete A/A blocks.
-See [read-shape results and gaps](performance-read-shape.md). Historical failed
-test mounts that blocked host `df` are identified and removed; future native
-fixtures require private mount namespaces and actual task/mount cleanup checks.
-Private host/mount identifiers stay outside public source.
+See [historical read-shape results](performance-read-shape.md). The latest
+[listing/reader diagnosis](performance-listing-diagnosis.md) uses Go 0.43.9 as
+the primary reference, excluding the unmerged Go experiment from acceptance.
+Eight configuration-controlled blocks attribute the listing loss to repeated
+absent-name probes. Explicit negative caching removes the requests but delays
+external creates until TTL; default-zero stays unchanged. Loaded reader memory
+is anonymous, but heap owners remain unprofiled. Cross-UID access is a concrete
+serving blocker: `allow_other` is rejected and a non-owner gets `EACCES`.
+Private identities and detailed execution/cleanup records stay outside source.
 
 - Deliver a Linux/S3 Rust replacement for both readers and writers, reusing an
   existing FUSE implementation and public dependencies. FUSE passthrough and a
   disk-backed cache remain deferred. Local unsafe code is forbidden.
 - Overall status: **UNACCEPTED**. Keep the PR open and draft, targeting `main`,
   without auto-merge. Library CI is not native-filesystem or production acceptance.
+- Current reference: Go 0.43.9 source `80c214ef14f620d93407454fc76ca01dd71fa25f`.
+  Benchmark rebuilds use Go 1.25.9; the loaded installed reader uses Go 1.25.14.
+  The earlier `5c0884c` experiment remains historical evidence only.
 - Branch: `perf/prove-read-bottlenecks-20261030`. Plan B below is now measured.
   The retained runtime removes redundant post-rename entry notifications and
   splits backend errno/fallocate validation without changing their behavior.

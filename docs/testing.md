@@ -5,6 +5,29 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Listing configuration and reader-access diagnosis — 2026-11-02
+
+The [latest diagnostic checkpoint](performance-listing-diagnosis.md) uses the
+unchanged frozen release in 40 independently mounted runs: default Rust,
+explicit negative64, its identical-config A/A, Go 0.43.9 and its A/A. All byte,
+listing, rsync and final generation checks pass; resource events, task/cgroup
+exit and mount cleanup are verified. Separate traced mounts identify repeated
+miss requests, then their absence with explicit caching. Traced timing is not
+used for performance screening. New Go RSS controls are biased, not a memory win.
+
+A real-FUSE external-create probe demonstrates the option's natural TTL delay.
+Omitting the cache option makes its visibility assertion fail; restoring the
+correct configuration passes again. Offline option probes reject `allow_other`,
+`dev`, `suid` and Go's `--pprof`; a separate mount returns correct bytes to its
+owner but `EACCES` to UID 65534 via an inherited mount-root descriptor. These are
+observed integration gaps, not passing full serving compatibility. Read-only
+production memory observations preserve reader/mount identity but cannot assign
+live-heap owners without a working existing profiling listener.
+
+The change is documentation only. Full Rust/allocator and Python suites retain
+their earlier recorded scope; they are not rerun or relabelled as new coverage.
+Private probes do not close the public generic matrix or broad quality gaps.
+
 ## Statistical gate and adapter quality — 2026-11-02
 
 `bench/paired.py` and `bench/compare.py` now require eight mount pairs, a real

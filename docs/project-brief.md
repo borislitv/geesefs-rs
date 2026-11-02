@@ -11,10 +11,11 @@ with preserved required behavior. Always look for suitable ready-made Rust
 crates before implementing a component; in particular, reuse an existing FUSE
 implementation.
 
-The prior Go optimization experiment is retained as a reference, not accepted
-as a sustained whole-process memory fix. Its draft upstream PR239 was closed
-at the author's request, without merge or branch deletion. This does not imply
-that Go cannot be optimized or that Rust automatically improves memory or speed.
+The prior Go optimization experiment is historical evidence, excluded from
+acceptance comparisons by the operator on 2026-11-02. Its upstream PR239 was
+closed without merge; native metadata/conditional-response checks also expose
+unequal behavior. Preserve its raw measurements. This does not imply that Go
+cannot be optimized or that Rust automatically improves memory or speed.
 
 ## Target and reference
 
@@ -26,9 +27,11 @@ that Go cannot be optimized or that Rust automatically improves memory or speed.
   Prefer official upstream libraries over forks, including at a modest speed cost.
 - Priority clarification, 2026-11-02: read-only serving is the first performance
   target. Preserve writer correctness; prioritize read, metadata and cache work.
-- Go reference: `yandex-cloud/geesefs`, including the reproducible experimental
-  revision `5c0884c9e8799bbab93e2d4102fdc15e9c079e0d` and an identified upstream
-  packaged baseline. Preserve exact source/build hashes with benchmark results.
+- Primary Go reference: `yandex-cloud/geesefs` release 0.43.9, source
+  `80c214ef14f620d93407454fc76ca01dd71fa25f`. Preserve exact source/build hashes
+  and distinguish rebuilt benchmark executables from installed readers. The
+  experimental revision `5c0884c9e8799bbab93e2d4102fdc15e9c079e0d` remains
+  archived evidence, not an acceptance candidate.
 - Local reference checkout is supplied by the operator to the BMAD invocation;
   do not depend on a developer-specific absolute path in source code.
 - Compatibility must be derived from source/tests, including both supported
@@ -112,9 +115,18 @@ Attribute substantial CPU costs and read waits through CPU/off-CPU profiles,
 FUSE/scheduler events and controlled comparisons before another runtime fix.
 Keep instrumented timings separate from acceptance measurements. The operator
 permits testing higher CPU allocations: apply each allocation equally to Rust and
-both Go references, report filesystem/client, backend and parent-group limits,
+Go 0.43.9, report filesystem/client, backend and parent-group limits,
 and keep worker counts and memory budgets explicit. An improvement after adding
 CPU is a resource-sensitivity result, not evidence of a source-code optimization.
+
+The latest [listing and reader-memory diagnosis](performance-listing-diagnosis.md)
+attributes the large golist loss to repeated absent-name S3 probes. The existing
+explicit negative-cache option removes that cost in eight controlled blocks, but
+real FUSE probes show delayed external-create visibility until TTL, also observed
+with Go 0.43.9. Default-zero remains unchanged. Serving readiness also needs
+cross-UID mount access and a large-namespace memory envelope; root-only fixtures
+do not establish those contracts. Anonymous reader memory is identified, but its
+live-heap owners remain unprofiled because the configured listener is absent.
 
 The earlier verified code-diagnosis fixture uses 8 CPU / 16 GiB for filesystem plus
 client and 16 CPU / 12 GiB for the synthetic S3 backend, with parent ceilings of

@@ -57,6 +57,9 @@ equivalent-behavior comparisons and Rust-relative non-regressions still apply.
 - Operator priority, 2026-11-02: optimize read-only serving first. Preserve writer
   correctness and its verification while prioritizing payload reads, metadata and
   cache residency over writer performance experiments.
+- Operator reference clarification, 2026-11-02: Go 0.43.9 is the primary acceptance
+  reference. The unmerged Go optimization experiment is historical evidence only;
+  preserve its measurements without making it an acceptance candidate.
 - Require reproducible improvement rather than one favorable sample; retain raw
   measurements, failures, variance and baseline executable provenance.
 - Operator clarification, 2026-11-02: use paired confidence intervals and

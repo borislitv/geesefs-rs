@@ -2,7 +2,7 @@
 
 Overall status remains **UNACCEPTED**. This is the current working inventory;
 it separates confirmed mechanisms from hypotheses. See the
-[latest measurement tables](performance-observation-age.md),
+[latest listing and reader diagnosis](performance-listing-diagnosis.md),
 [architecture](architecture.md) and [comparison contract](performance.md).
 
 ## Current priorities after the correctness-equivalence clarification
@@ -18,11 +18,14 @@ prioritize random/concurrent read, metadata and cache-residency work over writer
 RPCs. The [actual LXC preflight](performance-target-preflight.md) passes isolated
 nginx/rsync byte contracts, while its initial reader inventory is idle. A later
 [loaded-neighbor capture](performance-read-shape.md) now supplies four-source
-attribution and a 40-mount transformed comparison. Payload/tail/daemon-CPU losses
-against experimental Go and listing losses against both remain. The bounded
+attribution and a 40-mount transformed comparison. Go 0.43.9 is now the primary
+reference; the unmerged Go experiment is excluded from acceptance and retained
+as history. A subsequent eight-block configuration control attributes the default
+listing loss to repeated absent-name probes: the existing explicit negative
+cache removes them, but real FUSE checks expose delayed external-create visibility
+until TTL, also observed with Go. Default-zero stays unchanged. The bounded
 native-S3 attempt stops after five complete blocks on a dependency timeout;
-complete the eight-block gate and sustained working-set measurements before
-claiming target-environment superiority.
+sustained target-environment performance remains unproved.
 
 The operator clarified on 2026-11-01 that Rust need not beat Go where Go is
 demonstrably logically weaker. The permission-expiry gap below makes that path's
@@ -42,19 +45,26 @@ Continue the S3/setup and retained-memory-owner attribution below; do not repeat
 an uncalibrated dispatch decision. io_uring still waits for fitting official releases
 and actual LXC policy even though the isolated transport-share condition is observed.
 
-1. Attribute random-read and concurrent-read tails/CPU at equal byte/generation
-   behavior. Current random rates are 1.73/1.79 MiB/s versus experimental Go
-   1.91/1.97; no demonstrated permission-freshness difference excuses that result.
-2. Separate unavoidable metadata/durability checks from avoidable SDK setup,
-   duplicate create probes and scheduling costs. Writer rates remain 23.39/26.13
-   MiB/s in the recorded mixed control, but unequal validation must not be assumed
-   to be an equivalent Go speed target. Overlap's four-pair effect is inconclusive.
-3. Establish long-lived memory ownership and a stable operating envelope. Current
-   daemon late RSS is 157.26/159.03 MiB and live allocation 78.00/77.09 MiB; payload
-   admission is bounded, but it is not a whole-process RSS bound or a plateau proof.
-4. Complete actual-service and remaining Linux/S3 contracts, observer/source-bound
-   controls and whole-file quality checks. A safe unsupported LINK is preferable
-   to the reference's post-error alias mutation, but is not implemented LINK support.
+1. Establish the caller's required external-create visibility before recommending
+   negative caching. Preserve default-zero and explicit TTL/race contracts; compare
+   Go 0.43.9 only where behavior is equivalent. Keep random/concurrent tails and
+   CPU under the same byte/generation checks.
+2. Wire and verify cross-UID serving access through supported fuser APIs. The
+   current binary rejects `allow_other` and returns `EACCES` to another UID even
+   for a readable file. Root-only nginx/rsync fixtures do not cover service users.
+   Translate required mount policies explicitly rather than dropping options.
+3. Establish a realistic large-namespace/long-lived memory envelope. The loaded
+   Go reader's approximately 217 GiB footprint is anonymous, not file cache;
+   missing pprof blocks live-heap attribution. Rust's entry-count limit can return
+   `ENOMEM` when all candidates are referenced; neither payload budget nor small
+   short-window RSS is a process-memory guarantee.
+4. Verify target profile/signing/extended metadata, large directories, TTL/errors
+   and remaining Linux/S3 writer contracts. Retain observer/source-bound controls,
+   whole-file quality and the public generic matrix's end-to-end gap. Unsupported
+   LINK without side effects is not positive LINK compatibility.
+
+The older workload findings below retain their source and statistical scope;
+experimental-Go comparisons no longer define current acceptance targets.
 
 The [Linux 7.3 FUSE io_uring assessment](fuse-io-uring-assessment.md) evaluates
 transport and buffer-pool opportunities separately from these backend contracts.

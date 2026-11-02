@@ -4,6 +4,22 @@ This is the concise engineering context for the experimental Linux/S3 rewrite.
 Detailed results and operational logs stay outside tracked source files.
 Overall compatibility and comparative performance remain **UNACCEPTED**.
 
+## Listing attribution and concrete serving gaps, 2026-11-02
+
+- Make Go 0.43.9 the primary reference at the operator's request; archive the
+  unmerged Go experiment without removing its adverse or favorable measurements.
+- Trace five absent-name lookups per listing to 15 default-Rust S3 requests.
+  Eight independent blocks plus identical-config controls show the existing
+  explicit negative cache removes that cost. Real FUSE external-create probes
+  also prove its TTL delay, shared with Go; keep default-zero unchanged.
+- Identify loaded reader memory as approximately 217 GiB anonymous PSS, not file
+  cache. Below-threshold metadata retention and soft/data-cache limits explain
+  policy, but an absent profiler prevents live-heap ownership attribution.
+- Reproduce unsupported mount options and cross-UID `EACCES` on a disposable
+  readable file. Owner-only fixtures did not prove nginx/rsync service access.
+  Keep full serving and giant-namespace gates open. No runtime correction is
+  introduced. [Findings, controls and limits](performance-listing-diagnosis.md).
+
 ## Loaded read comparison, bounded native attempt and cleanup, 2026-11-02
 
 - Attribute a live loaded trace through nginx, rsync, golist and the actual

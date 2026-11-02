@@ -5,8 +5,10 @@ Experimental Linux/S3 GeeseFS replacement for readers and writers.
 incomplete. Do not replace a served mount with this implementation.
 
 The goal is preserved filesystem/S3 behavior with lower memory use and faster
-normal, sustained operation than both identified Go references. A language change,
-passing unit tests or one favorable workload does not satisfy that goal.
+normal, sustained operation than **Go 0.43.9**, the primary reference. The earlier
+unmerged Go optimization experiment is excluded from acceptance comparisons;
+older tables retain its historical results. A language change, passing unit tests
+or one favorable workload does not satisfy that goal.
 
 Go comparisons require equivalent correctness. A reference's demonstrated stale
 metadata or weaker durability is not a speed target Rust must match by reproducing
@@ -42,6 +44,21 @@ rsync/nginx and failure probes cover the implemented subset; hardlink emulation,
 actual-service paths and whole-file CRAP remain open. Its joint performance is
 reported in the new checkpoint below. Older tables retain their binary/source scope.
 
+## Listing diagnosis and serving gaps — 2026-11-02
+
+The [listing diagnosis](docs/performance-listing-diagnosis.md) identifies five
+absent-name checks making 15 S3 requests per warm default-Rust listing. Eight
+controlled blocks measure **18.493 ms** default Rust, **3.095 ms** with the existing
+explicit negative-cache option, and **4.190 ms** Go 0.43.9. The option removes warm
+S3 probes, but delays externally created names until TTL; real FUSE probes observe
+that delay in both configured Rust and Go. Default-zero remains unchanged.
+
+Root-owned fixtures also missed a service-access gap: `allow_other` is rejected
+and another UID receives `EACCES` on a readable file. A loaded Go reader retains
+about 217 GiB anonymous PSS, with only 1.44 MiB cgroup file memory; live-heap owners
+remain unprofiled. These are concrete diagnostics and remaining contracts, not a
+runtime correction, a sustained memory win or permission to switch serving.
+
 ## Classic dispatch checkpoint — 2026-11-02
 
 The primary target is LXC serving nginx, rsync and golist. The
@@ -61,13 +78,13 @@ the current release on the actual LXC kernel with its nginx/rsync binaries in
 disposable buffered and direct-I/O fixtures. It also records why the idle reader
 and historical HTTP logs cannot establish a representative performance win.
 
-The [loaded read-shape checkpoint](docs/performance-read-shape.md) now completes
+The earlier [loaded read-shape checkpoint](docs/performance-read-shape.md) completes
 40 isolated mounts with real Go A/A controls and independent nginx/golist/rsync
-checks. Rust HTTP throughput is 472.43 MiB/s versus experimental/packaged Go
-642.10/245.17; daemon late RSS is 87.55 versus 110.46/118.94 MiB. Experimental-Go
-payload/tail/CPU and both-reference listing losses remain. A bounded real-S3
-three-LXC attempt stops on a dependency timeout with five complete blocks, below
-the required eight. Lower short-window memory is not a sustained acceptance win.
+checks. Rust HTTP throughput is 472.43 MiB/s versus Go 0.43.9 at 245.17; daemon
+late RSS is 87.55 versus 118.94 MiB. Its default-Rust listing loss is investigated
+above. The archived Go experiment's results remain in the historical tables.
+A bounded real-S3 three-LXC attempt stops on a dependency timeout with five
+complete blocks, below the required eight. Short-window memory is not a plateau.
 
 ## Directory remainder checkpoint — 2026-11-01
 

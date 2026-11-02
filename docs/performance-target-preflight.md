@@ -71,6 +71,18 @@ does not validate golist, the served configuration, production S3, extended
 metadata/auth options, sustained memory or comparative speed. Buffered and
 direct-I/O policies must remain separately labelled, especially for mmap users.
 
+## Subsequent serving-readiness findings
+
+The [listing and reader diagnosis](performance-listing-diagnosis.md) exposes
+requirements these owner-run fixtures did not cover. The current binary rejects
+`allow_other`, `dev` and `suid`; fuser remains configured for the mounting UID
+only. A disposable non-owner read gets `EACCES` despite a `0644` file and `0755`
+mount root. Exact profile/signing/extended metadata and a realistic namespace
+under pinned-inode pressure also remain unverified. A private owner-only side
+mount is possible, but the existing serving configuration is not a drop-in match.
+The loaded reader's large anonymous footprint is distinct from the idle-reader
+snapshot above; its live-heap owners remain blocked by the absent profiler.
+
 ## Next measurement boundary
 
 The subsequent loaded trace separates filesystem payload, direct backend/origin

@@ -7,6 +7,13 @@ remain [project brief](project-brief.md) and [AGENTS.md](../AGENTS.md).
 
 ## Goal and delivery state
 
+The [2026-11-02 statistical review](performance-methodology.md) supersedes every
+strict four-pair rejection below. Lookup overlap and observation
+reuse are suspended/inconclusive; implementations remain absent. A real A/A arm,
+eight independent mount pairs and paired CIs replace strict wins in every sample.
+Extra loops retain independent buffer/rate objections. Actual LXC access is now
+authorized; private host/mount identifiers stay outside public source.
+
 - Deliver a Linux/S3 Rust replacement for both readers and writers, reusing an
   existing FUSE implementation and public dependencies. FUSE passthrough and a
   disk-backed cache remain deferred. Local unsafe code is forbidden.
@@ -46,8 +53,8 @@ win. Keep raw measurements and distinguish required checks from avoidable cost.
   rates are 23.39/26.13 MiB/s. Late daemon RSS 157.26/159.03 MiB is not a reproducible
   process-memory win. Sampled peaks or late means do not establish a plateau.
 - [Lookup-probe overlap](performance-lookup-probes.md) preserves RPC counts but
-  fails the joint tail/RSS gate. [Cached-observation reuse](performance-cached-observations.md)
-  also fails a joint measured gate. Both runtime/test trials were discarded.
+  has unresolved tail/RSS effects. [Cached-observation reuse](performance-cached-observations.md)
+  also lacks calibrated joint evidence. Both runtime/test trials remain absent.
 - [Expiry diagnosis](metadata-expiry-diagnosis.md) identifies Rust's 1,024 HEADs
   and three LISTs versus Go's two HEADs and four LISTs, then demonstrates the
   permission-freshness difference. SDK/kernel CPU categories are not additive
@@ -390,8 +397,9 @@ There is still no fitting released non-fork Rust ring transport to adopt.
   The Skory fork is rejected under the new constraint. The native C results stay
   as evidence; no further lab work is planned.
 - **B, classic transport through supported fuser APIs: completed below.**
-  Measured 2/4 receive loops and synchronous first-poll reads fail the joint
-  gates. Retain the independent rename deadlock correction, not either optimization.
+  Additional receive loops retain allocation/rate objections; synchronous
+  first-poll reads are rejected: a native contract shows a contended read stalling
+  the sole receive thread. Retain the independent rename deadlock correction.
   Negotiated limits and the isolated cache-hit transport share are now recorded.
 - **C, S3 request path: primary acceptance work.** Bounded prefetch for random
   reads, necessary versus avoidable writer RPCs, and owners of late memory growth.
@@ -409,9 +417,9 @@ There is still no fitting released non-fork Rust ring transport to adopt.
 
 ### Order and gates
 
-1. B controls are complete and both optimization trials are rejected: no joint
-   win in three of four pairs, with adverse tails/memory. Keep the rename fix.
-2. C attribution and corrections under the existing rejection rules.
+1. Keep the rename fix; calibrate identical-binary controls and reassess archived
+   trials under the paired CI protocol, without reinstating runtime changes.
+2. C attribution and corrections under the revised noise-aware rules.
 3. E once authorized; record LXC host kernel, CPUs, confinement and FUSE settings,
    which also answers A's deployment precondition.
 4. A only on all re-entry triggers. Upstream releases are re-checked at each
@@ -427,9 +435,10 @@ Rust/S3 acceptance gate or authorizes deployment.
 distinguish profiling from four-repetition unprofiled controls. Classic 1/2/4 loops
 complete 864 mixed and 144 isolated phases; first-poll source pairs complete 96
 isolated and 576 mixed phases. Every series verifies final payload generations,
-bytes, topology, cleanup and adverse counters. Neither optimization has a joint win.
-Cached-read latency/CPU really improve with first polling, but metadata/writer
-tails and memory prevent adoption. No cache/TTL/durability or SDK policy is weakened.
+bytes, topology, cleanup and adverse counters. The old joint-win predicate is
+withdrawn as inference. Cached-read latency/CPU improve with first polling, but
+joint effects need actual A/A calibration. No cache/TTL/durability or SDK policy
+is weakened.
 
 The rename regression hangs before removal of post-reply `inval_entry`, including
 at one loop; kernel stacks and versioned Linux/libfuse sources confirm the parent

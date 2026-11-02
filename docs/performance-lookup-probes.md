@@ -1,6 +1,9 @@
-# Rejected lookup-probe overlap experiment — 2026-11-01
+# Suspended lookup-probe overlap experiment — 2026-11-01
 
-Status: **REJECTED; runtime changes discarded**. The retained runtime remains
+Status after 2026-11-02 review: **SUSPENDED / INCONCLUSIVE; runtime changes absent**.
+The [revised protocol](performance-methodology.md) supersedes the original strict
+four-pair rejection below; adverse samples remain intact, not established causal
+losses. The retained runtime at the original checkpoint remains
 `1b13033c3f161b9502c7a23870b645ca871ab2e3`, with its
 [current mixed-control results](performance-observation-age.md) still **UNACCEPTED**.
 This short experiment does not establish a speed or memory improvement over Go.
@@ -33,12 +36,12 @@ this is not broad mutation acceptance.
 
 Four rotated writer pairs nevertheless lose throughput once, p95/p99 three times,
 and peak/late daemon RSS in all four repetitions. Late live allocation, combined
-RSS and cgroup memory also increase in every repetition. Reject the change and
-restore all runtime/test inputs to the verified prior source. Experimental tests
+RSS and cgroup memory also increase in every repetition. The original decision
+restored all runtime/test inputs to the verified prior source. Experimental tests
 and frozen sources remain with ignored evidence; the retained suite has 260 Rust
 cases, not the experiment's 268.
 
-The failed premise is that overlapping existing requests is sufficient for a
+The unresolved premise is that overlapping existing requests is sufficient for a
 joint throughput/tail/CPU/memory improvement. It removes neither validation actor
 nor RPC: a separate checked three-cycle trace still records 15 HEADs, six LISTs
 and three each PUT/GET/DELETE. The overlap mechanism is verified; the allocation

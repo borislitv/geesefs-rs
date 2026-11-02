@@ -33,6 +33,13 @@ A separate 1,000-traversal metadata profile yields 1,143 warm-phase samples:
 is 8.14% and transport stacks 12.07%. This identifies application page validation
 as substantial work, not a reason to repeat the rejected cached-observation trial.
 
+**Review correction:** the [paired-methodology review](performance-methodology.md)
+withdraws causal rejection based on strict four-pair joint wins. Historical
+ratios/tables below remain unchanged. Near-A/A is not an actual same-binary
+control, and sparse writer tails are descriptive. Inline reads are not proven
+regressed, but are rejected for a reproduced receive-thread liveness failure;
+extra loops retain independent buffer/rate objections.
+
 The cached-read probe retains the 256 MiB object and unchanged 64 MiB/100,000-entry
 budgets, but deliberately warms an 8 MiB subregion. Aligned 4 KiB `O_DIRECT`
 `preadv` bypasses the kernel page cache. BPF checks exactly 8,192 FUSE READs per
@@ -72,8 +79,9 @@ and all four pairs remain visible in private raw evidence.
 | Eviction | 1.048, 0.975, 0.931, 1.027 | 1.059, 0.975, 0.974, 1.024 |
 | Writer/fsync | 1.051, 0.956, 0.862, 1.108 | 0.491, 1.104, 0.853, 0.952 |
 
-Both treatments have **zero of four joint wins** on throughput, p50/p95/p99, CPU
-and peak/late memory. More loops do not fix the representative random-read gap.
+The former strict rule records **zero of four joint wins**, but that predicate
+does not distinguish noise from causation. More loops do not fix the observed
+random-read gap in these four pairs.
 fuser allocates a `16 MiB + 4 KiB` receive buffer per loop: mean late live
 allocation rises from 76.24 MiB to 92.48/124.60 MiB. These allocations are outside
 the application payload budget; their whole backing need not be resident.
@@ -138,10 +146,10 @@ individual read latency but inside phase elapsed time and client CPU.
 | Pre-inline | 49.18 / 47.14 | 83.42 / 81.68 | 39.00 / 37.27 | 62.06 / 60.78 | 0.28 / 2.23 | 3.44 / 10.00 / 13.43 |
 | First-poll | 48.04 / 45.89 | 82.29 / 80.36 | 38.86 / 38.00 | 60.93 / 58.57 | 0.25 / 2.23 | 1.73 / 10.27 / 12.00 |
 
-This does **not** pass the joint gate: metadata p95 loses in all four pairs,
-late live allocation increases in all four, and RSS/other memory losses remain
-in individual pairs. Lower pooled RSS does not establish reproducibility or a
-plateau. A genuine cache-hit mechanism improvement alone is insufficient.
+Metadata p95 and late allocation are higher in all four pairs, while individual
+RSS samples vary. These are retained observations, not a calibrated causal
+rejection. Four pairs without identical-binary controls cannot establish joint
+non-inferiority or a memory plateau. The cache-hit mechanism improvement is real.
 
 The separate representative source-pair control completes **576 phases and 16
 final byte/generation checks**, rotating pre-inline Rust, first-poll Rust and both
@@ -165,18 +173,19 @@ six-cycle design and unchanged budgets apply; these are not sustained-run result
 | Go experimental | 312.71 / 165.99 | 374.43 / 228.54 | 208.54 / 101.94 | 486.72 / 248.04 | 57.46 / 3.48 | 45.99 / 9.63 / 55.61 |
 | Go packaged | 329.57 / 180.70 | 392.23 / 243.14 | 243.39 / 119.04 | 574.16 / 267.44 | 57.27 / 3.57 | 55.95 / 9.74 / 65.70 |
 
-There are **zero joint wins in four mixed pairs**. Random throughput improves
+The superseded rule records **zero joint wins in four mixed pairs**. Random throughput improves
 1.029/1.011/1.043/1.059 times, but metadata loses in three pairs and writer
 throughput in two (ratios 1.024/0.975/1.074/0.748). Pooled writer p99 increases
 32.45→47.97 ms; mean late RSS increases 155.16→156.84 MiB. These observations do
-not identify the retained owner's cause, but they reject adoption under the
-existing gate. Do not infer a whole-filesystem win from removing one handoff.
+not identify the retained owner's cause or establish a causal regression. Joint
+adoption is unresolved under the revised protocol. Do not infer a whole-filesystem
+win from removing one handoff.
 
-Discard the first-poll implementation and its experiment-only regression, along
-with the multi-loop CLI. Keep the confirmed rename correction and its concurrent
-behavior test. All other runtime inputs return to the observation-age baseline;
-future S3/setup/retained-owner work needs new attribution, not another dispatch
-variant under the same failed premise.
+The first-poll implementation, experiment-only regression and multi-loop CLI
+were removed at the original checkpoint. Keep the confirmed rename correction.
+The later liveness contract shows that a synchronous first poll can stall the
+sole receive thread; any cache-hit fast path must avoid blocking locks there. S3/setup and
+retained-owner work still needs attribution; no runtime trial is reinstated.
 
 ## Negotiated classic transport limits
 

@@ -5,6 +5,25 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Statistical gate and adapter quality — 2026-11-02
+
+`bench/paired.py` and `bench/compare.py` now require eight mount pairs, a real
+same-executable control arm and predeclared practical margins; 15 paired-assessment
+cases plus three-arm scheduling, margin, zero/overflow and writer-file cases pass
+with the whole Python suite. Mutation of `bench/paired.py` kills 39 of 42 sites;
+the survivors are a bootstrap rank off-by-one of 4,096 resamples and an exact
+lower-bound equality that no honest finite fixture can distinguish.
+
+Both allocator LLVM runs pass **265 Rust cases**, including thirteen native
+directory contracts (new receive-thread liveness and xattr error contracts) and
+the public `errno` mapping. CLI child profiles are now merged into both reports.
+`crapper --threshold 10 src/fuse.rs` **passes** (worst `write` 9.5): `errno` and
+`fallocate` delegate to `backend_errno`/`allocate`, `getxattr` is covered natively.
+`compare.py` orchestration functions that need real mounts (`_measure_run`,
+`_run_case`, `main` and helpers) still exceed CRAP 10 at 0-50% unit coverage;
+they are exercised by integration runs, not honest unit tests. Clippy, formatting
+and `dryer --threshold 0.8` pass.
+
 ## Retained rename correction — 2026-11-02
 
 The reduced source retains only removal of redundant post-rename entry

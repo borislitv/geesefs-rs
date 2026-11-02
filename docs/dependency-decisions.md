@@ -47,17 +47,18 @@ not adopted. Use supported fuser 0.18.0 `n_threads`/`clone_fd` for transport wor
 
 The [classic dispatch diagnosis](performance-classic-dispatch.md) first measures
 queue/service intervals, off-CPU wakes and CPU stacks. Extra fuser receive loops
-retain a separate `16 MiB + 4 KiB` buffer each and fail the joint mixed-workload
-gate. Keep one loop. A cache-hit read experiment evaluated existing futures-util
+retain a separate `16 MiB + 4 KiB` buffer each and reduce four-loop random rates
+in the measured pairs. Keep one loop. A cache-hit read experiment evaluated existing futures-util
 0.3.34 [`FutureExt::now_or_never`](https://docs.rs/futures-util/0.3.34/futures_util/future/trait.FutureExt.html#method.now_or_never)
 on a pinned mutable future and Tokio 1.54.1
 [`Handle::enter`](https://docs.rs/tokio/1.54.1/tokio/runtime/struct.Handle.html#method.enter).
 Polling a pinned borrow preserves a pending future for the same bounded Tokio
 fallback, including admission, timeout, cancellation and reply ownership. It
 does not add a cache implementation or duplicate generation/TTL logic. Despite
-improving cached-read latency and CPU, the trial fails the paired metadata,
-writer-tail and memory gates. Discard its runtime/test changes and the receive-loop
-CLI; retain only removal of redundant post-rename notifications. No dependency
+improving cached-read latency and CPU, the trial's joint result is inconclusive
+under the [revised statistical protocol](performance-methodology.md). Its runtime/
+test changes and receive-loop CLI remain absent; retain removal of redundant
+post-rename notifications. No dependency
 change, custom cache or executor is adopted.
 
 The [metadata expiry diagnosis](metadata-expiry-diagnosis.md) uses standalone
@@ -70,12 +71,12 @@ SDK issue [#1349](https://github.com/awslabs/aws-sdk-rust/issues/1349) does not 
 a metadata setup fix. Keep the selected SDK and integrity/metadata contracts;
 sampled SDK work alone does not justify a private fork or replacement transport.
 
-The rejected [cached-observation trial](performance-cached-observations.md) uses
+The suspended [cached-observation trial](performance-cached-observations.md) uses
 Rust 1.99's supported [`Arc`/`Weak`](https://doc.rust-lang.org/1.99.0/std/sync/struct.Arc.html)
 ownership APIs rather than a custom metadata cache or SDK replacement. Strong
 references pin namespace eviction victims; weak identity plus a bounded original
 observation avoids that contract change. Correctness passes, but the short paired
-joint gate does not; neither trial representation nor dependency change is retained.
+joint inference is unresolved; neither trial representation nor dependency change is retained.
 
 Inode lifetime, namespace bindings, dirty generations, flush ownership, sparse
 overlays and fsync barriers are filesystem state, not replacement infrastructure.

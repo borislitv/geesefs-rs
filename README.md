@@ -46,9 +46,11 @@ reported in the new checkpoint below. Older tables retain their binary/source sc
 
 The primary target is LXC serving nginx, rsync and golist. The
 [measured classic dispatch investigation](docs/performance-classic-dispatch.md)
-rejects additional receive loops and inline first-poll reads after four-pair tail
-and memory losses. Genuine cache-hit latency/CPU gains do not establish a mixed
-workload win. Both optimization trials are discarded; retain only the confirmed
+disfavors additional receive loops through allocation/rate evidence. Inline
+first-poll reads are **rejected as implemented**: their performance verdict was
+noise (an identical-binary writer control finds no distinguishable effect), but a
+native contract shows a contended read stalling the sole receive thread. See the
+[statistical review and revised protocol](docs/performance-methodology.md). Both trials remain absent; retain the confirmed
 post-rename notification deadlock correction and its native concurrency regression.
 Official upstream dependencies, one receive loop, freshness and budgets remain.
 Actual LXC/service, sustained-memory, compatibility and comparative gates stay open.
@@ -62,12 +64,13 @@ reproducible win; the freshness diagnosis below qualifies metadata equivalence.
 All current rates, tails, CPU and memory components remain published separately.
 
 A subsequent [lookup-probe overlap experiment](docs/performance-lookup-probes.md)
-is rejected: four writer pairs retain tail losses and higher daemon RSS in every
-repetition. Its runtime changes are discarded; observation-age source is retained.
+is suspended pending calibrated controls: four writer pairs show adverse tails
+and higher RSS, without enough controlled evidence for a causal joint verdict.
+Its runtime changes remain absent; observation-age source was retained.
 
 A [cached-observation reuse trial](docs/performance-cached-observations.md) also
 removes a demonstrated redundant reconstruction but fails to establish a joint
-win in four short metadata pairs. It is discarded; the observation-age runtime
+win in four short metadata pairs. It is suspended/inconclusive; the observation-age runtime
 `1b13033` is retained at that checkpoint. These short controls do not measure
 sustained expiry or beat Go.
 

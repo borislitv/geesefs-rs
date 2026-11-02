@@ -1,6 +1,9 @@
-# Rejected cached-observation reuse experiment — 2026-11-01
+# Suspended cached-observation reuse experiment — 2026-11-01
 
-Status: **REJECTED**. The trial removes a demonstrated redundant metadata
+Status after 2026-11-02 review: **SUSPENDED / INCONCLUSIVE**. The
+[revised protocol](performance-methodology.md) supersedes strict four-pair
+rejection; raw adverse and favorable observations remain unchanged.
+The trial removes a demonstrated redundant metadata
 reconstruction, but does not establish a reproducible joint speed/memory win.
 Runtime and tests are restored to observation-age source `1b13033`; its
 [current mixed checkpoint](performance-observation-age.md) remains applicable.
@@ -85,7 +88,7 @@ Throughput and pooled p99 each lose in two pairs; daemon/cgroup CPU also lose
 twice. Late live allocator memory increases in all four pairs, while RSS is not a
 reproducible win. These measurements do not establish why the allocator grows or
 whether the mechanism could help a different, properly measured expiry workload.
-The trial is discarded for lack of joint evidence, not as proof that removing
+The trial remains absent for lack of calibrated joint evidence, not as proof that removing
 metadata copies can never help. Removing a page-rebuild allocation is insufficient
 evidence of faster sustained cached-stat service or fewer SDK requests.
 

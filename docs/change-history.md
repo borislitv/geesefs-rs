@@ -4,6 +4,26 @@ This is the concise engineering context for the experimental Linux/S3 rewrite.
 Detailed results and operational logs stay outside tracked source files.
 Overall compatibility and comparative performance remain **UNACCEPTED**.
 
+## Corrected statistical inference, 2026-11-02
+
+- Near-A/A variability exposes the strict all-metric/all-pair predicate's lack of
+  specificity. It is not itself an identical-binary control. Preserve all raw
+  observations; withdraw causal rejection of inline-read, lookup-probe overlap and
+  cached-observation reuse. These trials remain absent and suspended/inconclusive.
+- The operator approves paired confidence intervals, actual same-executable
+  controls and at least eight independent mount pairs. Target superiority and
+  noise-relative non-inferiority are distinct. Sparse tails, biased/noisy controls
+  and missing evidence cannot become wins. [Protocol](performance-methodology.md).
+- An eight-block identical-executable writer control (6,000 verified files) finds
+  first-poll indistinguishable from noise, but a new native contract shows it
+  stalling the sole receive thread behind a contended read: rejected on liveness.
+  Writer RPC traces count Rust 5 HEAD + 2 LIST per create versus at most one
+  LIST for experimental Go, whose cached listing and deferred DELETE are unequal
+  contracts. `errno`/`fallocate` are split and `src/fuse.rs` passes CRAP 10.
+- Keep the reproduced rename fix and the independently observed per-loop memory
+  objection. Prioritize writer RPC attribution and authorized read-only target
+  inventory. No served mount, production data or host network shaping is changed.
+
 ## Rename notification deadlock and rejected dispatch trials, 2026-11-02
 
 - CPU/off-CPU, FUSE lifecycle and real cache-residency controls precede changes.

@@ -56,6 +56,11 @@ equivalent-behavior comparisons and Rust-relative non-regressions still apply.
   readers, cache eviction and writer/fsync workloads, including dependency errors.
 - Require reproducible improvement rather than one favorable sample; retain raw
   measurements, failures, variance and baseline executable provenance.
+- Operator clarification, 2026-11-02: use paired confidence intervals and
+  same-executable A/A controls rather than strict per-pair wins. Require at least
+  eight independent mount pairs; repeated calls/cycles are not independent mounts.
+  Separate superiority on declared targets from noise-calibrated non-inferiority
+  on other metrics. Missing/noisy controls mean inconclusive, not a win or loss.
 - Prioritize sustained normal operation of a long-lived mount. Report cold
   startup/listing separately; a cold-only loss does not block acceptance under
   the operator's 2026-10-29 clarification. Higher diagnostic CPU allocations are

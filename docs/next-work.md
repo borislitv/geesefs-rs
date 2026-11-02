@@ -7,6 +7,16 @@ it separates confirmed mechanisms from hypotheses. See the
 
 ## Current priorities after the correctness-equivalence clarification
 
+**2026-11-02 review supersedes strict four-pair rejection language below.** Use
+the [revised paired protocol](performance-methodology.md), including actual A/A
+arms and eight mounts. Lookup overlap and cached-observation trials are
+suspended/inconclusive; first-poll is rejected for receive-thread liveness. Their
+source remains absent. Do not infer causation
+or acceptance from their old all-metric/all-pair predicate. First diagnose writer
+RPC actors and calibrate the measurement, then reassess mechanisms. **Read-only
+serving is the operator's primary target**: prioritize random/concurrent read,
+metadata and cache-residency work over writer RPCs.
+
 The operator clarified on 2026-11-01 that Rust need not beat Go where Go is
 demonstrably logically weaker. The permission-expiry gap below makes that path's
 raw Go rates non-equivalent, not a target to reproduce by removing required work.
@@ -15,13 +25,14 @@ Historical checkpoint judgements below retain their original scope; this does no
 close unrelated performance, compatibility or quality gaps.
 
 The [subsequent classic dispatch checkpoint](performance-classic-dispatch.md)
-finishes Plan B on Linux 7.3.1. More receive loops and first-poll reads both fail
-the four-pair joint gates; their runtime/test changes and CLI are discarded.
+finishes the original Plan B screening on Linux 7.3.1. Extra loops retain concrete
+buffer/rate objections; first-poll joint performance is unresolved. Their runtime/
+test changes and CLI remain absent.
 Cache-hit handoff cost is real, but removing it does not close mixed tails/memory.
 Retain only the independently reproduced post-rename notification deadlock fix.
 The current target is LXC serving nginx/rsync/golist, not Kubernetes/containerd.
 Continue the S3/setup and retained-memory-owner attribution below; do not repeat
-the rejected dispatch premise. io_uring still waits for fitting official releases
+an uncalibrated dispatch decision. io_uring still waits for fitting official releases
 and actual LXC policy even though the isolated transport-share condition is observed.
 
 1. Separate unavoidable metadata/durability checks from avoidable SDK setup,

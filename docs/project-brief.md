@@ -73,6 +73,16 @@ measurements, document the specific semantic difference and distinguish necessar
 work from avoidable overhead. Do not exempt unrelated payload, writer or memory
 losses without evidence, or claim a joint pass from this clarification alone.
 
+Operator clarification, 2026-11-02: replace strict improvement in every metric of
+every pair with [paired statistical screening](performance-methodology.md).
+Require at least eight independently mounted pairs and an actual same-executable
+A/A arm under the same workload/resources. Resample mounts, not individual calls.
+Declare target superiority separately from A/A-noise-relative non-inferiority;
+publish all effects, confidence intervals and inconclusive results. Historical
+four-pair experiments cannot be promoted to acceptance by reanalysis. An A/A
+noise allowance is not a practical production regression budget or a substitute
+for sustained correctness-equivalent target-environment acceptance.
+
 ## Working boundaries
 
 Use dedicated disposable fixtures for writes and failure injection. Existing

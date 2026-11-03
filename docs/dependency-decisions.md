@@ -33,6 +33,20 @@ snapshot. Sampling overhead remains part of the observed server cost.
 
 ## Narrow application state
 
+### Prometheus observation — 2026-11-03
+
+Select released [prometheus-client 0.25.2](https://docs.rs/prometheus-client/0.25.2/prometheus_client/)
+(Apache-2.0 OR MIT) for counters, gauges and OpenMetrics text encoding, rather
+than handwritten exposition/escaping. Serve the opt-in endpoint through the
+already locked Hyper 1.12.0, hyper-util 0.1.21 Tokio I/O and http-body-util 0.1.5
+(MIT), with two concurrent connections and five-second connection deadlines.
+Tiny HTTP 0.12 is already a fixture dependency, but its per-connection background
+threads do not provide the intended bounded async connection lifecycle. A full
+web framework/exporter runtime is unnecessary for one GET route. Use the existing
+jemalloc/stats_alloc APIs; the narrow Linux RSS adapter reads only self status.
+Snapshot existing cache/namespace cardinalities under their current locks; never
+scan inodes, reserve payload, refresh caches or contact storage during a scrape.
+
 The [Linux 7.3 assessment](fuse-io-uring-assessment.md) compares versioned kernel
 UAPI, installed fuser 0.18.0, the unmerged Skory transport stack, Apache-2.0
 fractal-fuse/fuser-iouring and released versus newer libfuse. Keep the current

@@ -23,6 +23,14 @@ authoritative requirements are [project brief](project-brief.md) and
 
 ## Delivered mechanisms and verification
 
+The optional [Prometheus listener](metrics.md) adds cache/read/namespace pressure
+and shared allocator/RSS observations. Scrapes are fixed-cardinality and do not
+walk inode contents or call S3; contended snapshots fail without blocking work.
+Both allocator suites pass 262 cases with thirteen native cases ignored by default,
+and explicit real-binary disposable FUSE/S3 fixtures verify HTTP output, read reuse,
+stats-file compatibility and normal cleanup. This source is newer than the served
+trial executable; it does not change trial limits or establish a larger-cache benefit.
+
 The [architecture](architecture.md) and [history](change-history.md) explain cache
 admission wakeups, directory-local invalidation, bounded LIST continuation, exact
 metadata observation age, per-open read history, upload/reply ownership and safe

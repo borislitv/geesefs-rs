@@ -39,6 +39,26 @@ struct State {
     index: BTreeMap<Key, Span>,
     weight: u64,
     loaned: usize,
+    evictions: u64,
+    evicted_bytes: u64,
+    insertions: u64,
+    replacements: u64,
+    oversized: u64,
+}
+
+/// Retained visible spans; byte permits may outlive eviction in pinned readers.
+#[derive(Clone, Debug)]
+pub struct CacheStats {
+    pub entries: usize,
+    pub bytes: u64,
+    pub capacity: u64,
+    pub entry_limit: usize,
+    pub loaned_bytes: usize,
+    pub evictions: u64,
+    pub evicted_bytes: u64,
+    pub insertions: u64,
+    pub replacements: u64,
+    pub oversized: u64,
 }
 
 impl State {
@@ -52,11 +72,17 @@ impl State {
 
     fn evict_lru(&mut self) -> bool {
         if let Some((key, block)) = self.entries.pop_lru() {
-            self.removed(key, block);
+            self.evicted(key, block);
             true
         } else {
             false
         }
+    }
+
+    fn evicted(&mut self, key: Key, block: Block) {
+        self.evictions += 1;
+        self.evicted_bytes += block.as_slice().len() as u64;
+        self.removed(key, block);
     }
 }
 
@@ -77,9 +103,31 @@ impl ReadCache {
                 index: BTreeMap::new(),
                 weight: 0,
                 loaned: 0,
+                evictions: 0,
+                evicted_bytes: 0,
+                insertions: 0,
+                replacements: 0,
+                oversized: 0,
             })),
             capacity,
         }
+    }
+
+    /// Scrapes never wait behind a cache operation or change recency.
+    pub fn try_stats(&self) -> Option<CacheStats> {
+        let state = self.state.try_lock().ok()?;
+        Some(CacheStats {
+            entries: state.entries.len(),
+            bytes: state.weight,
+            capacity: self.capacity,
+            entry_limit: state.entries.cap().get(),
+            loaned_bytes: state.loaned,
+            evictions: state.evictions,
+            evicted_bytes: state.evicted_bytes,
+            insertions: state.insertions,
+            replacements: state.replacements,
+            oversized: state.oversized,
+        })
     }
 
     pub fn get(&self, inode: u64, generation: u64, offset: u64) -> Option<Block> {
@@ -191,17 +239,20 @@ impl ReadCache {
         let weight = length as u64;
         let mut state = self.state.lock().unwrap();
         if let Some(old) = state.entries.pop(&key) {
+            state.replacements += 1;
             state.removed(key, old);
         }
         if weight > self.capacity {
+            state.oversized += 1;
             return;
         }
         while state.weight > self.capacity - weight {
             assert!(state.evict_lru(), "positive cache weight owns entries");
         }
         if let Some((key, victim)) = state.entries.push(key, block) {
-            state.removed(key, victim);
+            state.evicted(key, victim);
         }
+        state.insertions += 1;
         state.weight += weight;
         state.index.insert(
             key,
@@ -276,7 +327,7 @@ impl ReadCache {
             .collect();
         for key in keys {
             let block = state.entries.pop(&key).expect("loaned cache owner");
-            state.removed(key, block);
+            state.evicted(key, block);
         }
     }
 

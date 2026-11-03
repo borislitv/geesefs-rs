@@ -27,9 +27,50 @@ fn reference_cli_defaults_and_prefix() {
     assert_eq!(c.effective_region(), "us-east-1");
     assert_eq!((c.dir_mode, c.file_mode), (0o755, 0o644));
     assert_eq!((c.memory_limit, c.entry_limit), (1000, 100000));
+    assert_eq!(c.metrics_listen, None);
     assert_eq!(c.symlink_attr, "--symlink-target");
     assert_eq!(c.bucket_and_prefix(), ("bucket", "packages"));
     assert_eq!(c.effective_list_type(), ListType::Extended);
+}
+
+#[test]
+fn accepts_an_explicit_metrics_listener_without_contacting_backend() {
+    let config = Config::try_parse_from([
+        "geesefs-rs",
+        "--metrics-listen",
+        "127.0.0.1:9469",
+        "bucket",
+        "/tmp/mount",
+    ])
+    .expect("an explicit metrics listener must be accepted");
+    config.validate().unwrap();
+    assert_eq!(config.metrics_listen.unwrap().to_string(), "127.0.0.1:9469");
+}
+
+#[test]
+fn metrics_listener_requires_a_numeric_socket_address() {
+    for address in ["localhost:9469", "127.0.0.1", "127.0.0.1:65536"] {
+        assert!(
+            Config::try_parse_from([
+                "geesefs-rs",
+                "--metrics-listen",
+                address,
+                "bucket",
+                "/tmp/mount",
+            ])
+            .is_err(),
+            "{address}"
+        );
+    }
+    let config = Config::try_parse_from([
+        "geesefs-rs",
+        "--metrics-listen",
+        "[::1]:9469",
+        "bucket",
+        "/tmp/mount",
+    ])
+    .unwrap();
+    assert!(config.metrics_listen.unwrap().is_ipv6());
 }
 
 #[test]

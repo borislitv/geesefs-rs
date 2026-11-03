@@ -5,6 +5,42 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Prometheus observations — 2026-11-03
+
+The configuration regression initially rejects `--metrics-listen`; after adding
+the listener, tests verify numeric/IPv6 parsing and the disabled default. Seven
+metrics regressions cover cold/warm/EOF accounting, backend failure, unchanged
+admission and backend-call counts during scrapes, retained versus pinned bytes,
+entry/byte pressure, namespace eviction/failure, real HTTP routes and contention,
+bind errors, partial-header deadline and shutdown. Both allocator suites pass
+262 Rust cases with thirteen native cases ignored by default. The benchmark
+Python gate requires the project virtual environment; an initial system-Python
+run failed on missing `psutil`, not a runtime regression.
+
+Formatting, all-target/all-feature warning-denying Clippy, default release build
+and the 342-package public-source audit pass. Fresh default/System LLVM coverage
+and native Python coverage keep new metrics modules/fixture below CRAP 10 (worst
+8.4); the broader filesystem CRAP gate remains open, including existing high-CC
+read/lookup/rename methods. Duplication screening at 0.8 finds no candidates in
+the changed runtime/fixture scope. Eleven selected mutations in HTTP/allocator
+observations and cache/namespace counters are killed; this is not repository-wide
+mutation coverage. Initial report-path/unsupported-report-option failures were
+tool setup errors, not a quality pass.
+
+The explicit real-binary fixture uses disposable local S3 and private mount/network
+namespaces. It verifies independent bytes, a cold miss then a direct-I/O warm hit,
+OpenMetrics output, existing stats-file JSON and normal unmount/listener exit:
+
+```bash
+timeout --kill-after=5s 130s unshare --mount --net --propagation private \
+  python3 scripts/metrics_smoke.py --binary "$GEESEFS_RUST_BINARY" \
+  --output "$GEESEFS_METRICS_RESULTS"
+```
+
+Run it in an owned resource-limited unit as described below. Results are local
+fixture checks, not a new serving deployment, comparative performance result or
+cache-size recommendation. See the [metric semantics and decision criteria](metrics.md).
+
 ## Cross-UID mount access — 2026-11-02
 
 The public `scripts/mount_access.py` fixture requires explicit root, private mount

@@ -18,6 +18,8 @@ pub struct Namespace {
     pub pending_moves: BTreeMap<String, u64>,
     /// Ambiguous/cancelled DELETEs retain their old name until an explicit retry.
     pub pending_deletes: BTreeMap<String, u64>,
+    pub evictions: u64,
+    pub capacity_failures: u64,
     next_ino: u64,
     limit: usize,
 }
@@ -32,6 +34,8 @@ impl Namespace {
             moving: BTreeSet::new(),
             pending_moves: BTreeMap::new(),
             pending_deletes: BTreeMap::new(),
+            evictions: 0,
+            capacity_failures: 0,
             next_ino: 2,
             limit,
         }
@@ -133,12 +137,14 @@ impl Namespace {
                 .filter(|ino| !self.pending_deletes.values().any(|pending| pending == ino))
             });
             if let Some(ino) = victim {
+                self.evictions += 1;
                 let node = self.nodes.remove(&ino).unwrap();
                 let key = node.state.lock().unwrap().key.clone();
                 if self.names.get(&key) == Some(&ino) {
                     self.names.remove(&key);
                 }
             } else {
+                self.capacity_failures += 1;
                 return Err(Error::Fs(libc::ENOMEM));
             }
         }

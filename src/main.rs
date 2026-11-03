@@ -6,6 +6,7 @@ use geesefs_rs::{
     config::{Config, normalize_fstab},
     filesystem::Filesystem,
     fuse::Fuse,
+    metrics::{MetricsServer, allocation_stats},
 };
 use std::{sync::Arc, time::Duration};
 
@@ -16,59 +17,6 @@ static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[global_allocator]
 #[cfg(feature = "system-allocator")]
 static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
-
-#[cfg(not(feature = "system-allocator"))]
-fn jemalloc_snapshot() -> (Option<usize>, serde_json::Value) {
-    use tikv_jemalloc_ctl::{epoch, stats};
-
-    if epoch::advance().is_err() {
-        return (None, serde_json::Value::Null);
-    }
-    (
-        stats::allocated::read().ok(),
-        serde_json::json!({
-            "provider": "tikv-jemalloc-ctl 0.7.0",
-            "scope": "allocator page gauges, not process RSS; retained virtual mappings are not physical memory",
-            "active_bytes": stats::active::read().ok(),
-            "resident_bytes": stats::resident::read().ok(),
-            "mapped_bytes": stats::mapped::read().ok(),
-            "retained_virtual_bytes": stats::retained::read().ok(),
-            "metadata_bytes": stats::metadata::read().ok(),
-        }),
-    )
-}
-
-#[cfg(not(feature = "system-allocator"))]
-fn allocation_stats() -> serde_json::Value {
-    let (allocated, pages) = jemalloc_snapshot();
-    serde_json::json!({
-        "allocator": "jemalloc",
-        "allocated_bytes": allocated,
-        "allocated_bytes_scope": "jemalloc allocated size classes; excludes retained/free pages and external allocators",
-        "allocation_counters": serde_json::Value::Null,
-        "allocator_page_stats": pages,
-    })
-}
-
-#[cfg(feature = "system-allocator")]
-fn allocation_stats() -> serde_json::Value {
-    let stats = ALLOCATOR.stats();
-    serde_json::json!({
-        "allocator": "system",
-        "allocated_bytes": stats.bytes_allocated.checked_sub(stats.bytes_deallocated),
-        "allocated_bytes_scope": "sampled net requested Rust global bytes; includes failed requests; non-atomic snapshot; excludes native allocations, allocator overhead and retention",
-        "allocation_counters": {
-            "provider": "stats_alloc 0.1.10",
-            "bytes_allocated": stats.bytes_allocated,
-            "bytes_deallocated": stats.bytes_deallocated,
-            "allocations": stats.allocations,
-            "deallocations": stats.deallocations,
-            "reallocations": stats.reallocations,
-            "bytes_reallocated": stats.bytes_reallocated,
-        },
-        "allocator_page_stats": serde_json::Value::Null,
-    })
-}
 
 fn spawn_stats(
     runtime: &tokio::runtime::Runtime,
@@ -102,6 +50,18 @@ fn spawn_stats(
             }
         }
     })))
+}
+
+fn spawn_metrics(
+    runtime: &tokio::runtime::Runtime,
+    fs: &Arc<Filesystem>,
+) -> std::io::Result<Option<MetricsServer>> {
+    let Some(address) = fs.config.metrics_listen else {
+        return Ok(None);
+    };
+    let server = runtime.block_on(MetricsServer::bind(address, fs.clone()))?;
+    eprintln!("metrics listening on http://{}/metrics", server.address());
+    Ok(Some(server))
 }
 
 fn kernel_mount_option(option: &str) -> Result<fuser::MountOption, Box<dyn std::error::Error>> {
@@ -199,6 +159,7 @@ fn serve(
     store: Arc<S3>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mountpoint = fs.config.mountpoint.clone();
+    let metrics = spawn_metrics(runtime, &fs)?;
     let stats = spawn_stats(runtime, &fs)?;
     let options = mount_options(&fs.config)?;
     let adapter = Fuse::new(fs.clone(), runtime.handle().clone());
@@ -218,6 +179,9 @@ fn serve(
         store.drain_cleanup().await
     });
     signals.abort();
+    if let Some(metrics) = metrics {
+        runtime.block_on(metrics.shutdown());
+    }
     if let Some(stats) = stats {
         stats.abort();
     }

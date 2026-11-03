@@ -37,6 +37,7 @@ pub struct Filesystem {
     directory_pages: moka::sync::Cache<(u64, u64, String, usize), Arc<DirectoryPage>>,
     preloaded_directories: moka::sync::Cache<u64, std::time::Instant>,
     closing: AtomicBool,
+    read_metrics: crate::metrics::ReadMetrics,
 }
 
 struct DirectoryPage {
@@ -222,6 +223,31 @@ pub fn not_found(error: &Error) -> bool {
 }
 
 impl Filesystem {
+    /// Constant-time observations; no inode walk, storage I/O or cache refresh.
+    pub(crate) fn metrics_snapshot(&self) -> Option<crate::metrics::Snapshot> {
+        let namespace = {
+            let ns = self.namespace.try_lock().ok()?;
+            (
+                ns.nodes.len(),
+                ns.names.len(),
+                ns.evictions,
+                ns.capacity_failures,
+            )
+        };
+        let cache = self.cache.try_lock().ok()?.try_stats()?;
+        Some(crate::metrics::Snapshot {
+            namespace,
+            cache,
+            entry_limit: self.config.entry_limit,
+            lanes: [
+                ("data", self.data.used(), self.data.limit()),
+                ("ingress", self.ingress.used(), self.ingress.limit()),
+                ("flush", self.flush_lane.used(), self.flush_lane.limit()),
+            ],
+            reads: self.read_metrics.clone(),
+        })
+    }
+
     pub fn effective_budgets(&self) -> EffectiveBudgets {
         let window = self
             .data
@@ -314,6 +340,7 @@ impl Filesystem {
                 .build(),
             preloaded_directories: moka::sync::Cache::new(config.entry_limit),
             closing: AtomicBool::new(false),
+            read_metrics: crate::metrics::ReadMetrics::default(),
             config,
             store,
         }))
@@ -1146,8 +1173,12 @@ impl Filesystem {
             .unwrap()
             .read(ino, generation, offset, length, reply)
         {
+            self.read_metrics.hits.inc();
+            self.read_metrics.hit_bytes.inc_by(length as u64);
             return Ok(Some(block));
         }
+        self.read_metrics.misses.inc();
+        self.read_metrics.miss_bytes.inc_by(length as u64);
         // Miss admission reserves output and scratch atomically below.
         let budgets = self.effective_budgets();
         let mut start = if clean {
@@ -1292,8 +1323,10 @@ impl Filesystem {
                 next += amount as u64;
                 let mut owner = charge.split((if single_buffer { 1 } else { 2 }) * amount);
                 let (store, snapshot) = (self.store.clone(), snapshot.clone());
+                let metrics = self.read_metrics.clone();
                 let sender = sender.clone();
                 tasks.spawn(async move {
+                    metrics.fill_jobs.inc();
                     let result = async {
                         let local = Budget::new(2 * amount)?;
                         let output = crate::backend::RangeSink::new(sender, owner.split(amount));
@@ -1315,6 +1348,9 @@ impl Filesystem {
                         }
                     }
                     .await;
+                    if result.is_err() {
+                        metrics.fill_errors.inc();
+                    }
                     (at, result)
                 });
             }
@@ -1352,6 +1388,11 @@ impl Filesystem {
             let Some((at, block)) = completed else {
                 continue;
             };
+            if single_buffer {
+                self.read_metrics
+                    .remote_bytes
+                    .inc_by(block.as_slice().len() as u64);
+            }
             let left = at.max(offset);
             let right = (at + block.as_slice().len() as u64).min(offset + available as u64);
             if right > left {

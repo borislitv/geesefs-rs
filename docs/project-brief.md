@@ -141,6 +141,11 @@ Target service/profile compatibility and large-namespace memory remain open.
 Observed reader memory is anonymous; the absent existing listener still blocks
 live-heap-owner attribution. Small fixtures do not establish a whole-process bound.
 
+The new optional [Prometheus listener](metrics.md) adds constant-time cache,
+namespace and allocator/RSS observations for future runs. Previously installed
+binaries still lack these series; no live-heap profile, historical hit rate or
+larger-cache benefit is implied by the implementation.
+
 [Architecture](architecture.md) describes retained corrections, and
 [history](change-history.md) records their confirmed causes. Frozen
 [measurement pages](performance.md) preserve exact-source tables and limitations;

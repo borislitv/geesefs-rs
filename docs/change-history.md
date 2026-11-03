@@ -5,6 +5,17 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-03: optional Prometheus cache and memory observations
+
+RSS and diagnostic allocator JSON could not establish payload occupancy, reuse or
+eviction pressure. Add an opt-in bounded HTTP/OpenMetrics listener using public
+prometheus-client and Hyper APIs. Constant-time nonblocking snapshots distinguish
+retained spans from charged/pinned storage, and report read reuse/fills, namespace
+pressure and shared allocator/RSS observations. Scrapes never refresh metadata or
+call S3. Tests cover accounting, failure, contention, HTTP lifetime and an explicit
+real-binary disposable FUSE/S3 fixture. This changes observability, not cache limits
+or production deployments; larger-cache usefulness remains to be measured.
+
 ## Third addressed reader and error-screen correction — 2026-11-03
 
 A separate authorization extends the same-build, same-budget RO trial to a

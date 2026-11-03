@@ -56,6 +56,12 @@ retention alongside anonymous memory over time. TTL refresh does not itself evic
 the namespace. Establish a sustained envelope before enlarging caches; slowing
 growth alone neither proves nor excludes a leak.
 
+The [optional Prometheus listener](metrics.md) now provides cache/read, namespace
+pressure and allocator/RSS observations for new runs. Collect sustained series
+before changing limits; previously installed trial binaries lack those counters.
+Measure observer overhead separately and keep cgroup pressure and user-visible
+errors/tails alongside cache reuse. This feature does not supply a heap profile.
+
 ## 3. Compatibility and writer behavior
 
 - Complete actual-service IAM, SSE/signing/PATCH, imported multipart layouts and

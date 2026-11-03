@@ -33,7 +33,12 @@ paged namespace operations and generation-aware sparse/truncate/fsync writes.
 See [architecture](docs/architecture.md) for delivered mechanisms and
 [compatibility](docs/compatibility.md) for gaps.
 
-## Current checkpoint — 2026-11-02
+## Current checkpoint — 2026-11-03
+
+The optional [Prometheus listener](docs/metrics.md) is available through
+`--metrics-listen 127.0.0.1:9469`. It observes payload reuse/eviction, byte admission,
+namespace pressure and allocator/RSS without walking the namespace or calling S3.
+Adding these observations does not establish that increasing the cache is useful.
 
 - Explicit `-o allow_other` now admits other UIDs through the supported fuser
   session policy while retaining kernel permissions and the owner-only default.

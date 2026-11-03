@@ -171,6 +171,9 @@ pub struct Config {
     /// Private allocator evidence for the benchmark runner, created exclusively.
     #[arg(long)]
     pub stats_file: Option<PathBuf>,
+    /// Optional numeric HTTP listen address; metrics are disabled by default.
+    #[arg(long)]
+    pub metrics_listen: Option<std::net::SocketAddr>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

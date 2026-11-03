@@ -103,6 +103,10 @@ general development workflow. On 2026-11-02 the operator explicitly authorized o
 traffic and existing cache limits. On 2026-11-03 a separate authorization extended
 the trial to a second read-only reader with the same source-matching executable
 and budgets, followed by an explicit authorization for a third read-only reader.
+A subsequent explicit update authorizes the metrics build on those same three
+readers, sequentially, with a 49152-MiB total payload budget and 30 million metadata
+entries. Protocol/namespace/metrics checks pass; larger-cache benefit and fair
+historical CPU/memory comparisons remain unestablished.
 These exceptions do not authorize broader rollout or production
 failure injection, and do not close acceptance. The user confirmed
 the public repository: source and reproducible fixtures are public; credentials,

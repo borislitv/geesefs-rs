@@ -28,8 +28,9 @@ and shared allocator/RSS observations. Scrapes are fixed-cardinality and do not
 walk inode contents or call S3; contended snapshots fail without blocking work.
 Both allocator suites pass 262 cases with thirteen native cases ignored by default,
 and explicit real-binary disposable FUSE/S3 fixtures verify HTTP output, read reuse,
-stats-file compatibility and normal cleanup. This source is newer than the served
-trial executable; it does not change trial limits or establish a larger-cache benefit.
+stats-file compatibility and normal cleanup. A subsequent, separately authorized
+three-reader update deploys this metrics build with larger trial limits, as recorded
+below. Observability and an operator-selected increase do not prove cache benefit.
 
 The [architecture](architecture.md) and [history](change-history.md) explain cache
 admission wakeups, directory-local invalidation, bounded LIST continuation, exact
@@ -100,8 +101,31 @@ Anonymous memory continues growing across later samples, with a variable rate.
 Live cache/namespace occupancy, eviction and allocator retention are not attributed;
 neither a leak nor its absence is established. A short interval does not prove a
 sustained plateau.
-Cache enlargement to 64 GiB is deferred pending that evidence. Deployment
-identities, raw traces and operational journals remain private.
+The earlier proposal to enlarge to 64 GiB was deferred pending that evidence.
+Deployment identities, raw traces and operational journals remain private.
+
+### Authorized metrics-build update — 2026-11-03
+
+The operator subsequently authorizes sequential replacement of the same three RO
+readers with the metrics build from `070db1dc9093c49e2e1c324de6b958b2b347d2c4`,
+using a 49152-MiB total payload budget and a 30-million-entry namespace limit.
+The third reader is withdrawn while the first two are updated and checked, then
+updated and readmitted itself. Full HTTPS/Range and rsync byte checks, all five
+consumer mount namespaces, unchanged native-listing process identities and healthy
+recovery no-ops pass. Loopback OpenMetrics output confirms the effective limits.
+
+The 48-GiB total is split across data, ingress and flush; visible read retention is
+approximately 45 GiB, not a separate 48-GiB data pool or an RSS ceiling. Cgroup
+high/max, CPU quota, TTL and negative-cache settings retain their prior values.
+An initial deployment-controller startup error and a separate recovery-lock
+refusal are retained with their successful, separately recorded continuations.
+Neither failure is a new runtime-code change or evidence of error-free operation.
+
+The passive historical timing comparison remains tied to its previous build and
+unchanged limits. There is no matching historical Go CPU interval or fair Go/Rust
+memory comparison. New cold-cache RSS and changed budgets cannot fill that gap.
+Long-term collection, sustained cache usefulness and prior error attribution remain
+open; this addressed update does not close general acceptance.
 
 ## Remaining work
 

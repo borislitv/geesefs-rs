@@ -53,12 +53,14 @@ force reclamation to manufacture a win.
 
 For the serving trial, attribute namespace/cache occupancy, eviction and allocator
 retention alongside anonymous memory over time. TTL refresh does not itself evict
-the namespace. Establish a sustained envelope before enlarging caches; slowing
-growth alone neither proves nor excludes a leak.
+the namespace. Slowing growth alone neither proves nor excludes a leak. The operator
+separately authorized a larger 48-GiB total payload budget and 30-million-entry cap
+for the three addressed readers; that choice does not establish a sustained envelope.
 
 The [optional Prometheus listener](metrics.md) now provides cache/read, namespace
-pressure and allocator/RSS observations for new runs. Collect sustained series
-before changing limits; previously installed trial binaries lack those counters.
+pressure and allocator/RSS observations and is deployed in the addressed trial.
+Collect sustained series at the new limits; the preceding binaries had no counters,
+so a retrospective unchanged-budget reuse comparison is unavailable.
 Measure observer overhead separately and keep cgroup pressure and user-visible
 errors/tails alongside cache reuse. This feature does not supply a heap profile.
 

@@ -5,6 +5,18 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-03: addressed metrics-build and cache-budget update
+
+A new operator authorization updates the same three RO trial readers sequentially
+to the metrics build, with 48 GiB total payload and 30 million metadata entries.
+The third reader stays withdrawn until both peers pass their checks and its own
+update completes. Full protocol bytes, mount propagation, listing-process retention,
+loopback metrics and healthy recovery no-ops pass. Retain the controller startup
+error and lock-only refusal alongside their distinct successful continuations.
+This is deployment/context delivery without a runtime-code change. Historical
+timings retain their original build; missing comparable CPU/memory baselines and
+new cold-cache observations do not establish a performance or memory improvement.
+
 ## 2026-11-03: optional Prometheus cache and memory observations
 
 RSS and diagnostic allocator JSON could not establish payload occupancy, reuse or

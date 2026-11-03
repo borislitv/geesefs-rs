@@ -36,7 +36,7 @@ See [architecture](docs/architecture.md) for delivered mechanisms and
 ## CI-built Linux snapshots
 
 After the checks pass, GitHub Actions builds the Linux amd64 executable with
-Rust 1.96.0 and the default jemalloc allocator on Ubuntu 22.04. Push runs publish
+Rust 1.96.0 and the default jemalloc allocator on Ubuntu 26.04. Push runs publish
 a prerelease named `build-<full-source-commit>` in
 [GitHub Releases](https://github.com/borislitv/geesefs-rs/releases).
 Pull-request runs only upload a one-day Actions artifact. Standard runners are

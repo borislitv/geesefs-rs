@@ -77,15 +77,22 @@ impl Namespace {
         } else {
             format!("{key}/")
         };
-        self.names
+        // Both ends of an unfinished rename retain their ancestor paths, even
+        // when a COPY/DELETE already moved all durable objects out of a parent.
+        self.pending_moves
             .range(prefix.clone()..)
-            .take_while(|(name, _)| name.starts_with(&prefix))
-            .any(|(_, ino)| {
-                self.nodes.get(ino).is_some_and(|node| {
-                    let state = node.state.lock().unwrap();
-                    !state.deleted && state.version > state.durable
+            .next()
+            .is_some_and(|(name, _)| name.starts_with(&prefix))
+            || self
+                .names
+                .range(prefix.clone()..)
+                .take_while(|(name, _)| name.starts_with(&prefix))
+                .any(|(_, ino)| {
+                    self.nodes.get(ino).is_some_and(|node| {
+                        let state = node.state.lock().unwrap();
+                        !state.deleted && state.version > state.durable
+                    })
                 })
-            })
     }
 
     pub fn hidden(&mut self, key: &str) -> bool {
@@ -181,6 +188,12 @@ impl<'a> MoveLease<'a> {
         let mut ns = namespace.lock().unwrap();
         if keys.iter().any(|key| {
             ns.is_moving(key)
+                || delete_owner.is_some()
+                    && ns.pending_moves.keys().any(|other| {
+                        key == other
+                            || key.starts_with(&format!("{other}/"))
+                            || other.starts_with(&format!("{key}/"))
+                    })
                 || ns.pending_deletes.iter().any(|(other, ino)| {
                     Some(*ino) != delete_owner
                         && (key == other

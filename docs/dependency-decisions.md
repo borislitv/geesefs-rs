@@ -13,6 +13,7 @@ remains outstanding. See LICENSE and NOTICE for source attribution.
 | FUSE | [fuser 0.18.0](https://docs.rs/fuser/0.18.0/fuser/) (MIT): protocol, callbacks and replies; no custom syscall/protocol stack. |
 | S3 | [aws-sdk-s3 1.155.0](https://docs.rs/aws-sdk-s3/1.155.0/aws_sdk_s3/) and aws-config 1.13.0 (Apache-2.0): conditional ranges, streaming, retries, signing, profiles and multipart operations. Unneeded sigv4a is disabled. |
 | Runtime/admission | [Tokio 1.54.1](https://docs.rs/tokio/1.54.1/tokio/) (MIT): owned semaphores, JoinSet, watch/mpsc, runtime and I/O; no custom executor. |
+| Upload provenance | [getrandom 0.4.3](https://docs.rs/getrandom/0.4.3/getrandom/) (MIT OR Apache-2.0), already locked transitively: safe OS randomness for 128-bit per-upload receipts; no custom entropy or cryptography. |
 | Metadata cache | [Moka 0.12.16](https://docs.rs/moka/0.12.16/moka/) (MIT OR Apache-2.0): bounded weighted directory/preload caches with namespace/TTL validation. |
 | Payload cache | [lru 0.19.0](https://docs.rs/lru/0.19.0/lru/) (MIT): synchronous `pop_lru` releases backing before required admission. Moka maintenance/policy changes cannot provide that boundary. |
 | Streaming/owners | bytes 1.12.1, futures-util 0.3.34, tokio-util 0.7.20 (MIT OR Apache-2.0): immutable owners and maintained stream/I/O adapters. Small charged Block views retain complete backing permits. |

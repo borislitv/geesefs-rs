@@ -5,6 +5,10 @@ use percent_encoding::percent_decode_str;
 /// None means no authoritative metadata has been fetched; Some(empty) is known empty.
 pub type Metadata = Option<BTreeMap<String, Vec<u8>>>;
 
+/// Private upload provenance, not a filesystem attribute. S3 stores this with
+/// PUT/multipart metadata and returns it in HEAD, including after a lost reply.
+pub(crate) const UPLOAD_RECEIPT: &str = "geesefs-upload-receipt";
+
 fn valid_escapes(s: &str) -> bool {
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -38,6 +42,9 @@ pub fn decode_metadata<'a>(
         // Rust strings cannot represent arbitrary byte keys; these must not be
         // silently substituted with U+FFFD. Non-UTF8 key support is an open gap.
         if let Ok(key) = percent_decode_str(&name).decode_utf8() {
+            if key == UPLOAD_RECEIPT {
+                continue;
+            }
             decoded.insert(key.into_owned(), percent_decode_str(value).collect());
         }
     }

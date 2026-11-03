@@ -13,7 +13,7 @@ use std::{
     path::Path,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::SystemTime,
 };
@@ -60,6 +60,36 @@ failures!(
     DirectoryReply,
     ReplyXattr
 );
+
+/// The job exclusively owns an unsent reply. Deadline cancellation must send
+/// ETIMEDOUT instead of fuser's generic Drop fallback (EIO).
+/// Taking the reply before publication also makes early READ replies terminal:
+/// subsequent read-ahead cancellation owns no reply and cannot send a second one.
+struct DeadlineReply<R: Failure> {
+    reply: Option<R>,
+    expired: Arc<AtomicBool>,
+}
+
+impl<R: Failure> DeadlineReply<R> {
+    fn finish(mut self, send: impl FnOnce(R)) {
+        send(self.reply.take().expect("reply is owned until publication"));
+    }
+
+    fn error(self, error: Errno) {
+        self.finish(|reply| reply.fail(error));
+    }
+}
+
+impl<R: Failure> Drop for DeadlineReply<R> {
+    fn drop(&mut self) {
+        if let Some(reply) = self.reply.take()
+            && self.expired.load(Ordering::Relaxed)
+        {
+            reply.fail(Errno::ETIMEDOUT);
+        }
+        // Unexpected destruction without deadline expiry retains fuser's EIO fallback.
+    }
+}
 
 struct Admission {
     closing: bool,
@@ -237,7 +267,7 @@ impl Fuse {
     fn spawn<R, F, T>(&self, reply: R, job: F)
     where
         R: Failure,
-        F: FnOnce(Arc<Core>, R) -> T + Send + 'static,
+        F: FnOnce(Arc<Core>, DeadlineReply<R>) -> T + Send + 'static,
         T: Future<Output = ()> + Send + 'static,
     {
         let admission = self.admission.lock().unwrap();
@@ -253,15 +283,27 @@ impl Fuse {
             }
         };
         let fs = self.fs.clone();
-        let deadline = fs.config.request_timeout;
         self.runtime.spawn(async move {
             let _permit = permit;
-            // On expiry the owned reply is dropped once; fuser sends its failure
-            // reply. Dropping the job also cancels its bounded backend operations.
-            if tokio::time::timeout(deadline, job(fs, reply))
-                .await
-                .is_err()
-            {
+            let deadline = fs.config.request_timeout;
+            let expired = Arc::new(AtomicBool::new(false));
+            let timed_out = {
+                let reply = DeadlineReply {
+                    reply: Some(reply),
+                    expired: expired.clone(),
+                };
+                let future = job(fs, reply);
+                tokio::pin!(future);
+                // Timeout borrows the job, so mark expiry BEFORE dropping its
+                // reply/backend work. No detached operation or second reply owner.
+                let timed_out = tokio::time::timeout(deadline, &mut future).await.is_err();
+                if timed_out {
+                    expired.store(true, Ordering::Relaxed);
+                }
+                timed_out
+            };
+            // Destroy the job (and send any deadline reply) before logging.
+            if timed_out {
                 eprintln!("FUSE request deadline exceeded");
             }
         });
@@ -348,7 +390,7 @@ impl Fuse {
         };
         self.spawn(reply, move |fs, reply| async move {
             match fs.unlink(parent.0, &name, directory).await {
-                Ok(()) => reply.ok(),
+                Ok(()) => reply.finish(ReplyEmpty::ok),
                 Err(error) => reply.error(errno(error)),
             }
         });
@@ -357,7 +399,7 @@ impl Fuse {
     fn sync_file(&self, ino: INodeNo, reply: ReplyEmpty) {
         self.spawn(reply, move |fs, reply| async move {
             match fs.fsync(ino.0).await {
-                Ok(()) => reply.ok(),
+                Ok(()) => reply.finish(ReplyEmpty::ok),
                 Err(error) => reply.error(errno(error)),
             }
         });
@@ -373,21 +415,25 @@ impl Fuse {
         };
         self.spawn(reply, move |fs, mut reply| async move {
             let result = async {
+                let reply = reply
+                    .reply
+                    .as_mut()
+                    .expect("directory reply is not yet sent");
                 let mut cursor = cursor.lock().await;
                 cursor.seek(offset);
-                if !cursor.dots(&fs, ino, offset, &mut reply).await? {
+                if !cursor.dots(&fs, ino, offset, reply).await? {
                     // The cursor resumes a backend page across smaller kernel
                     // frames; truncating it here causes overlapping S3 LISTs.
                     let limit = (fs.config.entry_limit as usize)
                         .saturating_sub(1)
                         .clamp(1, crate::backend::extended_list::MAX_PAGE_ENTRIES);
-                    while cursor.page(&fs, ino, offset, limit, &mut reply).await? {}
+                    while cursor.page(&fs, ino, offset, limit, reply).await? {}
                 }
                 Ok::<(), Error>(())
             }
             .await;
             match result {
-                Ok(()) => reply.ok(&fs),
+                Ok(()) => reply.finish(|reply| reply.ok(&fs)),
                 Err(error) => reply.error(errno(error)),
             }
         });
@@ -493,7 +539,7 @@ impl fuser::Filesystem for Fuse {
                 Ok(node) => {
                     fs.reference(&node);
                     let (attr, ttl) = node.cached_attr(fs.config.stat_cache_ttl);
-                    reply.entry(&ttl, &attr, Generation(0));
+                    reply.finish(|reply| reply.entry(&ttl, &attr, Generation(0)));
                 }
                 Err(error) => reply.error(errno(error)),
             }
@@ -507,7 +553,7 @@ impl fuser::Filesystem for Fuse {
             match fs.refresh_inode_if_expired(ino.0).await {
                 Ok(node) => {
                     let (attr, ttl) = node.cached_attr(fs.config.stat_cache_ttl);
-                    reply.attr(&ttl, &attr);
+                    reply.finish(|reply| reply.attr(&ttl, &attr));
                 }
                 Err(error) => reply.error(errno(error)),
             }
@@ -589,7 +635,7 @@ impl fuser::Filesystem for Fuse {
         self.spawn(reply, move |_fs, reply| async move {
             if let Some(error) = file
                 .read_reply_data(offset, size as usize, move |result| match result {
-                    Ok(data) => reply.data(data),
+                    Ok(data) => reply.finish(|reply| reply.data(data)),
                     Err(error) => reply.error(errno(error)),
                 })
                 .await
@@ -636,7 +682,7 @@ impl fuser::Filesystem for Fuse {
             }
             .await;
             match result {
-                Ok(written) => reply.written(written as u32),
+                Ok(written) => reply.finish(|reply| reply.written(written as u32)),
                 Err(error) => reply.error(errno(error)),
             }
         });
@@ -694,7 +740,9 @@ impl fuser::Filesystem for Fuse {
                     Ok(handle) => {
                         fs.reference(&node);
                         let (attr, ttl) = node.cached_attr(fs.config.stat_cache_ttl);
-                        reply.created(&ttl, &attr, Generation(0), handle, flags);
+                        reply.finish(|reply| {
+                            reply.created(&ttl, &attr, Generation(0), handle, flags)
+                        });
                     }
                     Err(error) => reply.error(errno(error)),
                 },
@@ -739,7 +787,7 @@ impl fuser::Filesystem for Fuse {
                 Ok(node) => {
                     fs.reference(&node);
                     let (attr, ttl) = node.cached_attr(fs.config.stat_cache_ttl);
-                    reply.entry(&ttl, &attr, Generation(0));
+                    reply.finish(|reply| reply.entry(&ttl, &attr, Generation(0)));
                 }
                 Err(error) => reply.error(errno(error)),
             }
@@ -775,7 +823,7 @@ impl fuser::Filesystem for Fuse {
                 Ok(node) => {
                     fs.reference(&node);
                     let (attr, ttl) = node.cached_attr(fs.config.stat_cache_ttl);
-                    reply.entry(&ttl, &attr, Generation(0));
+                    reply.finish(|reply| reply.entry(&ttl, &attr, Generation(0)));
                 }
                 Err(error) => reply.error(errno(error)),
             }
@@ -818,7 +866,7 @@ impl fuser::Filesystem for Fuse {
                 Ok(node) => {
                     fs.reference(&node);
                     let (attr, ttl) = node.cached_attr(fs.config.stat_cache_ttl);
-                    reply.entry(&ttl, &attr, Generation(0));
+                    reply.finish(|reply| reply.entry(&ttl, &attr, Generation(0)));
                 }
                 Err(error) => reply.error(errno(error)),
             }
@@ -873,7 +921,7 @@ impl fuser::Filesystem for Fuse {
         // even after our rename reply has been sent.
         self.spawn(reply, move |fs, reply| async move {
             match fs.rename(parent.0, &name, newparent.0, &newname).await {
-                Ok(()) => reply.ok(),
+                Ok(()) => reply.finish(ReplyEmpty::ok),
                 Err(error) => reply.error(errno(error)),
             }
         });
@@ -884,7 +932,7 @@ impl fuser::Filesystem for Fuse {
     fn fsyncdir(&self, _: &Request, _: INodeNo, _: FileHandle, _: bool, reply: ReplyEmpty) {
         self.spawn(reply, move |fs, reply| async move {
             match fs.flush_all().await {
-                Ok(()) => reply.ok(),
+                Ok(()) => reply.finish(ReplyEmpty::ok),
                 Err(error) => reply.error(errno(error)),
             }
         });

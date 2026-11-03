@@ -835,7 +835,8 @@ async fn getattr_refresh_keeps_identity_open_refs_and_dirty_state_and_handles_im
     let heads = store.head_keys.lock().unwrap().len();
     let lists = store.list_calls.load(Ordering::Relaxed);
     fs.refresh_inode_if_expired(dir.ino).await.unwrap();
-    assert_eq!(store.head_keys.lock().unwrap().len(), heads);
+    // Recheck the marker after TTL expiry to discover new directory metadata.
+    assert_eq!(store.head_keys.lock().unwrap().len(), heads + 1);
     assert_eq!(store.list_calls.load(Ordering::Relaxed), lists + 1);
     store.objects.lock().unwrap().remove("implicit/child");
     assert!(matches!(

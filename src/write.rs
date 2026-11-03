@@ -1,5 +1,9 @@
 use crate::{
-    backend::{Store, metadata::encode_metadata, s3::ObjectHead},
+    backend::{
+        Store,
+        metadata::{UPLOAD_RECEIPT, encode_metadata},
+        s3::ObjectHead,
+    },
     budget::{Block, Budget},
     config::Config,
     error::{Error, Result},
@@ -118,13 +122,73 @@ pub struct Snapshot {
     pub metadata: HashMap<String, String>,
 }
 
-pub fn snapshot(node: &Inode) -> Result<Option<Snapshot>> {
-    let state = node.state.lock().unwrap();
+/// Small in-memory receipt; dirty payload stays with the inode's normal extents.
+#[derive(Clone)]
+pub(crate) struct PendingUpload {
+    key: String,
+    size: u64,
+    version: u64,
+    receipt: String,
+}
+
+pub(crate) fn prepare_metadata(config: &Config, state: &mut State) {
+    if config.enable_perms {
+        state
+            .metadata
+            .insert(config.uid_attr.clone(), state.uid.to_string().into_bytes());
+        state
+            .metadata
+            .insert(config.gid_attr.clone(), state.gid.to_string().into_bytes());
+        state.metadata.insert(
+            config.mode_attr.clone(),
+            state.mode.to_string().into_bytes(),
+        );
+    }
+    if config.specials_enabled() || state.mode & libc::S_IFMT != libc::S_IFREG {
+        state.metadata.insert(
+            config.mode_attr.clone(),
+            state.mode.to_string().into_bytes(),
+        );
+        if state.rdev != 0 {
+            state.metadata.insert(
+                config.rdev_attr.clone(),
+                state.rdev.to_string().into_bytes(),
+            );
+        }
+    }
+    if config.enable_mtime {
+        state.metadata.insert(
+            config.mtime_attr.clone(),
+            state
+                .mtime
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                .to_string()
+                .into_bytes(),
+        );
+    }
+}
+
+pub fn snapshot(node: &Inode, config: &Config) -> Result<Option<Snapshot>> {
+    let mut state = node.state.lock().unwrap();
     if state.deleted {
         return Err(Error::Fs(libc::ENOENT));
     }
     if state.version == state.durable {
         return Ok(None);
+    }
+    // Admission may have waited while writes changed both version and mtime.
+    // Generated attributes and payload must describe the same locked generation.
+    prepare_metadata(config, &mut state);
+    if state
+        .metadata
+        .keys()
+        .any(|key| key.eq_ignore_ascii_case(UPLOAD_RECEIPT))
+    {
+        return Err(Error::Config(
+            "geesefs-upload-receipt is reserved for upload provenance".into(),
+        ));
     }
     Ok(Some(Snapshot {
         key: if state.mode & libc::S_IFMT == libc::S_IFDIR && !state.key.is_empty() {
@@ -170,7 +234,8 @@ pub async fn flush_locked(
     admission: &UploadAdmission,
 ) -> Result<()> {
     let mut flusher = Some(flusher);
-    let Some(mut snapshot) = snapshot(node)? else {
+    reconcile_upload(store, node).await?;
+    let Some(mut snapshot) = snapshot(node, config)? else {
         return Ok(());
     };
     if snapshot.size > config.part_sizes.max_size() {
@@ -193,6 +258,20 @@ pub async fn flush_locked(
         && snapshot.size > single_limit;
     loop {
         let upload_size = if bootstrap { prefix } else { snapshot.size };
+        let mut random = [0u8; 16];
+        getrandom::fill(&mut random).map_err(|_| Error::Fs(libc::EIO))?;
+        let receipt = random
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let mut metadata = snapshot.metadata.clone();
+        metadata.insert(UPLOAD_RECEIPT.into(), receipt.clone());
+        let pending = PendingUpload {
+            key: snapshot.key.clone(),
+            size: upload_size,
+            version: snapshot.version,
+            receipt,
+        };
         let committed = if !bootstrap && upload_size <= single_limit {
             let _part =
                 tokio::time::timeout(config.http_timeout, admission.parts.clone().acquire_owned())
@@ -200,12 +279,11 @@ pub async fn flush_locked(
                     .map_err(|_| Error::Timeout("PUT admission"))?
                     .map_err(|_| Error::Cancelled)?;
             let body = crate::upload_body::stream(store, &snapshot, 0, snapshot.size, lane);
-            store
-                .put(&snapshot.key, body, snapshot.metadata.clone())
-                .await?
+            node.state.lock().unwrap().pending_upload = Some(pending);
+            store.put(&snapshot.key, body, metadata.clone()).await?
         } else {
             let upload = store
-                .begin_upload(&snapshot.key, snapshot.metadata.clone(), snapshot.size)
+                .begin_upload(&snapshot.key, metadata.clone(), snapshot.size)
                 .await?;
             let mut guard = UploadGuard {
                 store: store.clone(),
@@ -319,6 +397,9 @@ pub async fn flush_locked(
                         }
                     }
                 }
+                // Set before the request: cancellation can lose an applied
+                // completion's response just as an explicit transport error can.
+                node.state.lock().unwrap().pending_upload = Some(pending);
                 store
                     .complete_upload(&snapshot.key, &upload, parts.into_values().collect())
                     .await
@@ -350,10 +431,11 @@ pub async fn flush_locked(
             &ObjectHead {
                 size: upload_size,
                 etag: committed.clone(),
-                metadata: snapshot.metadata.clone(),
+                metadata,
                 ..Default::default()
             },
         );
+        node.state.lock().unwrap().pending_upload = None;
         let head = store.head(&snapshot.key).await?;
         if head.size != upload_size || head.etag != committed {
             return Err(Error::InvalidResponse(
@@ -414,15 +496,65 @@ fn conflict(error: &Error) -> bool {
 }
 
 fn progress(node: &Inode, snapshot: &Snapshot, head: &ObjectHead) {
+    progress_version(node, snapshot.version, head);
+}
+
+fn progress_version(node: &Inode, version: u64, head: &ObjectHead) {
     let mut state = node.state.lock().unwrap();
     state.remote = Some(head.clone());
     state.visible_remote_size = state
         .cuts
-        .range(snapshot.version + 1..)
+        .range(version + 1..)
         .map(|(_, size)| *size)
         .min()
         .unwrap_or(head.size)
         .min(head.size);
+}
+
+async fn reconcile_upload(store: &Arc<dyn Store>, node: &Inode) -> Result<()> {
+    let (pending, previous) = {
+        let state = node.state.lock().unwrap();
+        (state.pending_upload.clone(), state.remote.clone())
+    };
+    let Some(pending) = pending else {
+        return Ok(());
+    };
+    match store.head(&pending.key).await {
+        Ok(head)
+            if head.size == pending.size
+                && head.metadata.get(UPLOAD_RECEIPT) == Some(&pending.receipt) =>
+        {
+            // Provenance permits using these bytes as the new conditional base,
+            // NOT acknowledging durability. Re-upload all retained dirty data,
+            // including newer writes and truncate cuts, before retiring anything.
+            progress_version(node, pending.version, &head);
+        }
+        Ok(head) if unchanged_base(previous.as_ref(), &head) => {}
+        Err(Error::Fs(libc::ENOENT)) if previous.is_none() => {}
+        Err(Error::Backend { code, .. })
+            if previous.is_none() && matches!(code.as_str(), "NoSuchKey" | "NotFound") => {}
+        Err(error) => return Err(error),
+        Ok(_) => return Err(Error::Fs(libc::ESTALE)),
+    }
+    node.state.lock().unwrap().pending_upload = None;
+    Ok(())
+}
+
+fn unchanged_base(previous: Option<&ObjectHead>, head: &ObjectHead) -> bool {
+    // Extended LIST exposes decoded public attributes, whereas HEAD includes the
+    // private receipt too. Their public metadata must still compare identically.
+    let public_metadata = |head: &ObjectHead| {
+        crate::backend::metadata::decode_metadata(
+            head.metadata
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        )
+    };
+    previous.is_some_and(|old| {
+        old.etag == head.etag
+            && old.size == head.size
+            && public_metadata(old) == public_metadata(head)
+    })
 }
 
 async fn refresh_conflict(

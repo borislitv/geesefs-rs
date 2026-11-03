@@ -5,6 +5,26 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Independent review regressions — 2026-11-03
+
+Four targeted suites cover the corrected review failures:
+
+```bash
+cargo test --locked --test write_review_regressions --test namespace_review_regressions --test startup_review_regressions --test fuse_deadline_review
+```
+
+The 24 cases include applied PUT/completion errors through the real SDK and
+loopback HTTP, cancellation/newer writes/truncate boundaries, stale metadata
+responses at the same content ETag, both pending-rename parents, implicit marker
+discovery, absence of startup HTTP for invalid budgets, and actual fuser wire
+replies with deadline/early-publication ownership. Baseline failures were observed
+before correction; an early-publication control was additionally fault-injected.
+These fixtures do not require a kernel mount or production credentials.
+
+Both allocator suites and explicit native-mount tests remain separate checks.
+Scoped mutation/complexity results do not imply repository-wide coverage or a
+complete CRAP threshold pass.
+
 ## Prometheus observations — 2026-11-03
 
 The configuration regression initially rejects `--metrics-listen`; after adding

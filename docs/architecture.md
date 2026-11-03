@@ -25,8 +25,9 @@ disabled for a read-only diagnostic requiring no backend mutation.
 
 `Fuse::spawn` admits at most `max_requests` active jobs. Closing admission returns
 EINTR; saturation returns EAGAIN. A job owns its reply and permit until completion
-or the request deadline. Timeout drops the future and its reply; fuser supplies
-the failure reply. There is no unbounded application request queue.
+or the request deadline. Timeout drops the future and returns ETIMEDOUT for an
+unsent reply. A reply published before read-ahead is already terminal and cannot
+be sent again during cancellation. There is no unbounded application request queue.
 
 File-handle slots are reserved before create can mutate the namespace. A registry
 entry owns its slot and `Arc<OpenFile>`; admitted reads retain that open inode until
@@ -158,6 +159,24 @@ inode's flush lock. Later writes retain their newer dirty state. The durable
 version advances only after successful backend completion and reconciliation.
 Errors retain dirty data for retry; fsync is a completion barrier, not enqueue
 acknowledgement.
+
+PUT and multipart completion carry a private 128-bit `geesefs-upload-receipt`
+metadata value. After a lost response or cancellation, a size-matching HEAD with
+the owned receipt permits baseline recovery, never durability acknowledgement.
+Dirty extents and newer truncate cuts remain until another verified commit.
+Unrelated remote generations fail closed. The receipt is hidden from filesystem
+xattrs and reserved against user/generated-attribute collisions; it consumes
+54 bytes of the object metadata budget. Recovery is scoped to a live mount,
+not persistence of RAM dirty data across restart. This provenance is not an
+authentication boundary against an authorized external writer copying metadata,
+nor server-side fencing of a request that completes after a later operation.
+
+Generated permissions and mtime are captured with the payload generation under
+the same state lock, after upload admission. Namespace refreshes compare their
+observation time as well as content generation, because a metadata-only update
+can retain its ETag. Pending renames preserve both parents until reconciliation;
+expired implicit directories recheck marker metadata unless directory objects
+are disabled.
 
 A clean fsync returns before upload admission and cache-loan revocation; dirty
 generations and deleted inodes retain their durability/error checks.

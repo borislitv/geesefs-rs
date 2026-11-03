@@ -5,6 +5,21 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-03: independent review corrections
+
+Regressions reproduce lost applied PUT/multipart replies stranding subsequent
+flushes, stale mtime captured before admission, out-of-order metadata HEADs,
+marker metadata hidden by implicit-directory shortcuts, and lost rename-parent
+lifetime. Add bounded upload provenance/reconciliation and use the existing
+generation, observation-time and pending-operation ownership checks consistently.
+
+Complete payload-budget validation now precedes startup backend activity. FUSE
+deadline cancellation returns ETIMEDOUT only for unsent replies and preserves an
+already delivered READ. Deterministic public-API, loopback SDK and fuser transport
+regressions cover the failures and retained side-effect/ownership boundaries.
+The Linux release build now uses Ubuntu 26.04. These fixes do not establish
+sustained performance or full filesystem compatibility acceptance.
+
 ## 2026-11-03: addressed metrics-build and cache-budget update
 
 A new operator authorization updates the same three RO trial readers sequentially

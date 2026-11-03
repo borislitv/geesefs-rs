@@ -4,6 +4,12 @@ use clap::{Parser, ValueEnum};
 
 use crate::error::{Error, Result};
 
+pub(crate) struct PayloadBudgets {
+    pub data_bytes: usize,
+    pub ingress_bytes: usize,
+    pub flush_bytes: usize,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum ListType {
     #[value(name = "1")]
@@ -422,9 +428,7 @@ impl Config {
     }
 
     fn validate_memory_limits(&self) -> Result<()> {
-        if self.memory_limit == 0 || self.memory_limit.checked_mul(1024 * 1024).is_none() {
-            return Err(Error::Config("invalid memory-limit in MiB".into()));
-        }
+        self.payload_budgets()?;
         if self.entry_limit == 0 || self.entry_limit > tokio::sync::Semaphore::MAX_PERMITS as u64 {
             return Err(Error::Config(format!(
                 "entry-limit must be in 1..={}",
@@ -432,6 +436,38 @@ impl Config {
             )));
         }
         Ok(())
+    }
+
+    /// Shared by startup validation and construction, before any backend I/O.
+    pub(crate) fn payload_budgets(&self) -> Result<PayloadBudgets> {
+        use crate::write::{MAX_IO, PART_SIZE};
+        let total = self
+            .memory_limit
+            .checked_mul(1024 * 1024)
+            .filter(|total| *total > 0)
+            .ok_or_else(|| Error::Config("invalid memory-limit in MiB".into()))?;
+        // All lanes are carved out of the requested total, not hidden additions.
+        let flush_bytes = 2 * PART_SIZE;
+        let ingress_bytes = (total / 16).max(MAX_IO);
+        let data_bytes = total
+            .checked_sub(flush_bytes + ingress_bytes)
+            .filter(|bytes| *bytes >= 4 * MAX_IO)
+            .ok_or_else(|| {
+                Error::Config("memory-limit too small for bounded read/write/flush lanes".into())
+            })?;
+        if [data_bytes, ingress_bytes, flush_bytes]
+            .into_iter()
+            .any(|bytes| bytes > tokio::sync::Semaphore::MAX_PERMITS)
+        {
+            return Err(Error::Config(
+                "memory-limit byte lanes exceed semaphore capacity".into(),
+            ));
+        }
+        Ok(PayloadBudgets {
+            data_bytes,
+            ingress_bytes,
+            flush_bytes,
+        })
     }
 
     fn validate_concurrency(&self) -> Result<()> {

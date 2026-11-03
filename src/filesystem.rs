@@ -4,18 +4,18 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime},
 };
 
 use crate::{
     backend::{Store, s3::ObjectHead},
     budget::{Block, Budget},
-    config::Config,
+    config::{Config, PayloadBudgets},
     error::{Error, Result},
     inode::{Inode, State, file_type},
     namespace::{MoveLease, Namespace, child},
     read,
-    write::{self, MAX_IO, PART_SIZE},
+    write::{self, MAX_IO},
 };
 use fuser::{FileAttr, FileType};
 use futures_util::{StreamExt, stream::FuturesUnordered};
@@ -301,22 +301,11 @@ impl Filesystem {
     }
     pub fn new(config: Config, store: Arc<dyn Store>) -> Result<Arc<Self>> {
         config.validate()?;
-        let total = config
-            .memory_limit
-            .checked_mul(1024 * 1024)
-            .ok_or(Error::Fs(libc::EINVAL))?;
-        // All lanes are carved out of the requested total, not hidden additions.
-        let flush_bytes = 2 * PART_SIZE;
-        let ingress_bytes = (total / 16).max(MAX_IO);
-        let data_bytes = total
-            .checked_sub(flush_bytes + ingress_bytes)
-            .filter(|n| *n >= 4 * MAX_IO)
-            .ok_or_else(|| {
-                Error::Config(
-                    "memory-limit too small for bounded read/write/flush lanes (minimum 16 MiB)"
-                        .into(),
-                )
-            })?;
+        let PayloadBudgets {
+            data_bytes,
+            ingress_bytes,
+            flush_bytes,
+        } = config.payload_budgets()?;
         let config = Arc::new(config);
         let root = Inode::new(1, "".into(), true, None, &config);
         root.state.lock().unwrap().lookups = 1;
@@ -489,7 +478,11 @@ impl Filesystem {
             return Err(Error::Fs(libc::EAGAIN));
         }
         if let Some(node) = ns.named(&key) {
-            let fresh = Inode::new(node.ino, key.clone(), directory, head, &self.config);
+            let mut fresh = Inode::new(node.ino, key.clone(), directory, head, &self.config)
+                .state
+                .into_inner()
+                .unwrap();
+            fresh.fetched = started;
             let mut state = node.state.lock().unwrap();
             if observed.as_ref()
                 != Some(&(
@@ -500,11 +493,8 @@ impl Filesystem {
             {
                 return Err(Error::Fs(libc::EAGAIN));
             }
-            if state.version == state.durable
-                && state.rename_target.is_none()
-                && state.data_key.is_none()
-            {
-                state.replace_metadata(fresh.state.into_inner().unwrap());
+            if state.can_replace_metadata(started) {
+                state.replace_metadata(fresh);
             }
             drop(state);
             return Ok(node);
@@ -513,7 +503,9 @@ impl Filesystem {
             return Err(Error::Fs(libc::EAGAIN));
         }
         ns.install(&key, |ino| {
-            Inode::new(ino, key.clone(), directory, head, &self.config)
+            let node = Inode::new(ino, key.clone(), directory, head, &self.config);
+            node.state.lock().unwrap().fetched = started;
+            node
         })
     }
 
@@ -604,8 +596,9 @@ impl Filesystem {
     /// replaced name. Root is synthetic; implicit directories are checked by
     /// LIST, not by assuming a marker exists. Dirty attributes remain local.
     pub async fn refresh_inode_if_expired(&self, ino: u64) -> Result<Arc<Inode>> {
+        let started = std::time::Instant::now();
         let node = self.node(ino)?;
-        let (key, directory, remote, version, epoch, implicit) = {
+        let (key, directory, remote, version, epoch, list_only) = {
             let ns = self.namespace.lock().unwrap();
             let s = node.state.lock().unwrap();
             if s.deleted {
@@ -634,12 +627,12 @@ impl Filesystem {
                 s.remote.clone(),
                 s.version,
                 ns.epoch,
-                directory && s.remote.is_none() && s.metadata_known,
+                directory && self.config.no_dir_object,
             )
         };
-        // A common prefix establishes a directory name, not marker metadata.
-        // Only an already resolved implicit directory can skip the marker HEAD.
-        let fetched = if implicit {
+        // An implicit directory may acquire a marker with authoritative metadata.
+        // Skip its HEAD only when directory objects are explicitly disabled.
+        let fetched = if list_only {
             let page = self.store.list(&format!("{key}/"), Some("/"), None).await;
             match page {
                 Ok(page) if !page.objects.is_empty() || !page.common_prefixes.is_empty() => {
@@ -685,9 +678,7 @@ impl Filesystem {
         }
         if s.version != version
             || s.remote.as_ref().map(|h| &h.etag) != remote.as_ref().map(|h| &h.etag)
-            || s.version > s.durable
-            || s.rename_target.is_some()
-            || s.data_key.is_some()
+            || !s.can_replace_metadata(started)
             || directory && ns.has_dirty_descendants(&key)
         {
             return Ok(node.clone());
@@ -697,10 +688,11 @@ impl Filesystem {
         }
         match fetched {
             Ok(head) => {
-                let fresh = Inode::new(ino, key, directory, head, &self.config)
+                let mut fresh = Inode::new(ino, key, directory, head, &self.config)
                     .state
                     .into_inner()
                     .unwrap();
+                fresh.fetched = started;
                 s.replace_metadata(fresh);
             }
             Err(error) if not_found(&error) => {
@@ -1546,44 +1538,7 @@ impl Filesystem {
     }
 
     fn prepare_metadata(&self, state: &mut State) {
-        if self.config.enable_perms {
-            state.metadata.insert(
-                self.config.uid_attr.clone(),
-                state.uid.to_string().into_bytes(),
-            );
-            state.metadata.insert(
-                self.config.gid_attr.clone(),
-                state.gid.to_string().into_bytes(),
-            );
-            state.metadata.insert(
-                self.config.mode_attr.clone(),
-                state.mode.to_string().into_bytes(),
-            );
-        }
-        if self.config.specials_enabled() || state.mode & libc::S_IFMT != libc::S_IFREG {
-            state.metadata.insert(
-                self.config.mode_attr.clone(),
-                state.mode.to_string().into_bytes(),
-            );
-            if state.rdev != 0 {
-                state.metadata.insert(
-                    self.config.rdev_attr.clone(),
-                    state.rdev.to_string().into_bytes(),
-                );
-            }
-        }
-        if self.config.enable_mtime {
-            state.metadata.insert(
-                self.config.mtime_attr.clone(),
-                state
-                    .mtime
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-                    .to_string()
-                    .into_bytes(),
-            );
-        }
+        write::prepare_metadata(&self.config, state);
     }
 
     pub async fn fsync(&self, ino: u64) -> Result<()> {
@@ -1611,7 +1566,6 @@ impl Filesystem {
             if state.version == state.durable {
                 return Ok(());
             }
-            self.prepare_metadata(&mut state);
             if self.config.no_dir_object && file_type(state.mode) == FileType::Directory {
                 state.durable = state.version;
                 return Ok(());
@@ -1831,6 +1785,8 @@ impl Filesystem {
             return None;
         }
         let fresh = state.version > state.durable
+            || state.rename_target.is_some()
+            || state.data_key.is_some()
             || state.fetched.elapsed() < self.config.stat_cache_ttl
             || file_type(state.mode) == FileType::Directory && ns.has_dirty_descendants(name);
         fresh.then(|| DirectoryMetadata {
@@ -2490,6 +2446,9 @@ impl Filesystem {
         let Some(name) = name.strip_prefix("user.") else {
             return Ok(());
         };
+        if name.eq_ignore_ascii_case(crate::backend::metadata::UPLOAD_RECEIPT) {
+            return Err(Error::Fs(libc::EPERM));
+        }
         if name == self.config.symlink_attr {
             return Ok(());
         }

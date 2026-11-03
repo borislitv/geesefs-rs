@@ -5,6 +5,13 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-03: release 0.1.1 preparation
+
+Advance the package and lockfile version together so the executable identifies
+the release containing the independent-review corrections and Ubuntu 26.04 build.
+Dependency versions and runtime behavior are unchanged by this version bump.
+Release availability remains separate from filesystem and performance acceptance.
+
 ## 2026-11-03: independent review corrections
 
 Regressions reproduce lost applied PUT/multipart replies stranding subsequent

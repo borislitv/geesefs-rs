@@ -5,6 +5,20 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## Third addressed reader and error-screen correction — 2026-11-03
+
+A separate authorization extends the same-build, same-budget RO trial to a
+third reader. Its first ordinary-unmount refusal preserves the old mount;
+the continuation waits for empty consumer cgroups and passes protocol bytes,
+namespace propagation and healthy recovery no-op. No runtime code changes.
+
+The error screen must match vhost/method/URI rather than combine different
+virtual hosts. The third reader's sampled 404 rate rises; all newly observed
+canonical missing URIs have current native absence evidence, with the original
+TLS timeout retained. Earlier EAGAIN/EIO, backend read failure and upstream
+timeout remain separate from successful controls. Memory growth and broader
+acceptance are unresolved. [Scope and limits](pr-context.md#scoped-serving-trial--2026-11-02).
+
 ## Second addressed reader trial — 2026-11-03
 
 A separate operator authorization extends the read-only serving trial to one

@@ -54,6 +54,29 @@ Its initial passive window also retains one `open()` EIO/HTTP 500; subsequent
 native-object and served-HEAD checks pass, without establishing the transient
 failure's cause or an error-free serving claim.
 
+The operator subsequently authorizes a third read-only reader on the same build
+and budgets. Its first ordinary-unmount refusal preserves the old reader and
+restores consumers. An archived continuation verifies empty consumer cgroups
+before ordinary unmount, then passes complete HTTPS/Range/rsync bytes, consumer
+namespaces and healthy recovery no-op. The earlier two readers remain serving.
+These controls do not erase retained HTTP/FUSE errors or establish sustained
+compatibility, writer or failure-injection acceptance.
+
+The third reader's flushed five-minute canonical common-path 404 rate rises
+from 58/5402 to 178/5361. Current native/served HEAD controls on all 65 newly
+observed missing URIs agree on absence, including one separately retained native
+TLS timeout followed by 404. The second reader's 17 checked URIs also agree;
+the first reader's 62 distinct checked URIs now yield 58 missing pairs and four
+present pairs. No checked URI has native 200 with served 404. Request populations
+and generations differ; these existence checks do not prove historical byte
+parity, explain every 404 or establish a causal non-regression.
+
+The first reader's historical post window retains EAGAIN/HTTP 500, and a later
+window has two `pread()` EIOs despite zero logged 5xx. That object's native short
+Range independently returns backend InternalError/500 while served Range times
+out. The second reader also retains an upstream connection timeout. A successful
+HEAD or logged 200/206 is insufficient to establish complete payload delivery.
+
 External failure recovery is configured to quiesce filesystem consumers, replace
 only a verified disconnected mount and restore its consumers, excluding native-S3
 listings. Deployment-helper regressions and a real healthy-event no-op pass;

@@ -118,7 +118,7 @@ solutions; convenience or unfamiliarity is not sufficient justification.
 - Do not deploy, replace served mounts, modify production data or reuse private
   credentials in this development workflow. Integration writes use dedicated
   disposable test data only.
-- Operator exceptions, 2026-11-02/03: two read-only serving readers were separately
+- Operator exceptions, 2026-11-02/03: three read-only serving readers were separately
   authorized; see the [scoped trials](docs/pr-context.md#scoped-serving-trial--2026-11-02).
   This does not authorize changes to other readers or writers, additional failure
   injection, or general deployment before acceptance.

@@ -2,7 +2,7 @@
 
 Experimental Linux/S3 GeeseFS replacement for readers and writers.
 **Not accepted for production:** compatibility and comparative performance remain
-incomplete. Two separately authorized read-only readers are covered by the
+incomplete. Three separately authorized read-only readers are covered by the
 [scoped serving trials](docs/pr-context.md#scoped-serving-trial--2026-11-02),
 without general deployment acceptance.
 

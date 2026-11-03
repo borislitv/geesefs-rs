@@ -1,4 +1,4 @@
-# Remaining work — 2026-11-02
+# Remaining work — 2026-11-03
 
 Overall status is **UNACCEPTED**. Completed mechanisms belong in
 [architecture](architecture.md) and [change history](change-history.md); frozen
@@ -31,6 +31,9 @@ Attribute the [scoped serving trial's](pr-context.md#scoped-serving-trial--2026-
 `open`/`pread` `EAGAIN` and HTTP 500 before claiming equivalent correctness. Separate
 admission pressure, metadata races and backend failures; retain failed responses
 alongside successful-request timings and distinguish post-header read failures.
+Include later `pread()` EIO and independently reproduced native backend read
+failure. Compare vhost/method/URI and generations before attributing 404 changes;
+current native/served HEAD parity is not historical full-payload acceptance.
 
 ## 2. Target access and large-namespace memory
 

@@ -96,7 +96,11 @@ jobs:
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json tagName >/dev/null 2>release-lookup.err; then
             mkdir published
             gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir published
-            cmp SHA256SUMS published/SHA256SUMS
+            cmp geesefs-rs-linux-amd64 published/geesefs-rs-linux-amd64
+            # A rebuild changes the run URL, not the binary/source identity.
+            jq -S 'del(.run_url)' BUILD-INFO.json > source.json
+            jq -S 'del(.run_url)' published/BUILD-INFO.json > published-source.json
+            cmp source.json published-source.json
             (cd published && sha256sum --check SHA256SUMS)
           elif [[ "$(<release-lookup.err)" == *"release not found"* ]]; then
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \

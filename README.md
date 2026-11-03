@@ -45,7 +45,9 @@ used; no larger runner or persistent build cache is required.
 Each snapshot contains `geesefs-rs-linux-amd64`, `SHA256SUMS` and `BUILD-INFO.json`
 with the source commit, toolchain, target, allocator and Actions run URL. Pin the
 exact commit tag and independently recorded binary SHA256 in deployment tooling;
-do not follow `latest`. Existing releases are verified, never overwritten.
+do not follow `latest`. Existing releases are verified, never overwritten:
+repeated builds must match the binary and source/toolchain provenance, while the
+original run URL and its checksums remain attached to the published release.
 CI compilation and library checks do not establish mounted filesystem or
 comparative performance acceptance.
 

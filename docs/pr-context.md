@@ -1,4 +1,4 @@
-# PR context — 2026-11-02
+# PR context — 2026-11-03
 
 [PR2](https://github.com/borislitv/geesefs-rs/pull/2) remains open and draft,
 targeting `main`, without auto-merge. Overall status is **UNACCEPTED**. The
@@ -44,6 +44,12 @@ The operator explicitly authorized replacing one read-only served reader with
 the source-matching `allow_other` build. The trial retains traffic and the existing
 payload/entry limits. This addressed exception does not accept the implementation
 generally or authorize changes to other readers and writers.
+
+On 2026-11-03 a separate operator authorization extends the trial to a second
+read-only reader, retaining the same executable and budgets. Its ordinary
+unmount/consumer handoff, independent peer-host HTTPS and rsync byte controls,
+consumer mount namespaces and healthy recovery no-op pass. This is addressed
+operational coverage, not comparative memory/performance or general acceptance.
 
 External failure recovery is configured to quiesce filesystem consumers, replace
 only a verified disconnected mount and restore its consumers, excluding native-S3

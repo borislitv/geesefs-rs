@@ -5,6 +5,15 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## Second addressed reader trial — 2026-11-03
+
+A separate operator authorization extends the read-only serving trial to one
+additional reader with the same source-matching executable and cache/resource
+budgets. Ordinary unmount, consumer namespace propagation, independent peer-host
+HTTPS and rsync bytes and healthy recovery no-op pass. Preserve the prior live
+error/anonymous-growth gaps; a cold new cache is not a fair memory comparison.
+[Combined scope and limits](pr-context.md#scoped-serving-trial--2026-11-02).
+
 ## Scoped serving trial and recovery boundary — 2026-11-02
 
 The operator authorized one read-only served-reader replacement, separately from

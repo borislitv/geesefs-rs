@@ -100,8 +100,10 @@ Use dedicated disposable fixtures for writes and failure injection. Existing
 readers, mounts, data, writer schedules and credentials are not part of this
 general development workflow. On 2026-11-02 the operator explicitly authorized one
 [read-only serving trial](pr-context.md#scoped-serving-trial--2026-11-02), retaining
-traffic and existing cache limits. It does not authorize broader rollout or
-production failure injection, and does not close acceptance. The user confirmed
+traffic and existing cache limits. On 2026-11-03 a separate authorization extended
+the trial to a second read-only reader with the same source-matching executable
+and budgets. These exceptions do not authorize broader rollout or production
+failure injection, and do not close acceptance. The user confirmed
 the public repository: source and reproducible fixtures are public; credentials,
 deployment identities and private operational evidence are not project artifacts.
 

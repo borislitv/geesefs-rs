@@ -2,9 +2,9 @@
 
 Experimental Linux/S3 GeeseFS replacement for readers and writers.
 **Not accepted for production:** compatibility and comparative performance remain
-incomplete. One
-[operator-authorized serving trial](docs/pr-context.md#scoped-serving-trial--2026-11-02)
-is a scoped exception, not general deployment acceptance.
+incomplete. Two separately authorized read-only readers are covered by the
+[scoped serving trials](docs/pr-context.md#scoped-serving-trial--2026-11-02),
+without general deployment acceptance.
 
 The goal is preserved filesystem/S3 behavior with lower memory use and faster
 normal, sustained operation than **Go 0.43.9**, the primary reference. Earlier

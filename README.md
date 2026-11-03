@@ -33,6 +33,22 @@ paged namespace operations and generation-aware sparse/truncate/fsync writes.
 See [architecture](docs/architecture.md) for delivered mechanisms and
 [compatibility](docs/compatibility.md) for gaps.
 
+## CI-built Linux snapshots
+
+After the checks pass, GitHub Actions builds the Linux amd64 executable with
+Rust 1.96.0 and the default jemalloc allocator on Ubuntu 22.04. Push runs publish
+a prerelease named `build-<full-source-commit>` in
+[GitHub Releases](https://github.com/borislitv/geesefs-rs/releases).
+Pull-request runs only upload a one-day Actions artifact. Standard runners are
+used; no larger runner or persistent build cache is required.
+
+Each snapshot contains `geesefs-rs-linux-amd64`, `SHA256SUMS` and `BUILD-INFO.json`
+with the source commit, toolchain, target, allocator and Actions run URL. Pin the
+exact commit tag and independently recorded binary SHA256 in deployment tooling;
+do not follow `latest`. Existing releases are verified, never overwritten.
+CI compilation and library checks do not establish mounted filesystem or
+comparative performance acceptance.
+
 ## Current checkpoint — 2026-11-03
 
 The optional [Prometheus listener](docs/metrics.md) is available through

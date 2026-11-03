@@ -1,4 +1,4 @@
-name: Rust library checks (not filesystem acceptance)
+name: Rust checks and Linux builds (not filesystem acceptance)
 
 on:
   push:
@@ -26,3 +26,84 @@ jobs:
       - run: timeout 60s python3 -m unittest discover -s bench -p 'test_*.py'
       - run: timeout 900s cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: timeout 300s cargo test --locked --all-targets --all-features
+
+  build:
+    needs: check
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Build the default jemalloc executable
+        run: timeout 2400s cargo build --locked --release --bin geesefs-rs
+      - name: Package binary and source provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir dist
+          install -m 0755 target/release/geesefs-rs dist/geesefs-rs-linux-amd64
+          dist/geesefs-rs-linux-amd64 --version
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          info = {
+              "commit": os.environ["GITHUB_SHA"],
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "run_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+              "target": "x86_64-unknown-linux-gnu",
+              "allocator": "jemalloc",
+              "rustc": subprocess.check_output(["rustc", "--version"], text=True).strip(),
+          }
+          Path("dist/BUILD-INFO.json").write_text(json.dumps(info, indent=2) + "\n")
+          PY
+          (cd dist && sha256sum geesefs-rs-linux-amd64 BUILD-INFO.json > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.event_name == 'push' && github.repository == 'borislitv/geesefs-rs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ github.sha }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-amd64
+          path: dist
+      - name: Verify and publish an immutable build snapshot
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum --check SHA256SUMS
+          tag="build-${GITHUB_SHA}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json tagName >/dev/null 2>release-lookup.err; then
+            mkdir published
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir published
+            cmp SHA256SUMS published/SHA256SUMS
+            (cd published && sha256sum --check SHA256SUMS)
+          elif [[ "$(<release-lookup.err)" == *"release not found"* ]]; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --prerelease --title "Linux build ${GITHUB_SHA}" \
+              --notes "CI-built Linux amd64 snapshot with jemalloc. Source commit: ${GITHUB_SHA}. Filesystem compatibility and performance acceptance remain separate." \
+              geesefs-rs-linux-amd64 SHA256SUMS BUILD-INFO.json
+          else
+            cat release-lookup.err >&2
+            exit 1
+          fi

@@ -50,6 +50,9 @@ read-only reader, retaining the same executable and budgets. Its ordinary
 unmount/consumer handoff, independent peer-host HTTPS and rsync byte controls,
 consumer mount namespaces and healthy recovery no-op pass. This is addressed
 operational coverage, not comparative memory/performance or general acceptance.
+Its initial passive window also retains one `open()` EIO/HTTP 500; subsequent
+native-object and served-HEAD checks pass, without establishing the transient
+failure's cause or an error-free serving claim.
 
 External failure recovery is configured to quiesce filesystem consumers, replace
 only a verified disconnected mount and restore its consumers, excluding native-S3

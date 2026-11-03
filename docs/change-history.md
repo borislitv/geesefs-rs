@@ -11,7 +11,9 @@ A separate operator authorization extends the read-only serving trial to one
 additional reader with the same source-matching executable and cache/resource
 budgets. Ordinary unmount, consumer namespace propagation, independent peer-host
 HTTPS and rsync bytes and healthy recovery no-op pass. Preserve the prior live
-error/anonymous-growth gaps; a cold new cache is not a fair memory comparison.
+error/anonymous-growth gaps and the second reader's transient EIO/HTTP 500;
+later successful controls do not attribute that failure. A cold new cache is
+not a fair memory comparison.
 [Combined scope and limits](pr-context.md#scoped-serving-trial--2026-11-02).
 
 ## Scoped serving trial and recovery boundary — 2026-11-02

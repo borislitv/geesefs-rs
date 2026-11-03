@@ -143,3 +143,30 @@ async fn cancelled_or_failed_resolution_releases_all_global_jobs_and_retry_keeps
         assert!(store.peak_heads.load(Ordering::SeqCst) <= 2);
     }
 }
+
+#[tokio::test]
+async fn common_prefixes_do_not_replace_authoritative_directory_marker_attributes() {
+    let store = MemoryStore::new();
+    store.seed("directory/", b"");
+    store.seed("directory/child", b"data");
+    store
+        .objects
+        .lock()
+        .unwrap()
+        .get_mut("directory/")
+        .unwrap()
+        .metadata
+        .extend([
+            ("mode".into(), (libc::S_IFDIR | 0o750).to_string()),
+            ("uid".into(), "1234".into()),
+            ("gid".into(), "5678".into()),
+        ]);
+    let fs = store.filesystem(16);
+    let entries = fs.directory_chunk(1, "", 8).await.unwrap();
+    assert_eq!(entries.len(), 1);
+    let directory = fs.refresh_inode_if_expired(entries[0].ino).await.unwrap();
+    let attr = directory.attr();
+    assert_eq!(attr.perm, 0o750);
+    assert_eq!((attr.uid, attr.gid), (1234, 5678));
+    assert_eq!(store.head_starts.load(Ordering::Relaxed), 1);
+}

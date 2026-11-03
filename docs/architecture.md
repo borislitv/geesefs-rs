@@ -28,6 +28,12 @@ EINTR; saturation returns EAGAIN. A job owns its reply and permit until completi
 or the request deadline. Timeout drops the future and its reply; fuser supplies
 the failure reply. There is no unbounded application request queue.
 
+File-handle slots are reserved before create can mutate the namespace. A registry
+entry owns its slot and `Arc<OpenFile>`; admitted reads retain that open inode until
+their last owner finishes. Closing admission drains requests before clearing the
+registry. READDIRPLUS holds accepted inode owners until successful buffer delivery;
+error/cancellation transfers no lookup references, and dot entries acquire none.
+
 ## Namespace and metadata
 
 `src/namespace.rs` binds names to stable inodes; `src/inode.rs` owns generation,
@@ -40,6 +46,30 @@ Moka bounds directory-page/preload retention; listing and type resolution are
 paged and admission-limited. Remote metadata is validated against the observed
 binding/generation before installation. Dirty or newly durable local state is not
 replaced merely because an older response completes later.
+
+Directory pages use inode-local listing epochs. A mutation invalidates its parent
+and any moved/deleted cached subtree, preserving fresh pages elsewhere. Epochs
+are read and changed under the namespace lock, independently of refreshed inode
+metadata. In-flight listings validate both epoch and name-to-inode binding before
+publication; move/delete leases invalidate on entry and on every completion path.
+
+Cached pages validate every unconsumed child's binding, type and freshness. A
+FUSE frame resumes the same backend page but binary-searches past names already
+delivered, avoiding their repeated validation and copies. Consumed inode eviction
+does not force a new LIST. The backend-page continuation remains distinct from
+true EOF, including insertions before the cursor; no inode or lookup owner is
+retained merely to keep a consumed prefix alive. Authoritative
+extended LIST metadata can refresh an existing clean inode, preserving owners and
+local counters; a later HEAD or verified commit wins over the older request.
+Kernel replies carry the remaining metadata TTL. Common prefixes establish names,
+not authoritative directory-marker attributes. Basic READDIR remains available;
+kernel continuation resumes the same bounded backend page until it is consumed.
+
+Each selected entry carries the observation time of its metadata source: cached
+inode, authoritative LIST or resolved HEAD. Publishing a new names page does not
+renew cached permission/xattr freshness. Standard LIST may supply size/ETag but
+cannot revalidate absent user metadata; kernel attribute TTL remains bounded by
+that older observation. Later HEAD/commit generations still override older data.
 
 ## Payload ownership and progress
 
@@ -57,15 +87,34 @@ All three lanes are carved from the requested payload limit:
 | data | `total - ingress - flush` | Shared clean cache, dirty extents and pinned/temporary payload |
 
 A 64 MiB configuration therefore provides 50 MiB data, 4 MiB ingress and 10 MiB
-flush. Clean reads cannot borrow an idle flush reserve in the delivered code.
-`effective_budgets()` reports actual capacities/use; these are payload-owner
-bounds, **not RSS, allocator or cgroup memory bounds**. Metadata, SDK/runtime,
+flush. Required admission may move an exclusively cache-owned clean backing's
+charge from data into idle flush capacity. The retained policy ceiling is then
+60 MiB; no lane or total limit increases. Shared/pinned allocations cannot move.
+`effective_budgets()` reports capacities/use and current clean cache loans;
+`flush_used_bytes` includes these loans as well as upload allocations. These are
+payload-owner bounds, **not RSS, allocator or cgroup memory bounds**. Metadata, SDK/runtime,
 allocator retention, clients and kernel caches require separate measurement.
 
 Required data admission reclaims only enough LRU ownership to satisfy the request;
 queued semaphore waiters retain FIFO priority. Dirty-pressure progress can flush
 through the independent reserved lane. Optional read-ahead uses nonblocking
-admission and skips pressure instead of blocking required work.
+data admission and skips pressure instead of initiating loans or blocking required
+work. A required miss may reclaim any cache owner; existing FIFO admission stays
+ahead of later hits or loans.
+
+A fill can publish new cache ownership after admission's first reclamation sweep.
+Waiting admission therefore listens for cache publication through Tokio `Notify`
+and retries reclamation while retaining the same FIFO semaphore reservation.
+Registering before inspecting the cache closes the check/wait race; cancellation
+drops the reservation and notification with the caller-owned future.
+
+Before uploading, a flusher holds shared Tokio `RwLock` activity and synchronously
+revokes cache loans. Independent uploads remain concurrent. The guard travels
+with cloned upload budgets into SDK bodies and jobs, preventing new loans until
+the last allocation-capable upload owner finishes, including after caller
+cancellation. Cache lending only tries exclusive activity synchronously and
+never waits. Loaned bytes are copied into an already admitted data reply before
+an owned `Block` can leave the cache, so callers cannot pin a revocable reserve.
 
 ## Reads, generations and cache
 
@@ -76,15 +125,25 @@ or cancellation. Followers recheck current state/cache rather than inheriting an
 unvalidated result from a different generation.
 
 `src/cache.rs` retains charged immutable blocks using `lru` plus a range index.
-A single cached backing can supply a view; joining fragments uses admitted
-output. Required pressure may reclaim any LRU owner. Optional refill protects a
-foreign unread prefix using contiguous-consumption hints, not permanent pins.
+A normal cached backing can supply a view; joining fragments or reading a loaned
+backing uses admitted output. Required pressure may reclaim any LRU owner.
+Optional refill protects a foreign unread prefix using contiguous-consumption
+hints, not permanent pins.
 
-Adaptive `Pattern` currently belongs to the inode, not each open handle. The
-zero-to-one open transition resets history while preserving cached payload;
-concurrent handles still share history. Cache hits advance policy and can start
-next-window refill after publishing the reply, in the same owned future,
-request slot and deadline.
+Each FUSE `OpenFile` owns its adaptive `Pattern`, matching the reference handle
+lifetime. Concurrent and reopened handles share payload/fills but not stream
+history. Legacy inode-only APIs retain their separate inode pattern. Cache hits
+advance policy and can start next-window refill after publishing the reply, in
+the same owned future, request slot and deadline.
+
+`FOPEN_KEEP_CACHE` is unset. After releasing a clean regular file with no remaining
+open owners, the adapter asks fuser to invalidate its kernel pages rather than
+retaining pages that the next open will discard. One independent blocking slot
+bounds these potentially writeback-waiting notifications without taking request
+admission or holding userspace inode locks. Shutdown joins that slot. Eligibility
+is rechecked in the worker; concurrent reopen, retained readers or an occupied
+slot can defer or skip this best-effort reclamation. Kernel page locking and
+writeback govern a racing notification; dirty userspace extents are not discarded.
 
 The SDK range path preserves If-Match, exact range/EOF and body integrity.
 Unchecksummed responses can publish bounded fragments incrementally; a whole-body
@@ -100,11 +159,22 @@ version advances only after successful backend completion and reconciliation.
 Errors retain dirty data for retry; fsync is a completion barrier, not enqueue
 acknowledgement.
 
+A clean fsync returns before upload admission and cache-loan revocation; dirty
+generations and deleted inodes retain their durability/error checks.
+
 `src/parts.rs` supplies configured multipart boundaries. Upload/copy/queue
 semaphores bound work. `src/upload_body.rs` builds retryable SDK bodies from
 1 MiB materialized frames rather than allocating an entire object/large part.
 Output plus conditional-GET scratch is admitted atomically in the flush lane;
 emitted frames retain their charge through transport ownership.
+
+When one dirty extent already covers an upload range of at most 1 MiB, expose its
+immutable charged view through `Bytes::from_owner` instead of materializing a
+second frame. The byte owner also retains upload activity through retries,
+cancellation and retained transport bytes. The SDK's known-body path signs a
+checksum header without aws-chunked encoding. Sparse, composed and remote ranges
+still use bounded streaming; checksum policy and post-commit verification remain
+unchanged. A short final multipart range respects the extent's backing offset.
 
 Cancellation aborts/drains multipart tasks and retains the admission token until
 owned cleanup completes. Backend cleanup is drained before runtime teardown.
@@ -122,4 +192,5 @@ Default release builds use jemalloc and ThinLTO with one codegen unit. The
 `system-allocator` feature is an explicit alternative with differently scoped
 counters. RSS, live allocator use and cgroup file/kernel memory are not
 interchangeable. Current measured losses and remaining compatibility work are
-recorded in [next work](next-work.md); no cache-loan redesign is included.
+recorded in [next work](next-work.md); the idle-loan policy is a bounded ownership
+change, not proof of whole-filesystem speed or memory acceptance.

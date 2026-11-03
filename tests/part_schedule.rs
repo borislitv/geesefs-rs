@@ -96,6 +96,40 @@ async fn sixty_gib_object_uses_configured_tiers_without_materializing_the_object
 }
 
 #[tokio::test]
+async fn short_final_part_reuses_the_correct_view_of_a_split_dirty_extent() {
+    let store = MemoryStore::new();
+    let fs = store.filesystem(16);
+    let node = fs
+        .create(1, "file", libc::S_IFREG | 0o644, None, 0)
+        .await
+        .unwrap();
+    let start = 4 * MIB as usize + MIB as usize / 2;
+    let original: Vec<u8> = (0..MIB as usize)
+        .map(|at| ((at / 4096) * 131 + at % 251) as u8)
+        .collect();
+    let replacement = vec![0x5a; 65536];
+    fs.write(node.ino, start as u64, &original).await.unwrap();
+    fs.write(node.ino, (start + 65536) as u64, &replacement)
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), fs.fsync(node.ino))
+        .await
+        .unwrap()
+        .unwrap();
+    let bytes = store.bytes("file");
+    assert_eq!(bytes.len(), start + original.len());
+    assert!(bytes[..start].iter().all(|byte| *byte == 0));
+    assert_eq!(&bytes[start..start + 65536], &original[..65536]);
+    assert_eq!(&bytes[start + 65536..start + 131072], &replacement);
+    assert_eq!(&bytes[start + 131072..], &original[131072..]);
+    assert_eq!(
+        *store.upload_part_sizes.lock().unwrap(),
+        [(1, 5 * MIB), (2, MIB / 2)]
+    );
+    assert!(store.max_upload_frame.load(Ordering::Relaxed) <= MIB as usize);
+}
+
+#[tokio::test]
 async fn configured_object_end_is_checked_before_any_write_or_truncate_side_effect() {
     let store = MemoryStore::new();
     let mut config = MemoryStore::config(16);

@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
-    sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{Mutex, atomic::AtomicU64},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{backend::s3::ObjectHead, budget::Block, config::Config};
@@ -42,12 +42,35 @@ pub struct State {
     pub negative_lookups: std::collections::BTreeMap<String, std::time::Instant>,
 }
 
+impl State {
+    pub(crate) fn can_replace_metadata(&self, observed: std::time::Instant) -> bool {
+        !self.deleted
+            && self.version == self.durable
+            && self.rename_target.is_none()
+            && self.data_key.is_none()
+            && self.fetched <= observed
+    }
+
+    /// Replace clean remote metadata without changing the live inode's owners,
+    /// local generation counters or separately validated negative lookups.
+    pub(crate) fn replace_metadata(&mut self, mut fresh: Self) {
+        fresh.lookups = self.lookups;
+        fresh.opens = self.opens;
+        fresh.version = self.version;
+        fresh.durable = self.durable;
+        fresh.negative_lookups = std::mem::take(&mut self.negative_lookups);
+        *self = fresh;
+    }
+}
+
 pub struct Inode {
     pub ino: u64,
     pub state: Mutex<State>,
     /// Serialize commits/rename/delete for this object only, never the namespace.
     pub flush: std::sync::Arc<tokio::sync::Mutex<()>>,
     pub(crate) preload: tokio::sync::Mutex<()>,
+    /// Listing invalidation is independent of refreshed object metadata.
+    pub(crate) directory_epoch: AtomicU64,
     pub pattern: Mutex<crate::read::Pattern>,
     pub(crate) read_fills: Mutex<BTreeMap<(u64, u64), crate::read::Fill>>,
 }
@@ -148,6 +171,7 @@ impl Inode {
         };
         Self {
             ino,
+            directory_epoch: AtomicU64::new(0),
             state: Mutex::new(State {
                 key,
                 data_key: None,
@@ -182,6 +206,10 @@ impl Inode {
 
     pub fn attr(&self) -> FileAttr {
         let s = self.state.lock().unwrap();
+        self.attr_from_state(&s)
+    }
+
+    fn attr_from_state(&self, s: &State) -> FileAttr {
         let kind = file_type(s.mode);
         let size = s.size;
         FileAttr {
@@ -201,6 +229,25 @@ impl Inode {
             blksize: 4096,
             flags: 0,
         }
+    }
+
+    /// Returning an old cached value must not restart its remote freshness TTL.
+    pub fn cached_attr(&self, ttl: Duration) -> (FileAttr, Duration) {
+        let state = self.state.lock().unwrap();
+        let remaining = if state.deleted {
+            Duration::ZERO
+        } else if self.ino == 1
+            || state.version > state.durable
+            || state.rename_target.is_some()
+            || state.data_key.is_some()
+        {
+            ttl
+        } else if state.metadata_known {
+            ttl.saturating_sub(state.fetched.elapsed())
+        } else {
+            Duration::ZERO
+        };
+        (self.attr_from_state(&state), remaining)
     }
 }
 

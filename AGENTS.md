@@ -37,6 +37,13 @@ The Rust implementation must use less memory and run faster than the Go
 reference on equivalent, reproducible workloads while preserving the required
 filesystem and S3 behavior. A language change alone does not satisfy this goal.
 
+The operator's 2026-11-01 clarification limits Go-relative speed/memory gates to
+correctness-equivalent behavior. Do not require Rust to beat a reference by
+reproducing demonstrated stale metadata, weaker durability or other logical gaps.
+Keep the raw measurements, identify the precise unequal contract and judge its
+necessary cost separately. This is not a blanket exemption for unrelated losses;
+equivalent-behavior comparisons and Rust-relative non-regressions still apply.
+
 - Fix datasets, object generations, machine/kernel, CPU quota, concurrency,
   cache budgets, working-set size and cold/warm state in paired comparisons.
 - Measure steady-state and peak RSS, allocator/heap use where available, total
@@ -47,8 +54,24 @@ filesystem and S3 behavior. A language change alone does not satisfy this goal.
   publish cgroup/file/kernel memory and label process scope and missing metrics.
 - Include metadata-heavy traversal, sequential/random payload reads, concurrent
   readers, cache eviction and writer/fsync workloads, including dependency errors.
+- Operator priority, 2026-11-02: optimize read-only serving first. Preserve writer
+  correctness and its verification while prioritizing payload reads, metadata and
+  cache residency over writer performance experiments.
+- Operator reference clarification, 2026-11-02: Go 0.43.9 is the primary acceptance
+  reference. The unmerged Go optimization experiment is historical evidence only;
+  preserve its measurements without making it an acceptance candidate.
+- Operator cache clarification, 2026-11-02: bounded negative caching with the Go
+  reference's configured metadata TTL is accepted behavior, not a freshness defect
+  blocking comparison. Use the explicit Rust negative-cache configuration for
+  read-only Go-parity comparisons. Separate cache TTL controls are future work;
+  immediate visibility of external creates is not an additional requirement.
 - Require reproducible improvement rather than one favorable sample; retain raw
   measurements, failures, variance and baseline executable provenance.
+- Operator clarification, 2026-11-02: use paired confidence intervals and
+  same-executable A/A controls rather than strict per-pair wins. Require at least
+  eight independent mount pairs; repeated calls/cycles are not independent mounts.
+  Separate superiority on declared targets from noise-calibrated non-inferiority
+  on other metrics. Missing/noisy controls mean inconclusive, not a win or loss.
 - Prioritize sustained normal operation of a long-lived mount. Report cold
   startup/listing separately; a cold-only loss does not block acceptance under
   the operator's 2026-10-29 clarification. Higher diagnostic CPU allocations are
@@ -95,6 +118,10 @@ solutions; convenience or unfamiliarity is not sufficient justification.
 - Do not deploy, replace served mounts, modify production data or reuse private
   credentials in this development workflow. Integration writes use dedicated
   disposable test data only.
+- Operator exceptions, 2026-11-02/03: three read-only serving readers were separately
+  authorized; see the [scoped trials](docs/pr-context.md#scoped-serving-trial--2026-11-02).
+  This does not authorize changes to other readers or writers, additional failure
+  injection, or general deployment before acceptance.
 - Keep credentials, private receipts and production identifiers out of source
   and shared artifacts. Preserve upstream licenses and attribution.
 

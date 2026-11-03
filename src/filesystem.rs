@@ -19,7 +19,7 @@ use crate::{
 };
 use fuser::{FileAttr, FileType};
 use futures_util::{StreamExt, stream::FuturesUnordered};
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, RwLock, Semaphore};
 
 pub struct Filesystem {
     pub config: Arc<Config>,
@@ -28,18 +28,99 @@ pub struct Filesystem {
     pub ingress: Budget,
     data: Budget,
     cache: Mutex<crate::cache::ReadCache>,
+    cache_published: Notify,
     flush_lane: Budget,
+    flush_activity: Arc<RwLock<()>>,
     flushers: Arc<Semaphore>,
     upload_admission: write::UploadAdmission,
     metadata_slots: Arc<Semaphore>,
     directory_pages: moka::sync::Cache<(u64, u64, String, usize), Arc<DirectoryPage>>,
     preloaded_directories: moka::sync::Cache<u64, std::time::Instant>,
     closing: AtomicBool,
+    read_metrics: crate::metrics::ReadMetrics,
 }
 
 struct DirectoryPage {
     fetched: std::time::Instant,
     entries: Vec<DirEntry>,
+}
+
+impl DirectoryPage {
+    fn remaining(&self, after: &str) -> &[DirEntry] {
+        let start = self
+            .entries
+            .partition_point(|entry| entry.name.as_str() <= after);
+        &self.entries[start..]
+    }
+
+    fn remainder(&self, after: &str) -> DirectoryRemainder {
+        DirectoryRemainder {
+            entries: self.remaining(after).to_vec(),
+            next_after: self
+                .entries
+                .last()
+                .map(|entry| entry.name.as_str().max(after).to_owned()),
+        }
+    }
+}
+
+struct DirectoryMetadata {
+    directory: bool,
+    head: Option<ObjectHead>,
+    known: bool,
+    fetched: std::time::Instant,
+}
+
+type DirectorySelection = BTreeMap<String, DirectoryMetadata>;
+
+struct DirectorySnapshot {
+    node: Arc<Inode>,
+    prefix: String,
+    epoch: u64,
+    fetched: std::time::Instant,
+}
+
+fn direct_directory_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains('/')
+}
+
+fn trim_directory_selection(selected: &mut DirectorySelection, limit: usize) {
+    if selected.len() > limit {
+        selected.pop_last();
+    }
+}
+
+fn listed_object(
+    object: crate::backend::extended_list::ListedObject,
+    fetched: std::time::Instant,
+) -> (String, DirectoryMetadata) {
+    let known =
+        object.metadata.is_some() && object.etag.as_ref().is_some_and(|etag| !etag.is_empty());
+    let metadata = object
+        .metadata
+        .and_then(|metadata| crate::backend::metadata::encode_metadata(&metadata).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let head = ObjectHead {
+        size: object.size,
+        etag: object.etag.unwrap_or_default(),
+        metadata,
+        last_modified: object
+            .last_modified
+            .and_then(|date| SystemTime::try_from(date).ok()),
+        ..Default::default()
+    };
+    let directory = object.key.ends_with('/');
+    (
+        object.key,
+        DirectoryMetadata {
+            directory,
+            head: Some(head),
+            known,
+            fetched,
+        },
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -49,13 +130,66 @@ pub struct DirEntry {
     pub kind: FileType,
 }
 
+pub struct DirectoryRemainder {
+    pub entries: Vec<DirEntry>,
+    /// An exhausted page still advances; only a backend EOF has no next name.
+    pub next_after: Option<String>,
+}
+
+/// An open file retains its inode until the last admitted user releases it.
+pub struct OpenFile {
+    fs: Arc<Filesystem>,
+    node: Arc<Inode>,
+    pattern: Mutex<read::Pattern>,
+}
+
+impl OpenFile {
+    pub fn ino(&self) -> u64 {
+        self.node.ino
+    }
+
+    pub async fn read(&self, offset: u64, length: usize) -> Result<Block> {
+        Ok(self
+            .fs
+            .read_inner(
+                self.node.ino,
+                offset,
+                length,
+                false,
+                Some(&self.pattern),
+                &mut None::<fn(Result<Block>)>,
+            )
+            .await?
+            .expect("a read without early publication retains its result"))
+    }
+
+    pub async fn read_reply_data(
+        &self,
+        offset: u64,
+        length: usize,
+        ready: impl FnOnce(Result<&[u8]>) + Send,
+    ) -> Option<Error> {
+        self.fs
+            .read_reply_data_with_pattern(self.node.ino, offset, length, Some(&self.pattern), ready)
+            .await
+    }
+}
+
+impl Drop for OpenFile {
+    fn drop(&mut self) {
+        let mut state = self.node.state.lock().unwrap();
+        state.opens -= 1;
+    }
+}
+
 /// Effective owner budgets, not RSS or allocator measurements. The cache shares
-/// the full data lane with dirty/pinned/temporary bytes; no hidden half-cache cap.
+/// the data lane and can borrow revocable, idle flush capacity for clean owners.
 #[derive(Debug, serde::Serialize)]
 pub struct EffectiveBudgets {
     pub payload_limit_bytes: usize,
     pub data_shared_bytes: usize,
     pub read_cache_policy_bytes: usize,
+    pub read_cache_loaned_bytes: usize,
     pub ingress_bytes: usize,
     pub flush_bytes: usize,
     pub data_used_bytes: usize,
@@ -89,6 +223,31 @@ pub fn not_found(error: &Error) -> bool {
 }
 
 impl Filesystem {
+    /// Constant-time observations; no inode walk, storage I/O or cache refresh.
+    pub(crate) fn metrics_snapshot(&self) -> Option<crate::metrics::Snapshot> {
+        let namespace = {
+            let ns = self.namespace.try_lock().ok()?;
+            (
+                ns.nodes.len(),
+                ns.names.len(),
+                ns.evictions,
+                ns.capacity_failures,
+            )
+        };
+        let cache = self.cache.try_lock().ok()?.try_stats()?;
+        Some(crate::metrics::Snapshot {
+            namespace,
+            cache,
+            entry_limit: self.config.entry_limit,
+            lanes: [
+                ("data", self.data.used(), self.data.limit()),
+                ("ingress", self.ingress.used(), self.ingress.limit()),
+                ("flush", self.flush_lane.used(), self.flush_lane.limit()),
+            ],
+            reads: self.read_metrics.clone(),
+        })
+    }
+
     pub fn effective_budgets(&self) -> EffectiveBudgets {
         let window = self
             .data
@@ -98,7 +257,8 @@ impl Filesystem {
         EffectiveBudgets {
             payload_limit_bytes: self.ingress.limit() + self.data.limit() + self.flush_lane.limit(),
             data_shared_bytes: self.data.limit(),
-            read_cache_policy_bytes: self.data.limit(),
+            read_cache_policy_bytes: self.data.limit() + self.flush_lane.limit(),
+            read_cache_loaned_bytes: self.cache.lock().unwrap().loaned_bytes(),
             ingress_bytes: self.ingress.limit(),
             flush_bytes: self.flush_lane.limit(),
             data_used_bytes: self.data.used(),
@@ -165,10 +325,12 @@ impl Filesystem {
             ingress: Budget::new(ingress_bytes)?,
             data: Budget::new(data_bytes)?,
             cache: Mutex::new(crate::cache::ReadCache::with_entry_limit(
-                data_bytes as u64,
+                (data_bytes + flush_bytes) as u64,
                 config.entry_limit as usize,
             )),
+            cache_published: Notify::new(),
             flush_lane: Budget::new(flush_bytes)?,
+            flush_activity: Arc::new(RwLock::new(())),
             flushers: Arc::new(Semaphore::new(config.max_flushers)),
             upload_admission: write::UploadAdmission::new(&config),
             metadata_slots: Arc::new(Semaphore::new(config.max_requests)),
@@ -178,6 +340,7 @@ impl Filesystem {
                 .build(),
             preloaded_directories: moka::sync::Cache::new(config.entry_limit),
             closing: AtomicBool::new(false),
+            read_metrics: crate::metrics::ReadMetrics::default(),
             config,
             store,
         }))
@@ -341,13 +504,7 @@ impl Filesystem {
                 && state.rename_target.is_none()
                 && state.data_key.is_none()
             {
-                let mut replacement = fresh.state.into_inner().unwrap();
-                replacement.lookups = state.lookups;
-                replacement.opens = state.opens;
-                replacement.version = state.version;
-                replacement.durable = state.durable;
-                replacement.negative_lookups = std::mem::take(&mut state.negative_lookups);
-                *state = replacement;
+                state.replace_metadata(fresh.state.into_inner().unwrap());
             }
             drop(state);
             return Ok(node);
@@ -448,7 +605,7 @@ impl Filesystem {
     /// LIST, not by assuming a marker exists. Dirty attributes remain local.
     pub async fn refresh_inode_if_expired(&self, ino: u64) -> Result<Arc<Inode>> {
         let node = self.node(ino)?;
-        let (key, directory, remote, version, epoch) = {
+        let (key, directory, remote, version, epoch, implicit) = {
             let ns = self.namespace.lock().unwrap();
             let s = node.state.lock().unwrap();
             if s.deleted {
@@ -477,9 +634,12 @@ impl Filesystem {
                 s.remote.clone(),
                 s.version,
                 ns.epoch,
+                directory && s.remote.is_none() && s.metadata_known,
             )
         };
-        let fetched = if directory && remote.is_none() {
+        // A common prefix establishes a directory name, not marker metadata.
+        // Only an already resolved implicit directory can skip the marker HEAD.
+        let fetched = if implicit {
             let page = self.store.list(&format!("{key}/"), Some("/"), None).await;
             match page {
                 Ok(page) if !page.objects.is_empty() || !page.common_prefixes.is_empty() => {
@@ -537,21 +697,16 @@ impl Filesystem {
         }
         match fetched {
             Ok(head) => {
-                let mut fresh = Inode::new(ino, key, directory, head, &self.config)
+                let fresh = Inode::new(ino, key, directory, head, &self.config)
                     .state
                     .into_inner()
                     .unwrap();
-                fresh.lookups = s.lookups;
-                fresh.opens = s.opens;
-                fresh.version = s.version;
-                fresh.durable = s.durable;
-                fresh.negative_lookups = std::mem::take(&mut s.negative_lookups);
-                *s = fresh;
+                s.replace_metadata(fresh);
             }
             Err(error) if not_found(&error) => {
                 s.deleted = true;
                 ns.names.remove(&key);
-                ns.epoch += 1;
+                ns.changed(&key);
                 return Err(error);
             }
             Err(error) => return Err(error),
@@ -588,7 +743,7 @@ impl Filesystem {
             state.deleted = true;
             drop(state);
             ns.names.remove(key);
-            ns.epoch += 1;
+            ns.changed(key);
         }
         if self.config.negative_lookup_cache_size > 0
             && started.elapsed() < self.config.stat_cache_ttl
@@ -615,35 +770,6 @@ impl Filesystem {
 
     pub fn reference(&self, node: &Inode) {
         node.state.lock().unwrap().lookups += 1;
-    }
-
-    pub async fn link(&self, ino: u64, parent: u64, name: &str) -> Result<Arc<Inode>> {
-        if !self.config.emulate_hardlinks_as_symlinks {
-            return Err(Error::Fs(libc::EOPNOTSUPP));
-        }
-        let source = self.node(ino)?;
-        if source.attr().kind == FileType::Directory {
-            return Err(Error::Fs(libc::EPERM));
-        }
-        let target = source.state.lock().unwrap().key.clone();
-        let parent = self.node(parent)?;
-        let base = parent.state.lock().unwrap().key.clone();
-        let from: Vec<_> = base.split('/').filter(|s| !s.is_empty()).collect();
-        let to: Vec<_> = target.split('/').filter(|s| !s.is_empty()).collect();
-        let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
-        let relative = format!(
-            "{}{}",
-            "../".repeat(from.len() - common),
-            to[common..].join("/")
-        );
-        self.create(
-            parent.ino,
-            name,
-            libc::S_IFLNK | 0o777,
-            Some(relative.as_bytes()),
-            0,
-        )
-        .await
     }
 
     pub fn parent_ino(&self, ino: u64) -> u64 {
@@ -682,6 +808,19 @@ impl Filesystem {
         }
     }
 
+    pub fn open_file(self: &Arc<Self>, ino: u64, writable: bool) -> Result<Arc<OpenFile>> {
+        let node = self.node(ino)?;
+        if node.attr().kind == FileType::Directory {
+            return Err(Error::Fs(libc::EISDIR));
+        }
+        self.open(ino, writable)?;
+        Ok(Arc::new(OpenFile {
+            fs: self.clone(),
+            node,
+            pattern: Mutex::new(read::Pattern::default()),
+        }))
+    }
+
     pub async fn create(
         &self,
         parent: u64,
@@ -717,7 +856,7 @@ impl Filesystem {
             return Err(Error::Fs(libc::EEXIST));
         }
         ns.tombstones.remove(&key);
-        ns.epoch += 1;
+        ns.changed(&key);
         let node = ns.install(&key, |ino| {
             Inode::new(ino, key.clone(), directory, None, &self.config)
         })?;
@@ -771,7 +910,7 @@ impl Filesystem {
         length: usize,
         ready: impl FnOnce(Result<Block>) + Send,
     ) -> Option<Error> {
-        self.read_reply_inner(ino, offset, length, false, ready)
+        self.read_reply_inner(ino, offset, length, false, None, ready)
             .await
     }
 
@@ -783,10 +922,29 @@ impl Filesystem {
         length: usize,
         ready: impl FnOnce(Result<&[u8]>) + Send,
     ) -> Option<Error> {
-        self.read_reply_inner(ino, offset, length, true, move |result| match result {
-            Ok(block) => ready(Ok(block.as_slice())),
-            Err(error) => ready(Err(error)),
-        })
+        self.read_reply_data_with_pattern(ino, offset, length, None, ready)
+            .await
+    }
+
+    async fn read_reply_data_with_pattern(
+        &self,
+        ino: u64,
+        offset: u64,
+        length: usize,
+        pattern: Option<&Mutex<read::Pattern>>,
+        ready: impl FnOnce(Result<&[u8]>) + Send,
+    ) -> Option<Error> {
+        self.read_reply_inner(
+            ino,
+            offset,
+            length,
+            true,
+            pattern,
+            move |result| match result {
+                Ok(block) => ready(Ok(block.as_slice())),
+                Err(error) => ready(Err(error)),
+            },
+        )
         .await
     }
 
@@ -796,11 +954,12 @@ impl Filesystem {
         offset: u64,
         length: usize,
         borrow_reply: bool,
+        pattern: Option<&Mutex<read::Pattern>>,
         ready: impl FnOnce(Result<Block>) + Send,
     ) -> Option<Error> {
         let mut ready = Some(ready);
         let result = self
-            .read_inner(ino, offset, length, borrow_reply, &mut ready)
+            .read_inner(ino, offset, length, borrow_reply, pattern, &mut ready)
             .await;
         if let Some(ready) = ready {
             let cached_length = result
@@ -812,7 +971,7 @@ impl Filesystem {
             if cached_length == 0 {
                 None
             } else {
-                self.refill_after_hit(ino, offset + cached_length as u64)
+                self.refill_after_hit(ino, offset + cached_length as u64, pattern)
                     .await
                     .err()
             }
@@ -823,14 +982,19 @@ impl Filesystem {
 
     /// Keep optional refill in the same admitted, cancellable reply future. Ready
     /// bytes have already been published and no reply owner is held across admission.
-    async fn refill_after_hit(&self, ino: u64, consumed: u64) -> Result<()> {
+    async fn refill_after_hit(
+        &self,
+        ino: u64,
+        consumed: u64,
+        pattern: Option<&Mutex<read::Pattern>>,
+    ) -> Result<()> {
         let node = self.node(ino)?;
         let Some((size, generation, version)) = read::refill_state(&node, consumed) else {
             return Ok(());
         };
         let budgets = self.effective_budgets();
-        let window = node
-            .pattern
+        let window = pattern
+            .unwrap_or(&node.pattern)
             .lock()
             .unwrap()
             .window(&self.config)
@@ -944,7 +1108,14 @@ impl Filesystem {
 
     pub async fn read(&self, ino: u64, offset: u64, length: usize) -> Result<Block> {
         Ok(self
-            .read_inner(ino, offset, length, false, &mut None::<fn(Result<Block>)>)
+            .read_inner(
+                ino,
+                offset,
+                length,
+                false,
+                None,
+                &mut None::<fn(Result<Block>)>,
+            )
             .await?
             .expect("a read without early publication retains its result"))
     }
@@ -955,6 +1126,7 @@ impl Filesystem {
         offset: u64,
         length: usize,
         borrow_reply: bool,
+        pattern: Option<&Mutex<read::Pattern>>,
         ready: &mut Option<impl FnOnce(Result<Block>) + Send>,
     ) -> Result<Option<Block>> {
         if length > MAX_IO {
@@ -980,7 +1152,8 @@ impl Filesystem {
         // are not the access stream: skipping hits turns contiguous kernel reads
         // into apparent seeks at the next read-ahead boundary.
         let window = if length > 0 {
-            node.pattern
+            pattern
+                .unwrap_or(&node.pattern)
                 .lock()
                 .unwrap()
                 .prefetch(offset, length, &self.config)
@@ -1000,8 +1173,12 @@ impl Filesystem {
             .unwrap()
             .read(ino, generation, offset, length, reply)
         {
+            self.read_metrics.hits.inc();
+            self.read_metrics.hit_bytes.inc_by(length as u64);
             return Ok(Some(block));
         }
+        self.read_metrics.misses.inc();
+        self.read_metrics.miss_bytes.inc_by(length as u64);
         // Miss admission reserves output and scratch atomically below.
         let budgets = self.effective_budgets();
         let mut start = if clean {
@@ -1146,8 +1323,10 @@ impl Filesystem {
                 next += amount as u64;
                 let mut owner = charge.split((if single_buffer { 1 } else { 2 }) * amount);
                 let (store, snapshot) = (self.store.clone(), snapshot.clone());
+                let metrics = self.read_metrics.clone();
                 let sender = sender.clone();
                 tasks.spawn(async move {
+                    metrics.fill_jobs.inc();
                     let result = async {
                         let local = Budget::new(2 * amount)?;
                         let output = crate::backend::RangeSink::new(sender, owner.split(amount));
@@ -1169,6 +1348,9 @@ impl Filesystem {
                         }
                     }
                     .await;
+                    if result.is_err() {
+                        metrics.fill_errors.inc();
+                    }
                     (at, result)
                 });
             }
@@ -1206,6 +1388,11 @@ impl Filesystem {
             let Some((at, block)) = completed else {
                 continue;
             };
+            if single_buffer {
+                self.read_metrics
+                    .remote_bytes
+                    .inc_by(block.as_slice().len() as u64);
+            }
             let left = at.max(offset);
             let right = (at + block.as_slice().len() as u64).min(offset + available as u64);
             if right > left {
@@ -1247,6 +1434,7 @@ impl Filesystem {
                     );
                 }
                 fill.published();
+                self.cache_published.notify_waiters();
             }
         }
         if let Some(error) = prefetch_error {
@@ -1263,7 +1451,7 @@ impl Filesystem {
                 // Pinned borrowers retain their permits; FIFO waiters stay ahead.
                 {
                     let cache = self.cache.lock().unwrap();
-                    while cache.evict_lru() {
+                    while self.try_cache_loan(&cache) || cache.evict_lru() {
                         if let Ok(reservation) = self.data.try_reserve(size) {
                             return Ok(reservation);
                         }
@@ -1276,12 +1464,43 @@ impl Filesystem {
                     return self.data.try_reserve(size);
                 }
                 self.flush_all().await?;
-                tokio::time::timeout(Duration::from_secs(30), self.data.reserve(size))
-                    .await
-                    .map_err(|_| Error::Timeout("payload admission"))?
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    // Retain the same FIFO reservation while reclaiming owners
+                    // published by fills that were in flight at the first sweep.
+                    let reservation = self.data.reserve(size);
+                    tokio::pin!(reservation);
+                    loop {
+                        let published = self.cache_published.notified();
+                        // notify_waiters covers futures created before the
+                        // cache check, including ones not yet polled.
+                        tokio::select! {
+                            biased;
+                            result = &mut reservation => return result,
+                            _ = async {
+                                let reclaimed = {
+                                    let cache = self.cache.lock().unwrap();
+                                    self.try_cache_loan(&cache) || cache.evict_lru()
+                                };
+                                if !reclaimed {
+                                    published.await;
+                                }
+                            } => {}
+                        }
+                    }
+                })
+                .await
+                .map_err(|_| Error::Timeout("payload admission"))?
             }
             Err(error) => Err(error),
         }
+    }
+
+    fn try_cache_loan(&self, cache: &crate::cache::ReadCache) -> bool {
+        // Never wait for optional capacity or lend while an upload/body owns it.
+        let Ok(_activity) = self.flush_activity.try_write() else {
+            return false;
+        };
+        cache.loan_lru(&self.flush_lane)
     }
 
     pub async fn write(&self, ino: u64, offset: u64, bytes: &[u8]) -> Result<usize> {
@@ -1384,6 +1603,14 @@ impl Filesystem {
     async fn flush_node_locked(&self, node: &Inode) -> Result<()> {
         {
             let mut state = node.state.lock().unwrap();
+            if state.deleted {
+                return Err(Error::Fs(libc::ENOENT));
+            }
+            // A durability barrier with no pending generation owns no upload
+            // work and must not reclaim the read cache's idle flush capacity.
+            if state.version == state.durable {
+                return Ok(());
+            }
             self.prepare_metadata(&mut state);
             if self.config.no_dir_object && file_type(state.mode) == FileType::Directory {
                 state.durable = state.version;
@@ -1396,10 +1623,16 @@ impl Filesystem {
             .acquire_owned()
             .await
             .map_err(|_| Error::Cancelled)?;
+        // Shared guards preserve independent flush concurrency. The budget carries
+        // activity into cloned SDK bodies and jobs, including cancellation cleanup.
+        let lane = self
+            .flush_lane
+            .with_activity(self.flush_activity.clone().read_owned().await);
+        self.cache.lock().unwrap().reclaim_loans();
         write::flush_locked(
             &self.store,
             node,
-            &self.flush_lane,
+            &lane,
             flusher,
             &self.config,
             &self.upload_admission,
@@ -1434,7 +1667,60 @@ impl Filesystem {
         after: &str,
         limit: usize,
     ) -> Result<Vec<DirEntry>> {
-        self.directory_chunk_inner(ino, after, limit, true).await
+        Ok(self
+            .directory_chunk_inner(ino, after, limit, true, after)
+            .await?
+            .entries)
+    }
+
+    pub async fn directory_remainder(
+        &self,
+        ino: u64,
+        page_after: &str,
+        after: &str,
+        limit: usize,
+    ) -> Result<DirectoryRemainder> {
+        self.directory_chunk_inner(ino, page_after, limit, true, after)
+            .await
+    }
+
+    fn listed_node(
+        &self,
+        ns: &mut Namespace,
+        key: &str,
+        directory: bool,
+        head: Option<ObjectHead>,
+        known: bool,
+        fetched: std::time::Instant,
+    ) -> Result<Arc<Inode>> {
+        let make = |ino| {
+            let node = Inode::new(ino, key.into(), directory, head, &self.config);
+            {
+                let mut state = node.state.lock().unwrap();
+                state.metadata_known = known;
+                state.fetched = fetched;
+            }
+            node
+        };
+        if let Some(node) = ns.named(key) {
+            let dirty_descendants = directory && ns.has_dirty_descendants(key);
+            let mut state = node.state.lock().unwrap();
+            if !dirty_descendants && state.can_replace_metadata(fetched) {
+                if known {
+                    state.replace_metadata(make(node.ino).state.into_inner().unwrap());
+                } else if directory
+                    && state.remote.is_none()
+                    && file_type(state.mode) == FileType::Directory
+                {
+                    // A common prefix validates an implicit directory's presence,
+                    // not authoritative user metadata for a marker object.
+                    state.fetched = fetched;
+                }
+            }
+            drop(state);
+            return Ok(node);
+        }
+        ns.install(key, make)
     }
 
     async fn directory_chunk_inner(
@@ -1443,143 +1729,162 @@ impl Filesystem {
         after: &str,
         limit: usize,
         resolve_types: bool,
-    ) -> Result<Vec<DirEntry>> {
+        resume_after: &str,
+    ) -> Result<DirectoryRemainder> {
         let fetched = std::time::Instant::now();
-        let node = self.node(ino)?;
-        let key = {
-            let state = node.state.lock().unwrap();
-            if file_type(state.mode) != FileType::Directory {
-                return Err(Error::Fs(libc::ENOTDIR));
-            }
-            state.key.clone()
-        };
-        let prefix = if key.is_empty() {
-            key
-        } else {
-            format!("{key}/")
-        };
-        let epoch = {
+        let snapshot = {
             let ns = self.namespace.lock().unwrap();
+            let snapshot = self.directory_snapshot(&ns, ino, resolve_types, fetched)?;
             if resolve_types
-                && let Some(page) = self.directory_pages.get(&(ino, ns.epoch, after.into(), limit))
-                && page.fetched.elapsed() < self.config.stat_cache_ttl
-                // READDIR does not retain lookup references. Namespace pressure
-                // may have evicted an inode represented by this cached page.
-                && page.entries.iter().all(|entry| ns.nodes.contains_key(&entry.ino))
+                && let Some(page) =
+                    self.cached_directory_page(&ns, &snapshot, after, limit, resume_after)
             {
-                return Ok(page.entries.clone());
+                return Ok(page.remainder(resume_after));
             }
-            ns.epoch
+            snapshot
         };
-        let mut selected: BTreeMap<String, (bool, Option<ObjectHead>, bool)> = BTreeMap::new();
-        {
+        let mut selected = {
             let mut ns = self.namespace.lock().unwrap();
-            let hidden: Vec<_> = ns.tombstones.keys().cloned().collect();
-            for (name, _) in ns.names.range(prefix.clone()..) {
-                if !name.starts_with(&prefix) {
-                    break;
-                }
-                let relative = &name[prefix.len()..];
-                if relative.is_empty()
-                    || relative.contains('/')
-                    || relative <= after
-                    || hidden.contains(name)
-                {
-                    continue;
-                }
-                let child = ns.named(name).unwrap();
-                let state = child.state.lock().unwrap();
-                if !state.deleted
-                    && (state.version > state.durable
-                        || state.fetched.elapsed() < self.config.stat_cache_ttl
-                        || file_type(state.mode) == FileType::Directory && {
-                            let prefix = format!("{name}/");
-                            ns.names
-                                .range(prefix.clone()..)
-                                .take_while(|(name, _)| name.starts_with(&prefix))
-                                .any(|(_, ino)| {
-                                    ns.nodes.get(ino).is_some_and(|child| {
-                                        let state = child.state.lock().unwrap();
-                                        !state.deleted && state.version > state.durable
-                                    })
-                                })
-                        })
-                {
-                    selected.insert(
-                        relative.into(),
-                        (
-                            file_type(state.mode) == FileType::Directory,
-                            state.remote.clone(),
-                            state.metadata_known,
-                        ),
-                    );
-                }
-                if selected.len() > limit {
-                    selected.pop_last();
-                }
-            }
-            ns.hidden("");
+            self.local_directory_entries(&mut ns, &snapshot.prefix, after, limit)
+        };
+        self.remote_directory_entries(&snapshot.prefix, after, limit, fetched, &mut selected)
+            .await?;
+        // Standard LIST cannot supply a safe concrete fuser type. Resolve only
+        // this bounded page; extended authoritative metadata avoids these HEADs.
+        if resolve_types {
+            self.resolve_directory_types(ino, &mut selected).await?;
         }
+        Ok(self
+            .publish_directory_page(snapshot, after, limit, selected, resolve_types)?
+            .remainder(resume_after))
+    }
+
+    fn directory_snapshot(
+        &self,
+        ns: &Namespace,
+        ino: u64,
+        resolve_types: bool,
+        fetched: std::time::Instant,
+    ) -> Result<DirectorySnapshot> {
+        let node = ns.get(ino)?;
+        let state = node.state.lock().unwrap();
+        if file_type(state.mode) != FileType::Directory {
+            return Err(Error::Fs(libc::ENOTDIR));
+        }
+        if state.deleted {
+            return Err(Error::Fs(libc::ENOENT));
+        }
+        if resolve_types && (ns.is_moving(&state.key) || ns.is_deleting(&state.key)) {
+            return Err(Error::Fs(libc::EAGAIN));
+        }
+        let prefix = if state.key.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", state.key)
+        };
+        let epoch = node.directory_epoch.load(Ordering::Relaxed);
+        drop(state);
+        Ok(DirectorySnapshot {
+            node,
+            prefix,
+            epoch,
+            fetched,
+        })
+    }
+
+    fn cached_directory_page(
+        &self,
+        ns: &Namespace,
+        snapshot: &DirectorySnapshot,
+        after: &str,
+        limit: usize,
+        resume_after: &str,
+    ) -> Option<Arc<DirectoryPage>> {
+        let page =
+            self.directory_pages
+                .get(&(snapshot.node.ino, snapshot.epoch, after.into(), limit))?;
+        (page.fetched.elapsed() < self.config.stat_cache_ttl
+            && page
+                .remaining(resume_after)
+                .iter()
+                .all(|entry| self.directory_entry_fresh(ns, entry)))
+        .then_some(page)
+    }
+
+    fn directory_entry_fresh(&self, ns: &Namespace, entry: &DirEntry) -> bool {
+        // READDIR retains no lookup refs; pressure may have evicted a cached
+        // child's inode or replaced its name/type after this page was recorded.
+        ns.nodes.get(&entry.ino).is_some_and(|node| {
+            let state = node.state.lock().unwrap();
+            !state.deleted
+                && ns.names.get(&state.key) == Some(&entry.ino)
+                && file_type(state.mode) == entry.kind
+                && (state.version > state.durable
+                    || state.fetched.elapsed() < self.config.stat_cache_ttl)
+        })
+    }
+
+    fn fresh_local_directory_entry(&self, ns: &Namespace, name: &str) -> Option<DirectoryMetadata> {
+        let node = ns.named(name).unwrap();
+        let state = node.state.lock().unwrap();
+        if state.deleted {
+            return None;
+        }
+        let fresh = state.version > state.durable
+            || state.fetched.elapsed() < self.config.stat_cache_ttl
+            || file_type(state.mode) == FileType::Directory && ns.has_dirty_descendants(name);
+        fresh.then(|| DirectoryMetadata {
+            directory: file_type(state.mode) == FileType::Directory,
+            head: state.remote.clone(),
+            known: state.metadata_known,
+            fetched: state.fetched,
+        })
+    }
+
+    fn local_directory_entries(
+        &self,
+        ns: &mut Namespace,
+        prefix: &str,
+        after: &str,
+        limit: usize,
+    ) -> DirectorySelection {
+        let mut selected = DirectorySelection::new();
+        let hidden: Vec<_> = ns.tombstones.keys().cloned().collect();
+        for (name, _) in ns.names.range(prefix.to_owned()..) {
+            if !name.starts_with(prefix) {
+                break;
+            }
+            let relative = &name[prefix.len()..];
+            if !direct_directory_name(relative) || relative <= after || hidden.contains(name) {
+                continue;
+            }
+            if let Some(entry) = self.fresh_local_directory_entry(ns, name) {
+                selected.insert(relative.into(), entry);
+            }
+            trim_directory_selection(&mut selected, limit);
+        }
+        ns.hidden("");
+        selected
+    }
+
+    async fn remote_directory_entries(
+        &self,
+        prefix: &str,
+        after: &str,
+        limit: usize,
+        fetched: std::time::Instant,
+        selected: &mut DirectorySelection,
+    ) -> Result<()> {
         let mut token = None;
+        let start_after = (!after.is_empty()).then(|| format!("{prefix}{after}"));
         loop {
             let page = self
                 .store
-                .list(&prefix, Some("/"), token.as_deref())
+                .list_after(prefix, Some("/"), token.as_deref(), start_after.as_deref())
                 .await?;
-            let mut page_last = String::new();
-            for (name, directory, head, known) in page
-                .objects
-                .into_iter()
-                .filter(|o| o.key != prefix)
-                .map(|o| {
-                    let known = o.metadata.is_some();
-                    let metadata = o
-                        .metadata
-                        .and_then(|metadata| {
-                            crate::backend::metadata::encode_metadata(&metadata).ok()
-                        })
-                        .unwrap_or_default()
-                        .into_iter()
-                        .collect();
-                    let head = ObjectHead {
-                        size: o.size,
-                        etag: o.etag.unwrap_or_default(),
-                        metadata,
-                        last_modified: o.last_modified.and_then(|d| SystemTime::try_from(d).ok()),
-                        ..Default::default()
-                    };
-                    let directory = o.key.ends_with('/');
-                    (o.key, directory, Some(head), known)
-                })
-                .chain(
-                    page.common_prefixes
-                        .into_iter()
-                        .map(|p| (p, true, None, false)),
-                )
-            {
-                let Some(name) = name.strip_prefix(&prefix) else {
-                    return Err(Error::InvalidResponse("directory prefix escape".into()));
-                };
-                let name = name.trim_end_matches('/');
-                if name.is_empty() || name.contains('/') {
-                    continue;
-                }
-                page_last = page_last.max(name.into());
-                if name <= after {
-                    continue;
-                }
-                let full = child(prefix.trim_end_matches('/'), name)?;
-                if self.namespace.lock().unwrap().hidden(&full) {
-                    continue;
-                }
-                selected
-                    .entry(name.into())
-                    .or_insert((directory, head, known));
-                if selected.len() > limit {
-                    selected.pop_last();
-                }
-            }
-            if page.next_token.is_none()
+            let (page_last, next_token) =
+                self.select_directory_page(prefix, after, limit, page, fetched, selected)?;
+            if next_token.is_none()
                 || selected.len() == limit
                     && selected
                         .last_key_value()
@@ -1587,79 +1892,156 @@ impl Filesystem {
             {
                 break;
             }
-            token = page.next_token;
+            token = next_token;
         }
-        // Safe fuser exposes no DT_UNKNOWN variant. Standard LIST has no user
-        // metadata, so resolve only this bounded selected page before claiming a
-        // concrete file type. Extended authoritative metadata avoids these HEADs.
-        if resolve_types {
-            let mut jobs = FuturesUnordered::new();
-            let mut pending = selected
-                .iter_mut()
-                .filter(|(_, entry)| !entry.0 && !entry.2);
-            let mut next = pending.next();
-            while next.is_some() || !jobs.is_empty() {
-                tokio::select! {
-                    completed = jobs.next(), if !jobs.is_empty() => {
-                        completed.expect("admitted metadata job")?;
-                    }
-                    admitted = tokio::time::timeout(
-                        self.config.http_timeout,
-                        self.metadata_slots.clone().acquire_owned(),
-                    ), if next.is_some() => {
-                        let permit = admitted
-                            .map_err(|_| Error::Timeout("directory metadata admission"))?
-                            .map_err(|_| Error::Cancelled)?;
-                        let (name, (directory, head, known)) = next.take().expect("selected unknown type");
-                        // Admission precedes creation of each future: concurrent
-                        // pages cannot accumulate per-entry semaphore waiters.
-                        // Borrowed futures drop synchronously on error/cancel.
-                        jobs.push(async move {
-                            let _permit = permit;
-                            let resolved = tokio::time::timeout(
-                                self.config.http_timeout,
-                                self.lookup(ino, name),
-                            ).await.map_err(|_| Error::Timeout("directory metadata lookup"))??;
-                            let state = resolved.state.lock().unwrap();
-                            *directory = file_type(state.mode) == FileType::Directory;
-                            *head = state.remote.clone();
-                            *known = state.metadata_known;
-                            Ok::<(), Error>(())
-                        });
-                        next = pending.next();
-                    }
+        Ok(())
+    }
+
+    fn select_directory_page(
+        &self,
+        prefix: &str,
+        after: &str,
+        limit: usize,
+        page: crate::backend::extended_list::ListPage,
+        fetched: std::time::Instant,
+        selected: &mut DirectorySelection,
+    ) -> Result<(String, Option<String>)> {
+        let mut page_last = String::new();
+        for (name, entry) in page
+            .objects
+            .into_iter()
+            .filter(|o| o.key != prefix)
+            .map(|object| listed_object(object, fetched))
+            .chain(page.common_prefixes.into_iter().map(|p| {
+                (
+                    p,
+                    DirectoryMetadata {
+                        directory: true,
+                        head: None,
+                        known: false,
+                        fetched,
+                    },
+                )
+            }))
+        {
+            let Some(name) = name.strip_prefix(prefix) else {
+                return Err(Error::InvalidResponse("directory prefix escape".into()));
+            };
+            let name = name.trim_end_matches('/');
+            if !direct_directory_name(name) {
+                continue;
+            }
+            page_last = page_last.max(name.into());
+            if name <= after {
+                continue;
+            }
+            let full = child(prefix.trim_end_matches('/'), name)?;
+            if self.namespace.lock().unwrap().hidden(&full) {
+                continue;
+            }
+            selected.entry(name.into()).or_insert(entry);
+            trim_directory_selection(selected, limit);
+        }
+        Ok((page_last, page.next_token))
+    }
+
+    async fn resolve_directory_types(
+        &self,
+        ino: u64,
+        selected: &mut DirectorySelection,
+    ) -> Result<()> {
+        let mut jobs = FuturesUnordered::new();
+        let mut pending = selected
+            .iter_mut()
+            .filter(|(_, entry)| !entry.directory && !entry.known);
+        let mut next = pending.next();
+        while next.is_some() || !jobs.is_empty() {
+            tokio::select! {
+                completed = jobs.next(), if !jobs.is_empty() => {
+                    completed.expect("admitted metadata job")?;
+                }
+                admitted = tokio::time::timeout(
+                    self.config.http_timeout,
+                    self.metadata_slots.clone().acquire_owned(),
+                ), if next.is_some() => {
+                    let permit = admitted
+                        .map_err(|_| Error::Timeout("directory metadata admission"))?
+                        .map_err(|_| Error::Cancelled)?;
+                    let (name, entry) = next.take().expect("selected unknown type");
+                    // Admission precedes creation of each future: concurrent
+                    // pages cannot accumulate per-entry semaphore waiters.
+                    // Borrowed futures drop synchronously on error/cancel.
+                    jobs.push(self.resolve_directory_entry(ino, name, entry, permit));
+                    next = pending.next();
                 }
             }
         }
+        Ok(())
+    }
+
+    async fn resolve_directory_entry(
+        &self,
+        ino: u64,
+        name: &str,
+        entry: &mut DirectoryMetadata,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Result<()> {
+        let _permit = permit;
+        let resolved = tokio::time::timeout(self.config.http_timeout, self.lookup(ino, name))
+            .await
+            .map_err(|_| Error::Timeout("directory metadata lookup"))??;
+        let state = resolved.state.lock().unwrap();
+        *entry = DirectoryMetadata {
+            directory: file_type(state.mode) == FileType::Directory,
+            head: state.remote.clone(),
+            known: state.metadata_known,
+            fetched: state.fetched,
+        };
+        Ok(())
+    }
+
+    fn publish_directory_page(
+        &self,
+        snapshot: DirectorySnapshot,
+        after: &str,
+        limit: usize,
+        selected: DirectorySelection,
+        resolve_types: bool,
+    ) -> Result<Arc<DirectoryPage>> {
         let mut ns = self.namespace.lock().unwrap();
-        if ns.epoch != epoch {
+        let ino = snapshot.node.ino;
+        if snapshot.node.directory_epoch.load(Ordering::Relaxed) != snapshot.epoch
+            || ns.names.get(snapshot.prefix.trim_end_matches('/')) != Some(&ino)
+        {
             return Err(Error::Fs(libc::EAGAIN));
         }
         let mut entries = Vec::with_capacity(selected.len());
-        for (name, (directory, head, known)) in selected {
-            let full = child(prefix.trim_end_matches('/'), &name)?;
-            let node = ns.install(&full, |ino| {
-                let node = Inode::new(ino, full.clone(), directory, head, &self.config);
-                node.state.lock().unwrap().metadata_known = known;
-                node
-            })?;
+        for (name, entry) in selected {
+            let full = child(snapshot.prefix.trim_end_matches('/'), &name)?;
+            let node = self.listed_node(
+                &mut ns,
+                &full,
+                entry.directory,
+                entry.head,
+                entry.known,
+                entry.fetched,
+            )?;
             entries.push(DirEntry {
                 ino: node.ino,
                 name,
                 kind: node.attr().kind,
             });
         }
+        let page = Arc::new(DirectoryPage {
+            fetched: snapshot.fetched,
+            entries,
+        });
         if resolve_types {
-            self.directory_pages.insert(
-                (ino, epoch, after.into(), limit),
-                Arc::new(DirectoryPage {
-                    fetched,
-                    entries: entries.clone(),
-                }),
-            );
+            self.directory_pages
+                .insert((ino, snapshot.epoch, after.into(), limit), page.clone());
             self.directory_pages.run_pending_tasks();
         }
-        Ok(entries)
+        Ok(page)
     }
 
     pub async fn unlink(&self, parent: u64, name: &str, directory: bool) -> Result<()> {
@@ -1742,8 +2124,9 @@ impl Filesystem {
         // reservation; it must not recursively look up children through that lease.
         if directory
             && !self
-                .directory_chunk_inner(node.ino, "", 1, false)
+                .directory_chunk_inner(node.ino, "", 1, false, "")
                 .await?
+                .entries
                 .is_empty()
         {
             return Err(Error::Fs(libc::ENOTEMPTY));
@@ -1769,14 +2152,14 @@ impl Filesystem {
                 let mut ns = self.namespace.lock().unwrap();
                 ns.pending_deletes.remove(&key);
                 ns.tombstones.remove(&key);
-                ns.epoch += 1;
+                ns.changed(&key);
             }
             return Err(error);
         }
         let mut ns = self.namespace.lock().unwrap();
         ns.pending_deletes.remove(&key);
         ns.names.remove(&key);
-        ns.epoch += 1;
+        ns.changed(&key);
         let mut state = node.state.lock().unwrap();
         state.deleted = true;
         state.extents.clear();
@@ -2016,7 +2399,7 @@ impl Filesystem {
                 }
             }
         }
-        ns.epoch += 1;
+        ns.changed(&destination);
         ns.pending_moves.remove(&old);
         ns.pending_moves.remove(&destination);
         ns.get(newparent)?

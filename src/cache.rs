@@ -6,10 +6,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::budget::{Block, Reservation};
+use crate::budget::{Block, Budget, Reservation};
 
 /// Best-effort retained policy. Blocks remain charged to their allocation budget
-/// after eviction while any reader pins them. Cache admission never reserves bytes.
+/// after eviction while any reader pins them. Insertion never reserves bytes;
+/// idle-lane loans only transfer an exclusively owned allocation's existing charge.
 type Key = (u64, u64, u64);
 
 pub(crate) fn first_gap(
@@ -37,21 +38,51 @@ struct State {
     entries: LruCache<Key, Block>,
     index: BTreeMap<Key, Span>,
     weight: u64,
+    loaned: usize,
+    evictions: u64,
+    evicted_bytes: u64,
+    insertions: u64,
+    replacements: u64,
+    oversized: u64,
+}
+
+/// Retained visible spans; byte permits may outlive eviction in pinned readers.
+#[derive(Clone, Debug)]
+pub struct CacheStats {
+    pub entries: usize,
+    pub bytes: u64,
+    pub capacity: u64,
+    pub entry_limit: usize,
+    pub loaned_bytes: usize,
+    pub evictions: u64,
+    pub evicted_bytes: u64,
+    pub insertions: u64,
+    pub replacements: u64,
+    pub oversized: u64,
 }
 
 impl State {
     fn removed(&mut self, key: Key, block: Block) {
         self.index.remove(&key);
         self.weight -= block.as_slice().len() as u64;
+        if block.is_loaned() {
+            self.loaned -= block.as_slice().len();
+        }
     }
 
     fn evict_lru(&mut self) -> bool {
         if let Some((key, block)) = self.entries.pop_lru() {
-            self.removed(key, block);
+            self.evicted(key, block);
             true
         } else {
             false
         }
+    }
+
+    fn evicted(&mut self, key: Key, block: Block) {
+        self.evictions += 1;
+        self.evicted_bytes += block.as_slice().len() as u64;
+        self.removed(key, block);
     }
 }
 
@@ -71,9 +102,32 @@ impl ReadCache {
                 entries: LruCache::sparse(NonZeroUsize::new(entry_limit.max(1)).unwrap()),
                 index: BTreeMap::new(),
                 weight: 0,
+                loaned: 0,
+                evictions: 0,
+                evicted_bytes: 0,
+                insertions: 0,
+                replacements: 0,
+                oversized: 0,
             })),
             capacity,
         }
+    }
+
+    /// Scrapes never wait behind a cache operation or change recency.
+    pub fn try_stats(&self) -> Option<CacheStats> {
+        let state = self.state.try_lock().ok()?;
+        Some(CacheStats {
+            entries: state.entries.len(),
+            bytes: state.weight,
+            capacity: self.capacity,
+            entry_limit: state.entries.cap().get(),
+            loaned_bytes: state.loaned,
+            evictions: state.evictions,
+            evicted_bytes: state.evicted_bytes,
+            insertions: state.insertions,
+            replacements: state.replacements,
+            oversized: state.oversized,
+        })
     }
 
     pub fn get(&self, inode: u64, generation: u64, offset: u64) -> Option<Block> {
@@ -145,7 +199,7 @@ impl ReadCache {
         reply: Reservation,
     ) -> Option<Block> {
         let (mut block, mut relative) = self.covering(inode, generation, offset, 1)?;
-        if block.as_slice().len() - relative >= length {
+        if block.as_slice().len() - relative >= length && !block.is_loaned() {
             self.consumed(
                 inode,
                 generation,
@@ -185,17 +239,20 @@ impl ReadCache {
         let weight = length as u64;
         let mut state = self.state.lock().unwrap();
         if let Some(old) = state.entries.pop(&key) {
+            state.replacements += 1;
             state.removed(key, old);
         }
         if weight > self.capacity {
+            state.oversized += 1;
             return;
         }
         while state.weight > self.capacity - weight {
             assert!(state.evict_lru(), "positive cache weight owns entries");
         }
         if let Some((key, victim)) = state.entries.push(key, block) {
-            state.removed(key, victim);
+            state.evicted(key, victim);
         }
+        state.insertions += 1;
         state.weight += weight;
         state.index.insert(
             key,
@@ -233,6 +290,45 @@ impl ReadCache {
     /// Release one cache owner; caller views retain their complete backing charge.
     pub(crate) fn evict_lru(&self) -> bool {
         self.state.lock().unwrap().evict_lru()
+    }
+
+    /// Keep LRU bytes by moving only their exclusive backing's existing charge.
+    pub(crate) fn loan_lru(&self, lane: &Budget) -> bool {
+        let mut state = self.state.lock().unwrap();
+        let loaned = state
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|(_, block)| !block.is_loaned())
+            .and_then(|(_, block)| block.try_loan(lane).then_some(block.as_slice().len()));
+        if let Some(length) = loaned {
+            state.loaned += length;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn loaned_bytes(&self) -> usize {
+        self.state.lock().unwrap().loaned
+    }
+
+    /// Filesystem serializes this with all cache reads and lending attempts.
+    pub(crate) fn reclaim_loans(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.loaned == 0 {
+            return;
+        }
+        let keys: Vec<_> = state
+            .entries
+            .iter()
+            .filter(|(_, block)| block.is_loaned())
+            .map(|(&key, _)| key)
+            .collect();
+        for key in keys {
+            let block = state.entries.pop(&key).expect("loaned cache owner");
+            state.evicted(key, block);
+        }
     }
 
     /// Speculation cannot fund itself with another reader's unconsumed data.
@@ -280,5 +376,6 @@ impl ReadCache {
         state.entries.clear();
         state.index.clear();
         state.weight = 0;
+        state.loaned = 0;
     }
 }

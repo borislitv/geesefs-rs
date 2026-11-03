@@ -4,7 +4,7 @@ use crate::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::Ordering},
     time::{Duration, Instant},
 };
 
@@ -18,6 +18,8 @@ pub struct Namespace {
     pub pending_moves: BTreeMap<String, u64>,
     /// Ambiguous/cancelled DELETEs retain their old name until an explicit retry.
     pub pending_deletes: BTreeMap<String, u64>,
+    pub evictions: u64,
+    pub capacity_failures: u64,
     next_ino: u64,
     limit: usize,
 }
@@ -32,6 +34,8 @@ impl Namespace {
             moving: BTreeSet::new(),
             pending_moves: BTreeMap::new(),
             pending_deletes: BTreeMap::new(),
+            evictions: 0,
+            capacity_failures: 0,
             next_ino: 2,
             limit,
         }
@@ -43,6 +47,28 @@ impl Namespace {
 
     pub fn named(&self, key: &str) -> Option<Arc<Inode>> {
         self.names.get(key).and_then(|i| self.nodes.get(i)).cloned()
+    }
+
+    pub(crate) fn changed(&mut self, key: &str) {
+        self.epoch += 1;
+        let parent = key.rsplit_once('/').map_or("", |(parent, _)| parent);
+        // Mutations affect the parent page and any moved/deleted subtree, not
+        // fresh pages elsewhere. All epoch access is under the namespace lock.
+        for name in [parent, key] {
+            if let Some(node) = self.named(name) {
+                node.directory_epoch.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let prefix = format!("{key}/");
+        for (_, ino) in self
+            .names
+            .range(prefix.clone()..)
+            .take_while(|(name, _)| name.starts_with(&prefix))
+        {
+            if let Some(node) = self.nodes.get(ino) {
+                node.directory_epoch.fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 
     pub(crate) fn has_dirty_descendants(&self, key: &str) -> bool {
@@ -78,7 +104,7 @@ impl Namespace {
         }
         self.tombstones
             .insert(key.to_owned(), Instant::now() + Duration::from_secs(60));
-        self.epoch += 1;
+        self.changed(key);
         Ok(())
     }
 
@@ -111,12 +137,14 @@ impl Namespace {
                 .filter(|ino| !self.pending_deletes.values().any(|pending| pending == ino))
             });
             if let Some(ino) = victim {
+                self.evictions += 1;
                 let node = self.nodes.remove(&ino).unwrap();
                 let key = node.state.lock().unwrap().key.clone();
                 if self.names.get(&key) == Some(&ino) {
                     self.names.remove(&key);
                 }
             } else {
+                self.capacity_failures += 1;
                 return Err(Error::Fs(libc::ENOMEM));
             }
         }
@@ -171,7 +199,9 @@ impl<'a> MoveLease<'a> {
             return Err(Error::Fs(libc::ENOMEM));
         }
         ns.moving.extend(keys.iter().cloned());
-        ns.epoch += 1;
+        for key in &keys {
+            ns.changed(key);
+        }
         Ok(Self { namespace, keys })
     }
 }
@@ -180,8 +210,8 @@ impl Drop for MoveLease<'_> {
         let mut ns = self.namespace.lock().unwrap();
         for key in &self.keys {
             ns.moving.remove(key);
+            ns.changed(key);
         }
-        ns.epoch += 1;
     }
 }
 

@@ -125,6 +125,7 @@ pub struct Config {
     pub no_specials: bool,
     #[arg(long)]
     pub disable_xattr: bool,
+    /// Accepted for CLI compatibility; Linux LINK returns EOPNOTSUPP without creating an alias.
     #[arg(long)]
     pub emulate_hardlinks_as_symlinks: bool,
     #[arg(long)]
@@ -170,6 +171,9 @@ pub struct Config {
     /// Private allocator evidence for the benchmark runner, created exclusively.
     #[arg(long)]
     pub stats_file: Option<PathBuf>,
+    /// Optional numeric HTTP listen address; metrics are disabled by default.
+    #[arg(long)]
+    pub metrics_listen: Option<std::net::SocketAddr>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -269,6 +273,29 @@ impl Config {
         !self.no_specials && (self.enable_specials || self.endpoint.contains("yandex"))
     }
     pub fn validate(&self) -> Result<()> {
+        self.validate_backend_options()?;
+        self.validate_filesystem_options()
+    }
+
+    fn validate_backend_options(&self) -> Result<()> {
+        self.validate_write_options()?;
+        self.validate_identity_options()?;
+        self.validate_copy_threshold()?;
+        self.validate_endpoint()?;
+        self.validate_http_limits()?;
+        self.validate_request_headers()?;
+        self.validate_iam_options()?;
+        self.validate_namespace_options()
+    }
+
+    fn validate_filesystem_options(&self) -> Result<()> {
+        self.validate_memory_limits()?;
+        self.validate_concurrency()?;
+        self.validate_read_windows()?;
+        self.validate_mount_options()
+    }
+
+    fn validate_write_options(&self) -> Result<()> {
         for timeout in [self.request_timeout, self.shutdown_timeout] {
             if timeout.is_zero() || timeout > Duration::from_secs(86400) {
                 return Err(Error::Config(
@@ -284,6 +311,10 @@ impl Config {
                 "drop-patch-conflicts/prefer-patch-uploads require enable-patch".into(),
             ));
         }
+        Ok(())
+    }
+
+    fn validate_identity_options(&self) -> Result<()> {
         if self.region.as_ref().is_some_and(String::is_empty) {
             return Err(Error::Config("region cannot be empty".into()));
         }
@@ -304,11 +335,19 @@ impl Config {
                 "iam-header cannot replace HTTP framing/routing headers".into(),
             ));
         }
+        Ok(())
+    }
+
+    fn validate_copy_threshold(&self) -> Result<()> {
         if self.multipart_copy_threshold == 0 || self.multipart_copy_threshold > 5120 {
             return Err(Error::Config(
                 "multipart-copy-threshold must be in 1..=5120 MiB".into(),
             ));
         }
+        Ok(())
+    }
+
+    fn validate_endpoint(&self) -> Result<()> {
         let endpoint = reqwest::Url::parse(&self.endpoint)
             .map_err(|_| Error::Config("invalid endpoint URL".into()))?;
         if !endpoint.username().is_empty()
@@ -320,6 +359,10 @@ impl Config {
                 "endpoint cannot contain credentials, query or fragment".into(),
             ));
         }
+        Ok(())
+    }
+
+    fn validate_http_limits(&self) -> Result<()> {
         if self.http_timeout.is_zero()
             || self.http_timeout > Duration::from_secs(86400)
             || self.sdk_max_retries > 100
@@ -328,6 +371,10 @@ impl Config {
                 "http-timeout must be in (0,24h], sdk-max-retries <=100".into(),
             ));
         }
+        Ok(())
+    }
+
+    fn validate_request_headers(&self) -> Result<()> {
         if self.sse_c.is_some() && (self.sse || self.sse_kms.is_some()) {
             return Err(Error::Config(
                 "sse-c cannot be combined with sse/sse-kms".into(),
@@ -346,19 +393,13 @@ impl Config {
         }
         reqwest::header::HeaderName::from_bytes(self.iam_header.as_bytes())
             .map_err(|_| Error::Config("invalid iam-header".into()))?;
+        Ok(())
+    }
+
+    fn validate_iam_options(&self) -> Result<()> {
         if self.iam {
             if let Some(url) = &self.iam_url {
-                let url = reqwest::Url::parse(url)
-                    .map_err(|_| Error::Config("invalid iam-url".into()))?;
-                if !matches!(url.scheme(), "http" | "https")
-                    || url.host_str().is_none()
-                    || !url.username().is_empty()
-                    || url.password().is_some()
-                {
-                    return Err(Error::Config(
-                        "iam-url must be an HTTP(S) URL without credentials".into(),
-                    ));
-                }
+                validate_iam_url(url)?;
             }
         } else if self.iam_url.is_some()
             || self.iam_flavor != IamFlavor::Gcp
@@ -366,6 +407,10 @@ impl Config {
         {
             return Err(Error::Config("iam-url/flavor/header require --iam".into()));
         }
+        Ok(())
+    }
+
+    fn validate_namespace_options(&self) -> Result<()> {
         let (bucket, prefix) = self.bucket_and_prefix();
         if bucket.is_empty() || bucket.contains('/') || prefix.split('/').any(|p| p == "..") {
             return Err(Error::Config("invalid bucket[:prefix]".into()));
@@ -373,25 +418,40 @@ impl Config {
         if !(self.endpoint.starts_with("https://") || self.endpoint.starts_with("http://")) {
             return Err(Error::Config("endpoint must use http or https".into()));
         }
+        Ok(())
+    }
+
+    fn validate_memory_limits(&self) -> Result<()> {
         if self.memory_limit == 0 || self.memory_limit.checked_mul(1024 * 1024).is_none() {
             return Err(Error::Config("invalid memory-limit in MiB".into()));
         }
-        if self.entry_limit == 0 {
-            return Err(Error::Config("entry-limit must be positive".into()));
+        if self.entry_limit == 0 || self.entry_limit > tokio::sync::Semaphore::MAX_PERMITS as u64 {
+            return Err(Error::Config(format!(
+                "entry-limit must be in 1..={}",
+                tokio::sync::Semaphore::MAX_PERMITS
+            )));
         }
-        if self.max_flushers == 0
-            || self.max_flushers > 4096
-            || self.max_requests == 0
-            || self.max_requests > 4096
-            || self.max_parallel_parts == 0
-            || self.max_parallel_parts > 4096
-            || self.max_parallel_copy == 0
-            || self.max_parallel_copy > 4096
+        Ok(())
+    }
+
+    fn validate_concurrency(&self) -> Result<()> {
+        if [
+            self.max_flushers,
+            self.max_requests,
+            self.max_parallel_parts,
+            self.max_parallel_copy,
+        ]
+        .iter()
+        .any(|limit| !(1..=4096).contains(limit))
         {
             return Err(Error::Config(
                 "max-flushers and max-requests must be in 1..=4096".into(),
             ));
         }
+        Ok(())
+    }
+
+    fn validate_read_windows(&self) -> Result<()> {
         if self.small_read_count == 0
             || self.small_read_count > 64
             || [
@@ -414,14 +474,25 @@ impl Config {
                 "read-ahead-parallel must be positive KiB".into(),
             ));
         }
+        Ok(())
+    }
+
+    fn validate_mount_options(&self) -> Result<()> {
         if self.read_only_direct_io && !self.mount_options.iter().any(|o| o == "ro") {
             return Err(Error::Config("read-only-direct-io requires -o ro".into()));
         }
         for option in &self.mount_options {
-            if !matches!(
-                option.as_str(),
-                "ro" | "rw" | "nosuid" | "nodev" | "noexec" | "default_permissions"
-            ) {
+            if ![
+                "ro",
+                "rw",
+                "allow_other",
+                "nosuid",
+                "nodev",
+                "noexec",
+                "default_permissions",
+            ]
+            .contains(&option.as_str())
+            {
                 return Err(Error::Unsupported(format!("mount option {option}")));
             }
         }
@@ -443,4 +514,18 @@ impl Config {
             }
         })
     }
+}
+
+fn validate_iam_url(value: &str) -> Result<()> {
+    let url = reqwest::Url::parse(value).map_err(|_| Error::Config("invalid iam-url".into()))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(Error::Config(
+            "iam-url must be an HTTP(S) URL without credentials".into(),
+        ));
+    }
+    Ok(())
 }

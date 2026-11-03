@@ -1,155 +1,104 @@
-# Next work: observed problems and causes, 2026-10-30
+# Remaining work — 2026-11-03
 
-Overall status remains **UNACCEPTED**. This is the handoff for the next iteration;
-it separates confirmed mechanisms from hypotheses. See the latest
-[measurement tables](../README.md#latest-completed-measurements--2026-10-30),
-[architecture](architecture.md) and [comparison contract](performance.md).
+Overall status is **UNACCEPTED**. Completed mechanisms belong in
+[architecture](architecture.md) and [change history](change-history.md); frozen
+measurements retain their own source and statistical scope. This page lists
+actionable gaps rather than repeating their execution history.
 
-## 1. Warm random reads: cache working-set eviction
+## 1. Sustained read-only acceptance
 
-**Observed:** the complete five-repeat warm matrix gives Rust 1.01 MiB/s versus
-7.90/8.33 MiB/s for experimental/packaged Go. Mean run p99 is 7.428 ms versus
-1.026/0.897 ms; independently pooled p99 is 7.680 versus 0.764/0.886 ms.
-Concurrent-reader throughput and RSS also do not beat both references.
+Use Go 0.43.9 as the primary reference and the
+[paired protocol](performance-methodology.md): at least eight independent mount
+pairs, actual same-binary/configuration A/A controls, predeclared practical
+non-inferiority margins and independent bytes/generations. Compare under equal
+resources and the accepted negative-cache policy: 64 misses per directory with
+one-minute stat TTL. Immediate external-create visibility beyond Go is not a gate.
 
-**Confirmed contributing mechanism:** `Filesystem::new` reserves 10 MiB for flush
-and 4 MiB for ingress at a 64 MiB total, leaving 50 MiB for clean/dirty/pinned data.
-The deterministic random trace's first plain pass fetches about 60 MB; repeating
-the same offsets still makes 396 backend reads / 51,961,856 bytes. The reply-path
-repeat makes 417 / 54,718,464. Reverse-order revisit reduces misses to 56. Static
-capacity plus access order demonstrably causes repeated fetches; it is not proof
-that every millisecond of mounted latency comes from the cache.
+The [controlled listing result](performance-listing-diagnosis.md) explains the
+default-Rust loss through repeated absent-name probes. The
+[loaded read-shape matrix](performance-read-shape.md) is a transformed local
+workload; its real-S3 follow-up stops after five complete blocks on a dependency
+timeout. Neither replaces sustained target-environment acceptance. Keep cumulative
+native traffic budgets and original failed/partial attempts intact.
 
-**Where:** `src/filesystem.rs::{new,admit,try_refill_admission,load_window}`,
-`src/cache.rs::{insert,evict_lru}`, `src/read.rs::Pattern`.
+Profile random/concurrent reads, metadata and cache residency before another
+runtime change. Remaining setup, scheduler/admission and reply costs have no
+proven single SDK defect. Preserve checksums, If-Match, exact metadata, ownership
+and durability. Higher equal CPU allocation is a sensitivity control, not a
+source-code speedup. See [current accounting and scopes](performance.md).
 
-**Next:** correlate retained ranges, backing charges and real mounted GET counts;
-test a minimal policy change against the same trace and both Go references.
-A proposed idle-flush borrowing policy has an observed diagnostic RED: a 12 MiB
-clean working set at a 16 MiB total makes 192 rather than 96 backend calls across
-two passes. This is a desired new policy, not a broken existing guarantee; its
-test/source is retained privately, and no implementation is delivered.
-Before borrowing, prove writer progress, cancellation/loan release, full pinned
-backing charge and existing FIFO invariants. Do not simply enlarge the data lane
-or remove the reserve. Reuse the maintained permit/cache APIs first.
+Attribute the [scoped serving trial's](pr-context.md#scoped-serving-trial--2026-11-02)
+`open`/`pread` `EAGAIN` and HTTP 500 before claiming equivalent correctness. Separate
+admission pressure, metadata races and backend failures; retain failed responses
+alongside successful-request timings and distinguish post-header read failures.
+Include later `pread()` EIO and independently reproduced native backend read
+failure. Compare vhost/method/URI and generations before attributing 404 changes;
+current native/served HEAD parity is not historical full-payload acceptance.
 
-## 2. Persistent mixed mount misses its target rate
+## 2. Target access and large-namespace memory
 
-**Observed:** all three implementations complete 60 cycles / 360 checked passes.
-Rust takes 885.09 s and misses the 10-second cycle target 58 times; experimental
-Go takes 600.01 s with no late cycles, packaged Go 600.00 s with one. Rust uses
-less process RSS/CPU, but late-half cgroup memory is 314.7 MiB versus experimental
-Go's 298.0 MiB. Different durations do not establish an equal-rate memory win.
+Explicit `allow_other` wiring and the three local cross-UID cases are complete;
+the owner-only default and kernel mode checks remain. Verify the actual target
+service users, mount policies, profile and error paths separately. `dev`, `suid`
+and Go's `--pprof` are still unsupported. The
+[LXC preflight](performance-target-preflight.md) uses disposable fixtures and does
+not establish full served-configuration compatibility.
 
-**Cause boundary:** static cache pressure is independently reproduced, but its
-share of mixed-cycle delay has not been isolated. A sampled late-half mean,
-linear slope or one persistent run does not prove a memory plateau or leak.
+Establish a realistic long-lived namespace/memory envelope. The observed loaded
+Go reader footprint is anonymous; its absent profiling listener prevents live
+heap-owner attribution. Payload budgets, soft Go limits and small short-window
+RSS do not bound whole-process memory. Rust entry pressure can return `ENOMEM`
+when every candidate remains referenced. Do not shrink caches, drop metadata or
+force reclamation to manufacture a win.
 
-**Where:** `src/filesystem.rs` read/refill/admission, `src/read.rs`, `src/cache.rs`,
-`src/main.rs` allocator observation; `bench/accounting.py` measurement scopes.
+For the serving trial, attribute namespace/cache occupancy, eviction and allocator
+retention alongside anonymous memory over time. TTL refresh does not itself evict
+the namespace. Slowing growth alone neither proves nor excludes a leak. The operator
+separately authorized a larger 48-GiB total payload budget and 30-million-entry cap
+for the three addressed readers; that choice does not establish a sustained envelope.
 
-**Next:** retain per-operation mixed-cycle latency and backend traffic; repeat
-with sufficient backend headroom and controlled observer overhead. Compare the
-same fixed work and the same offered rate separately. Keep whole-series daemon,
-client, allocator, cgroup, file and kernel memory; extend duration and repeats
-before claiming a plateau. Preserve baseline-owned Go GC.
+The [optional Prometheus listener](metrics.md) now provides cache/read, namespace
+pressure and allocator/RSS observations and is deployed in the addressed trial.
+Collect sustained series at the new limits; the preceding binaries had no counters,
+so a retrospective unchanged-budget reuse comparison is unavailable.
+Measure observer overhead separately and keep cgroup pressure and user-visible
+errors/tails alongside cache reuse. This feature does not supply a heap profile.
 
-## 3. Resource and observer effects still qualify performance claims
+## 3. Compatibility and writer behavior
 
-**Confirmed:** the earlier parent ceiling was only 8 CPU while daemon/client and
-backend each had 8 CPU. That attempt accumulated 251.118 s parent throttling.
-After raising the parent to 24 CPU, the completed matrix still records backend
-throttling in sequential/eviction runs. Subsequent persistent/observer experiments
-use 32 CPU parent, 16 CPU backend and unchanged 8 CPU daemon/client limits.
-Resource enlargement is not a source optimization.
+- Complete actual-service IAM, SSE/signing/PATCH, imported multipart layouts and
+  required Linux/CLI contracts. [Loopback coverage](backend-options.md) is not
+  actual-service acceptance.
+- Required Linux LINK remains unsupported without side effects. Returning
+  `EOPNOTSUPP` safely is not positive hardlink compatibility.
+- Preserve writer correctness while read-only optimization has priority. Attribute
+  avoidable request/body work without dropping create validation, post-commit HEAD
+  or retry/body ownership. [Owned-upload measurements](performance-owned-uploads.md)
+  retain their short-control scope and remaining losses.
+- Preserve observed Go open-handle fsync-recovery failures. Recovery after close
+  is a different contract; increasing retries until it passes changes the probe.
 
-**Where:** `bench/compare.py::{cgroup,Sampler}`, `bench/go_heap.py`,
-`src/main.rs` optional statistics writer; fixture parent/backend limits.
+## 4. Verification and statistical gaps
 
-**Next:** inspect before/after counter deltas for every compared interval, not
-cumulative old throttles. Complete repeated observer-on/off attribution before
-treating observation as free: Go requests pprof data, Rust writes allocator
-statistics. Short metadata phases are particularly noisy and often contain fewer
-than two valid Go heap samples; those allocator values must remain missing.
-Partial observer experiments cannot replace the complete workload matrix.
-The final on/off attempt retains 133/180 planned records, all correct, and stops
-before a new mount at its bounded deadline. Metadata, sequential, random and
-concurrent groups have five pairs per implementation; eviction is partial and
-writer/fsync is unmeasured in this attempt. Its final generation check is not
-reached. Preserve these omissions and pair-level variance; do not call it a
-completed observer-overhead acceptance test.
+- Verify the changed public generic comparison runner end to end. Private native
+  runners do not establish its orchestration coverage.
+- Continue whole-file CRAP and broader mutation work. The new access wiring passes
+  scoped CRAP and a meaningful omitted-ACL fault; zero automatically selected
+  mutation sites are not a mutation score. Two percentile-rank mutations remain
+  undetected. [Exact verification scopes](testing.md).
+- Repeat observer-on/off and offered-rate controls where needed. Report daemon and
+  client CPU/RSS, live allocator, cgroup/file/kernel memory and adverse interval
+  counters independently; missing observations stay missing. A temporal late mean
+  is not a memory plateau or zero observer overhead.
 
-## 4. Remaining initial-read/tail cost has no proven SDK defect
+## 5. Deferred or suspended experiments
 
-**Observed:** the earlier sealed read comparison improved throughput/RSS but
-Rust mean p99 still lost to both Go references in every rotated pair. Socket/FUSE
-joins show extra work before request transmission and after required socket bytes.
-Removing external observers and moving to client-wide hooks does not remove it.
+Lookup overlap and cached-observation reuse remain absent and statistically
+inconclusive; the old strict four-pair predicate is withdrawn. Inline first polling
+is rejected for receive-thread liveness. Additional loops have independent
+allocation/rate objections. Do not reinstate those trials without new evidence.
 
-**Confirmed boundary:** endpoint resolution is only part of setup; two calls
-match auth selection and endpoint orchestration. SDK 1.155.0 already includes the
-investigated interceptor/endpoint improvements; SHA acceleration and TCP_NODELAY
-are enabled. A bucket-only endpoint cache is invalid for key/prefix-sensitive
-Params. No single library defect has been demonstrated.
-
-**Where:** `src/backend/s3.rs` SDK setup/range path,
-`src/filesystem.rs::load_window`, `src/fuse.rs` request/reply lifetime.
-
-**Next:** separate SDK, scheduler, admission and reply work using controlled
-profiles and a behavioral reproducer before another workaround. Preserve
-If-Match, checksum validation and ownership. FUSE passthrough and disk cache
-remain deferred.
-
-## 5. Open-file fsync recovery differs from the pinned Go references
-
-**Observed:** all 20 Go fault-recovery runs in the complete matrix end with EAGAIN
-through the unchanged 75-second recovery deadline; all ten Rust runs pass.
-
-**Confirmed reference mechanism:** public Go `Inode.SyncFile` clears `forceFlush`
-before returning a retained `flushError`; small-file `sendUpload` needs a closed
-handle, `forceFlush` or memory pressure. Waiting past the retry interval alone
-does not arrange another upload. This is not evidence of Rust data loss.
-
-**Where:** pinned Go `core/file.go::{SyncFile,sendUpload}`;
-`scripts/integration.py::recover_fsync`, writer-failure workload.
-
-**Next:** add a separate close/recovery boundary probe to characterize reference
-semantics, preserving the original failing open-handle workload. Do not lengthen
-timeouts or close the handle to relabel those failures as success. Clarify the
-required recovery contract independently of baseline weaknesses.
-
-## 6. Linux hardlink-as-symlink returns EIO after creating the alias
-
-**Observed and explained:** Rust and both pinned Go binaries fail the mounted
-probe on Linux 6.8. The symlink is already visible after EIO. Linux
-`fuse_link/create_new_entry` requires reply/source file types to match; returning
-a symlink for a regular source violates that requirement.
-
-**Where:** `src/fuse.rs` link callback, `src/filesystem.rs` link emulation;
-public kernel reference in [compatibility](compatibility.md).
-
-**Next:** choose an explicit supported Linux contract and add a mounted regression
-for both return status and post-error side effects. Do not silently accept the
-shared failure as compatibility or pretend it is a Rust-only regression.
-
-## Remaining acceptance and quality gates
-
-- `bench/compare.py::Sampler.metrics` computes its `steady` memory fields from
-  the latter half of a `deque(maxlen=1000)`, not the whole measurement's late
-  half once that buffer wraps. The README operation table calls this a late
-  window; the persistent table uses independent whole-series analysis instead.
-  Before using long-run `steady` fields in acceptance, replace this bounded-tail
-  aggregation with an explicit whole-window/time-window contract and a regression
-  that exceeds 1,000 samples. Otherwise an earlier sustained high-memory interval
-  can disappear from the reported mean. Raw JSONL and sampled peaks are retained.
-- Actual-service IAM, signing/encryption/PATCH, complete Linux CLI parity and
-  imported multipart layouts remain incomplete; loopback tests do not replace
-  those checks. See [backend options](backend-options.md).
-- Concurrent handles share inode adaptive history. Zero-to-one reopen reset is
-  implemented; per-handle policy isolation is not. Require an interleaved-reader
-  reproducer before introducing that change.
-- Heap-observer automatic mutation scope killed 24/25 mutants; one boundary
-  survivor remains. This is not whole-repository mutation success. Broader Rust
-  quality findings and binary redistribution notices remain open.
-- A merge can preserve this experimental checkpoint, but does not establish the
-  agreed all-workload speed/memory goal or authorize production replacement.
+[FUSE io_uring](fuse-io-uring-assessment.md) waits for a fitting released upstream
+API, target-kernel/confinement support and a material measured transport share.
+Passthrough, writeback and disk-backed caching remain deferred. A merge may retain
+the experimental checkpoint; it does not accept production replacement.

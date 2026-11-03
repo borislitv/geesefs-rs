@@ -31,6 +31,20 @@ passes final size, not current part length or a preferred-upload prefix length.
 Reference SDK per-delay tuning flags and other missing reference CLI options
 remain rejected rather than silently ignored.
 
+## Cross-UID mount access
+
+`-o allow_other` selects the supported fuser `SessionACL::All` policy. Without
+that explicit option, access remains restricted to the mounting UID. Kernel
+`default_permissions` is always enabled: allowing another UID through the FUSE
+session does not bypass directory or file modes. `ro`, `rw`, `nosuid`, `nodev`
+and `noexec` retain their kernel mappings; unknown options fail validation.
+`dev`, `suid` and Go's `--pprof` remain unsupported.
+
+The [native access regression](testing.md#cross-uid-mount-access--2026-11-02)
+checks independent bytes for a readable file, owner-only denial and mode-0600
+denial through an explicit disposable fixture. This closes option wiring, not
+full service-user, target-environment or production compatibility.
+
 ## PATCH writer integration
 
 The backend now exposes:
@@ -123,12 +137,17 @@ deterministic core/wire checks, not a new mounted or actual-service acceptance r
   marker HEADs and does not create markers. Empty markerless directories and their
   attributes are local until child objects make them discoverable.
 - `--stat-cache-ttl` controls clean userspace metadata refresh (default one minute,
-  zero forces refresh). Kernel/FUSE reply-cache policy remains a separate review.
+  zero forces refresh), matching Go 0.43.9's CLI default. Kernel/FUSE reply-cache
+  policy remains a separate review.
 - `--negative-lookup-cache-size` defaults to zero (disabled). A positive value
   bounds authoritative misses per directory, using metadata TTL and epoch-safe
   publication. Concurrent creation cannot be hidden by a stale miss; remotely
   deleted clean names can be recreated; dirty local children keep markerless
   parents visible across metadata refresh.
+- The accepted read-only Go-parity comparison explicitly uses a negative-cache
+  size of 64 with the same one-minute stat TTL as Go. The size is not a TTL;
+  external creates may remain invisible until cache expiry, as observed with Go.
+  Separate TTL settings for individual caches are future work.
 - A 32 GiB byte-budget capacity is admitted without preallocation. Individual
   reservations over u32::MAX are rejected before semaphore-count conversion.
 - Pending rename prefixes remain bounded/indexed across errors, blocking child

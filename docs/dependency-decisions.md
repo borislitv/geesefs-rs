@@ -22,6 +22,7 @@ remains outstanding. See LICENSE and NOTICE for source attribution.
 | Fixtures | tiny_http 0.12 (MIT OR Apache-2.0), rcgen/tempfile (MIT OR Apache-2.0), Moto and SeaweedFS (Apache-2.0); real HTTP/TLS boundaries plus faithful gated storage fakes. |
 | CPU accounting | psutil 7.2.2 (BSD-3-Clause) process counters and owned cgroup `cpu.stat`; wall time is not CPU consumed. |
 | Go heap accounting | Go's public `net/http/pprof` debug text exposes live `runtime.MemStats`. Python standard-library HTTP, response bounds and a narrow field adapter avoid implementing a heap-profile decoder or adding another runtime dependency. |
+| Redistribution inventory | [cargo-about 0.9.3](https://github.com/EmbarkStudios/cargo-about/releases/tag/0.9.3) (MIT OR Apache-2.0) plus Cargo's source-vendor command: verified locked HTML/native-source notice bundle. Checksum-specific webpki clarification retains ISC/BSD/Apache texts; bundled C/assembly/file notices remain with full upstream sources. See [distribution](distribution.md). |
 
 The pinned Go 1.25.9 [heap writer](https://github.com/golang/go/blob/go1.25.9/src/runtime/pprof/pprof.go)
 prints `HeapAlloc` separately from sampled profile totals. Its
@@ -32,6 +33,65 @@ snapshot. Sampling overhead remains part of the observed server cost.
 
 ## Narrow application state
 
+### Prometheus observation — 2026-11-03
+
+Select released [prometheus-client 0.25.2](https://docs.rs/prometheus-client/0.25.2/prometheus_client/)
+(Apache-2.0 OR MIT) for counters, gauges and OpenMetrics text encoding, rather
+than handwritten exposition/escaping. Serve the opt-in endpoint through the
+already locked Hyper 1.12.0, hyper-util 0.1.21 Tokio I/O and http-body-util 0.1.5
+(MIT), with two concurrent connections and five-second connection deadlines.
+Tiny HTTP 0.12 is already a fixture dependency, but its per-connection background
+threads do not provide the intended bounded async connection lifecycle. A full
+web framework/exporter runtime is unnecessary for one GET route. Use the existing
+jemalloc/stats_alloc APIs; the narrow Linux RSS adapter reads only self status.
+Snapshot existing cache/namespace cardinalities under their current locks; never
+scan inodes, reserve payload, refresh caches or contact storage during a scrape.
+
+The [Linux 7.3 assessment](fuse-io-uring-assessment.md) compares versioned kernel
+UAPI, installed fuser 0.18.0, the unmerged Skory transport stack, Apache-2.0
+fractal-fuse/fuser-iouring and released versus newer libfuse. Keep the current
+dependency: io_uring has credible small-core test configurations, but no candidate
+has passed this filesystem's contracts or measured joint resource gate. Prefer
+an existing supported transport over local protocol/unsafe code. A few workers
+do not by themselves shrink possible-CPU queues or per-entry payload allocation.
+The operator excludes forks of shared libraries and prefers released upstream
+versions even at a modest performance cost (2026-11-01). The Skory fuser stack is
+therefore rejected; unreleased upstream fuse-backend-rs `fusedev-uring` is watched,
+not adopted. Use supported fuser 0.18.0 `n_threads`/`clone_fd` for transport work.
+
+The [classic dispatch diagnosis](performance-classic-dispatch.md) first measures
+queue/service intervals, off-CPU wakes and CPU stacks. Extra fuser receive loops
+retain a separate `16 MiB + 4 KiB` buffer each and reduce four-loop random rates
+in the measured pairs. Keep one loop. A cache-hit read experiment evaluated existing futures-util
+0.3.34 [`FutureExt::now_or_never`](https://docs.rs/futures-util/0.3.34/futures_util/future/trait.FutureExt.html#method.now_or_never)
+on a pinned mutable future and Tokio 1.54.1
+[`Handle::enter`](https://docs.rs/tokio/1.54.1/tokio/runtime/struct.Handle.html#method.enter).
+Polling a pinned borrow preserves a pending future for the same bounded Tokio
+fallback, including admission, timeout, cancellation and reply ownership. It
+does not add a cache implementation or duplicate generation/TTL logic. Despite
+improving cached-read latency and CPU, the trial's joint result is inconclusive
+under the [revised statistical protocol](performance-methodology.md). Its runtime/
+test changes and receive-loop CLI remain absent; retain removal of redundant
+post-rename notifications. No dependency
+change, custom cache or executor is adopted.
+
+The [metadata expiry diagnosis](metadata-expiry-diagnosis.md) uses standalone
+[TShark 4.6.4](https://www.wireshark.org/docs/man-pages/tshark.html) for TCP/HTTP
+reassembly instead of implementing a packet decoder. Public distro packages are
+extracted locally with hashes; nothing is linked into or distributed with the
+runtime. Reinspection of the locked SDK 1.155.0 confirms generated orchestration
+and plugin assembly are crate-private, not a supported prepared-operation API.
+SDK issue [#1349](https://github.com/awslabs/aws-sdk-rust/issues/1349) does not deliver
+a metadata setup fix. Keep the selected SDK and integrity/metadata contracts;
+sampled SDK work alone does not justify a private fork or replacement transport.
+
+The suspended [cached-observation trial](performance-cached-observations.md) uses
+Rust 1.99's supported [`Arc`/`Weak`](https://doc.rust-lang.org/1.99.0/std/sync/struct.Arc.html)
+ownership APIs rather than a custom metadata cache or SDK replacement. Strong
+references pin namespace eviction victims; weak identity plus a bounded original
+observation avoids that contract change. Correctness passes, but the short paired
+joint inference is unresolved; neither trial representation nor dependency change is retained.
+
 Inode lifetime, namespace bindings, dirty generations, flush ownership, sparse
 overlays and fsync barriers are filesystem state, not replacement infrastructure.
 Existing Tokio permits/watch/JoinSet bound work, coalesce overlapping fills and
@@ -39,7 +99,20 @@ cancel/drain jobs. Disjoint windows remain concurrent. Required and optional
 admission differ: optional refill skips pressure, required FIFO must progress.
 Contiguous consumption hints protect foreign unread cache backing only during
 optional eviction; they never pin required admission. Reset adaptive Pattern on
-zero-to-one open without discarding payload or active-reader history.
+zero-to-one legacy open without discarding payload or active-reader history;
+FUSE handles now own independent history.
+
+The idle flush-reserve cache policy uses the selected Tokio 1.54.1
+[`RwLock`](https://github.com/tokio-rs/tokio/blob/tokio-1.54.1/tokio/src/sync/rwlock.rs)
+and existing owned semaphore permits, not a new priority allocator. Concurrent
+uploads hold shared `read_owned` activity guards; cache lending only attempts
+`try_write` synchronously. The owned guard follows cloned upload budgets into
+request bodies and child jobs. Lending must first acquire the unchanged flush
+byte permits and may move only an exclusively cache-owned complete allocation.
+An owned reply must copy loaned bytes into its already admitted data allocation;
+it cannot export a revocable flush owner. Required admission alone initiates
+loans; optional refill retains its nonblocking data-lane policy. Ownership tests
+and measured whole-filesystem acceptance remain separate gates.
 
 ## Applicable read-path upstream findings
 
@@ -91,8 +164,37 @@ zero-to-one open without discarding payload or active-reader history.
   whole-part buffering. A narrow exact-length charged adapter is application
   materialization; HTTP/retries/checksums stay library-owned. crc32fast independently
   validates test wire trailers.
+- For an upload range already covered by one charged dirty extent, use bytes
+  1.12.1's supported `Bytes::from_owner` and Smithy 1.9.0's known-bytes body rather
+  than materializing another streaming frame. Keep the original block and upload
+  activity alive through every byte/body clone; retain the 1 MiB frame bound.
+  AWS SDK S3 1.155.0's checksum interceptor then signs a checksum header instead
+  of selecting aws-chunked trailers. Sparse/composed/remote ranges still stream;
+  checksum policy, retries, signing and post-commit HEAD remain library-owned.
+  [SDK #1349](https://github.com/awslabs/aws-sdk-rust/issues/1349) is a broader
+  performance report, not proof of a local transport bug; Bedrock/custom-client
+  [#1287](https://github.com/awslabs/aws-sdk-rust/issues/1287) does not justify
+  disabling S3 stalled-stream protection. No transport fork or new crate is needed.
 
 ## Investigation boundary
+
+The writer trace contains two independent absence resolutions (kernel LOOKUP,
+then create validation) and mandatory post-commit HEAD. Linux 7.0
+[`fuse_atomic_open`](https://github.com/torvalds/linux/blob/v7.0/fs/fuse/dir.c)
+performs LOOKUP before FUSE_CREATE; fuser 0.18.0 does not merge those callbacks.
+Removing validation would change remote-create race behavior, and retaining a
+previous miss would change the default zero negative-cache policy. Keep both.
+Within each missing-object resolution, marker HEAD and implicit-directory LIST
+were tested with overlap using the existing Tokio 1.54.1
+[`select!`](https://docs.rs/tokio/1.54.1/tokio/macro.select.html) and a spare existing
+metadata-resolution permit. The experiment preserves marker metadata/error
+priority, cancels irrelevant LISTs and falls back to serial progress when slots
+are occupied. Native SDK/HTTP wiring and cancellation tests pass. Four rotated
+writer pairs nevertheless lose throughput once, p95/p99 three times and daemon
+RSS in every repetition, without removing any writer requests. Reject the runtime
+change; the serial lookup implementation remains. See the
+[experiment results](performance-lookup-probes.md). No transport replacement,
+new dependency or weaker negative-cache policy follows from this investigation.
 
 The selected SDK already contains [interceptor optimizations #4597](https://github.com/smithy-lang/smithy-rs/pull/4597)
 and [BDD endpoint improvements #4595](https://github.com/smithy-lang/smithy-rs/pull/4595),
@@ -108,3 +210,69 @@ exact versions, profiles, upstream issue applicability and supported APIs before
 another workaround. Do not remove integrity, freshness, ownership or durability
 contracts for speed. [FUSE passthrough](fuse-passthrough.md) and disk caching remain
 deferred. Keep new findings concise; detailed profiles/results stay untracked.
+
+The subsequent fixed-binary warm-random controls and FUSE/GET joins show repeated
+Rust cache misses where both Go references issue no GET. This is an application
+capacity-policy difference, not evidence of a single SDK defect. GeeseFS
+[#70](https://github.com/yandex-cloud/geesefs/issues/70) explains that its payload
+limit excludes metadata/runtime overhead; lowering that limit is not a fix here.
+[#82](https://github.com/yandex-cloud/geesefs/issues/82)'s metadata-cache limit was
+delivered in 0.37.0. [#117](https://github.com/yandex-cloud/geesefs/issues/117)
+concerns deferred disk caching; closed
+[#172](https://github.com/yandex-cloud/geesefs/issues/172) has no maintainer
+diagnosis or delivered correction. SDK
+[#1349](https://github.com/awslabs/aws-sdk-rust/issues/1349)'s large-object/network
+concurrency discussion is not a ready-made small-random latency fix.
+[#958](https://github.com/awslabs/aws-sdk-rust/issues/958)'s TCP_NODELAY setting is
+already enabled by the selected transport. No dependency replacement follows
+from these discussions.
+
+The 2026-10-31 native FUSE investigation attributes a 30-second wait to application
+admission: an in-flight fill publishes reclaimable cache owners after the initial
+sweep, but waiting for permits alone cannot reclaim them. Tokio
+[#6450](https://github.com/tokio-rs/tokio/issues/6450) documents FIFO behavior,
+not an applicable semaphore defect. Reuse selected Tokio 1.54.1
+[`Notify`](https://docs.rs/tokio/1.54.1/tokio/sync/struct.Notify.html):
+`notify_waiters` covers notification futures created before the cache check even
+when not yet polled. Keep the same pinned reservation instead of cancelling and
+rejoining the FIFO queue. No dependency replacement or new allocator is needed.
+GeeseFS [#28](https://github.com/yandex-cloud/geesefs/issues/28) discusses slow
+listing/HEAD work; the measured repeated LISTs here instead follow our global
+directory-page epoch invalidation after unrelated writes.
+
+The subsequent TTL/PLUS investigation checks fuser 0.18.0's supported
+`KernelConfig::add_capabilities`, `ReplyDirectoryPlus::add` and reply TTL APIs.
+[#756](https://github.com/cberner/fuser/issues/756) explains the single-TTL limit
+for PLUS/create; conservative remaining freshness needs no fork. Public Linux
+`fs/fuse/readdir.c` and native tests establish dot-entry/lookup ownership.
+Mountpoint [#1801](https://github.com/awslabs/mountpoint-s3/issues/1801) and
+[#953](https://github.com/awslabs/mountpoint-s3/issues/953) provide metadata/TTL
+analogues, not an SDK correction. Per-open history follows the pinned public Go
+`FileHandle` contract. Existing Tokio owned permits bound file handles; existing
+rustix 1.1.5 `fs` APIs exercise native xattr/fallocate behavior without local unsafe.
+jemalloc-ctl 0.7.0 exposes safe optional page gauges; no allocator tuning or
+dependency replacement is justified by these observations.
+
+The frozen candidate's native request trace confirms repeated standard LIST
+prefix scans for bounded directory chunks (10–11 requests for 1,024 names).
+AWS SDK 1.155.0 exposes `ListObjects::marker` and
+[`ListObjectsV2::start_after`](https://docs.rs/aws-sdk-s3/1.155.0/aws_sdk_s3/operation/list_objects_v2/builders/struct.ListObjectsV2FluentBuilder.html#method.start_after).
+A narrow exclusive-name adapter can skip consumed pages while retaining opaque
+continuation tokens. Extended LIST retains its existing protocol until equivalent
+start-after semantics are verified; no custom parser, request cache, larger
+directory buffer or weakened type/metadata resolution is needed.
+
+The warm directory profile also exposes repeated application page processing.
+Reuse the existing Moka 0.12.16 page cache and Rust slice `partition_point` to skip
+the consumed prefix; validate the remaining inode bindings, types and TTL exactly
+as before. No new cache, dependency, kernel buffer or ownership pin is needed.
+The alternative supported fuser 0.18.0 `FUSE_READDIRPLUS_AUTO` capability reduces
+unused name-only lookup owners in a real mounted test, but four rotated metadata
+pairs lose throughput in three cases and pooled p99 in all four. Retain the
+existing forced-PLUS policy rather than shipping that unproven speed change.
+
+Standard S3 LIST object fields supply size/ETag/modified time, not arbitrary user
+metadata. Preserve the cached or HEAD observation time when merging selected
+entries; only actual authoritative LIST metadata has the new LIST observation
+time. Existing SDK responses, Moka and bounded futures suffice. Avoid another
+TTL extension or cache-policy change to hide required metadata refresh requests.

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "repetitions": 5,
+  "repetitions": 8,
   "memory_limit_mb": 64,
   "entry_limit": 100000,
   "dataset_bytes": 268435456,
@@ -9,6 +9,7 @@
   "random_operations": 512,
   "random_block_bytes": 4096,
   "writer_bytes": 16777216,
+  "writer_files": 64,
   "cpu_quota_us": 100000,
   "cpu_period_us": 100000,
   "cgroup_memory_max_mb": 1024,

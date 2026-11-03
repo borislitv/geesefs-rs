@@ -1,137 +1,214 @@
 # Change history and reasons
 
-This is the concise engineering context for the experimental Linux/S3 rewrite.
-Detailed results and operational logs stay outside tracked source files.
-Overall compatibility and comparative performance remain **UNACCEPTED**.
+Concise engineering context for the experimental Linux/S3 rewrite. Compatibility
+and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
+source/binary manifests and pre-cleanup documents stay in ignored evidence;
+measurement pages retain their original tables and source scopes.
 
-## Initial implementation and correctness
+## 2026-11-03: addressed metrics-build and cache-budget update
 
-- Reused fuser and AWS SDK rather than implementing FUSE/S3 protocols. Added
-  bounded allocation ownership, generation-aware namespace state and sparse,
-  truncate, multipart, rename and fsync paths. Optional backend adapters preserve
-  reference metadata, authentication, signing and PATCH contracts through public
-  dependency APIs; actual-service coverage remains incomplete.
-- Reserved a flush lane and retained permits through pinned/queued buffers and
-  cleanup. This fixes progress and ownership, not whole-process RSS.
-- Bounded concurrent type resolution and directory-page/preload reuse avoid
-  serial HEAD/repeated LIST work. Binding-aware metadata validation prevents an
-  unrelated remote deletion from invalidating successful operations or late
-  responses from removing dirty/newly durable descendants.
+A new operator authorization updates the same three RO trial readers sequentially
+to the metrics build, with 48 GiB total payload and 30 million metadata entries.
+The third reader stays withdrawn until both peers pass their checks and its own
+update completes. Full protocol bytes, mount propagation, listing-process retention,
+loopback metrics and healthy recovery no-ops pass. Retain the controller startup
+error and lock-only refusal alongside their distinct successful continuations.
+This is deployment/context delivery without a runtime-code change. Historical
+timings retain their original build; missing comparable CPU/memory baselines and
+new cold-cache observations do not establish a performance or memory improvement.
 
-## Read-path investigation, 2026-10-27–28
+## 2026-11-03: optional Prometheus cache and memory observations
 
-- Adaptive history originally missed cache-hit progress. Corrected contiguous
-  tracking, but deterministic request reduction alone did not fix mounted speed.
-- Actual FUSE tracing then found neighboring reads evicting active-fill policy
-  and publishing into an orphaned cache clone. `572195a` coalesces overlapping
-  generation-scoped fills and publishes into current cache; disjoint work remains
-  concurrent. This resolves the severe selected sequential throughput collapse.
-- Charged immutable views remove redundant cache-hit and callback reply copies.
-  Requested bytes can reach FUSE before unrelated read-ahead finishes, while the
-  same caller-owned future retains cancellation, errors and admission.
-- Incremental SDK body publication avoids waiting for an entire unchecksummed
-  range. Whole-body checksums retain their validation barrier. Maintained Tokio
-  copy APIs avoid pre-zeroing fully overwritten fragments. These changes had
-  mixed CPU/RSS/tail tradeoffs, not an unconditional performance win.
-- A consumed transport `Bytes` owner survived until the next body poll and
-  impeded receive-buffer reuse. Maintained futures/Tokio adapters now drop it
-  promptly. Permit splitting transfers charges to actual fragment backings.
-- Required pressure eviction used whole-cache replacement because Moka lacks
-  synchronous pop-LRU. Payload retention now uses maintained `lru`; metadata stays
-  in Moka. Range-index coverage filtering avoids useless cache lookups.
-- System allocator screening exposed a speed/RSS tradeoff. It remains an explicit
-  comparison feature with scoped counters; jemalloc stays the default. Counter
-  ablation did not identify telemetry as the remaining bottleneck.
+RSS and diagnostic allocator JSON could not establish payload occupancy, reuse or
+eviction pressure. Add an opt-in bounded HTTP/OpenMetrics listener using public
+prometheus-client and Hyper APIs. Constant-time nonblocking snapshots distinguish
+retained spans from charged/pinned storage, and report read reuse/fills, namespace
+pressure and shared allocator/RSS observations. Scrapes never refresh metadata or
+call S3. Tests cover accounting, failure, contention, HTTP lifetime and an explicit
+real-binary disposable FUSE/S3 fixture. This changes observability, not cache limits
+or production deployments; larger-cache usefulness remains to be measured.
 
-## Read-ahead corrections, 2026-10-29
+## Third addressed reader and error-screen correction — 2026-11-03
 
-- Equal higher CPU/memory resources removed quota throttling and reclaim, but
-  Rust tail latency still lost to Go. Resource effects were not a source fix.
-- `6e16525`: cache hits skipped next-window planning, exposing the next GET on
-  demand. Socket/FUSE joins and selective-delay injection confirmed this mechanism.
-  Refill now runs after reply publication in the existing owned request lifetime,
-  skips unavailable optional admission and preserves integrity/cancellation.
-- `d0d7b99`: optional refill could evict another reader's unread backing. Track
-  contiguous consumption and reclaim foreign backing speculatively only when
-  fully consumed. Required LRU/FIFO admission stays unchanged. Traffic and tails
-  improve, but the experimental Go p99 gap remains.
-- `2bf8184`: inode history survived the final close, so reopening inherited a
-  promoted initial window. Reset `Pattern` on zero-to-one open, preserving payload
-  and active-reader history. Warm duplicate payload disappears in the selected
-  comparison; p99 improves versus prior Rust but still loses to both Go references.
-  P95/CPU regressions versus that prior remain part of the conclusion. Concurrent
-  handles still share inode policy; full per-handle isolation is not implemented.
+A separate authorization extends the same-build, same-budget RO trial to a
+third reader. Its first ordinary-unmount refusal preserves the old mount;
+the continuation waits for empty consumer cgroups and passes protocol bytes,
+namespace propagation and healthy recovery no-op. No runtime code changes.
 
-## Benchmark contract correction, 2026-10-30
+The error screen must match vhost/method/URI rather than combine different
+virtual hosts. The third reader's sampled 404 rate rises; all newly observed
+canonical missing URIs have current native absence evidence, with the original
+TLS timeout retained. Earlier EAGAIN/EIO, backend read failure and upstream
+timeout remain separate from successful controls. Memory growth and broader
+acceptance are unresolved. [Scope and limits](pr-context.md#scoped-serving-trial--2026-11-02).
 
-The acceptance runner still required cold-start superiority after that requirement
-was removed. Cold runs now retain all ratios and correctness, provenance and
-accounting checks, while comparative performance gates apply to warm work.
-The regression fails before the correction; adverse warm tails still fail.
-This aligns the runner with the contract and establishes no runtime improvement.
+## Second addressed reader trial — 2026-11-03
 
-Go allocator accounting no longer substitutes a final sampled pprof total for
-missing temporal data. A separate bounded observer records live `HeapAlloc`
-without requesting GC, retains failures and excludes boundary-crossing requests.
-Loopback HTTP/timeout tests and four injected faults verify the adapter; actual
-workload overhead and long-lived heap behavior still need measurement.
-Reference inspection also finds baseline-owned `debug.FreeOSMemory` calls. Their
-counter deltas are reported without rejecting the reference or changing its GC
-policy; the observer itself never requests collection.
+A separate operator authorization extends the read-only serving trial to one
+additional reader with the same source-matching executable and cache/resource
+budgets. Ordinary unmount, consumer namespace propagation, independent peer-host
+HTTPS and rsync bytes and healthy recovery no-op pass. Preserve the prior live
+error/anonymous-growth gaps and the second reader's transient EIO/HTTP 500;
+later successful controls do not attribute that failure. A cold new cache is
+not a fair memory comparison.
+[Combined scope and limits](pr-context.md#scoped-serving-trial--2026-11-02).
 
-The worker also labelled metadata/random/writer runs warm after scanning only
-payload. Warmup now executes the matching checked operation; the failure case
-primes a healthy writer before injection. The client is closed even if warmup
-fails, and warmup receives the bounded workload deadline rather than the short
-cold-initialization timeout. Earlier screening evidence remains diagnostic.
+## Scoped serving trial and recovery boundary — 2026-11-02
 
-Open-file fsync recovery failures in both pinned Go references are consistent
-with their shared flush state machine: `SyncFile` clears `forceFlush` before
-returning the retained error, and small-file background upload needs a closed
-handle, `forceFlush` or memory pressure. Waiting past the retry interval does not
-by itself restore progress. Preserve those failures and the original workload
-rather than increasing retries until a different state happens to pass.
+The operator authorized one read-only served-reader replacement, separately from
+general acceptance. Deployment recovery now recognizes the addressed Rust mount,
+quiesces filesystem consumers and preserves native-S3 listings; healthy delivery
+does not restart the reader. Actual production crash/OOM recovery is unobserved.
+Live errors and continued anonymous-memory growth still need attribution; defer
+cache enlargement.
+[Trial scope and remaining uncertainty](pr-context.md#scoped-serving-trial--2026-11-02).
 
-## Current work and open gates
+## Cross-UID mount access — 2026-11-02
 
-The completed 2026-10-30 native operation matrix retains all 210 records: 190
-correct and 20 Go open-file fsync-recovery failures. It exposes a severe warm
-random loss despite selected sequential/writer gains. Deterministic traces
-confirm repeated backend reads under the static data-lane working-set pressure;
-they do not isolate all mounted latency. Idle-flush borrowing has only a
-diagnostic RED and is not implemented or included as a failing shipped test.
+Owner-only fixtures missed a serving contract: the frozen Rust binary rejected
+`allow_other` and denied another UID even on a readable file. Accept the explicit
+option and select supported fuser `SessionACL::All`; keep the default owner-only
+policy and kernel `default_permissions`. Preserve other supported mount options
+and reject unknown ones.
 
-A persistent mixed mount completes 60 cycles / 360 checked passes on each binary.
-Rust takes 885 seconds versus about 600 for both Go references, despite lower
-process RSS and CPU. Whole-series cgroup/file/kernel accounting prevents calling
-that an all-metrics memory win or plateau. Parent/backend quota interference was
-measured and versioned separately; increased headroom is not a code improvement.
-The observer-on/off experiment stops at its bounded pre-mount deadline after 133
-correct records, rather than completing 180; it remains partial attribution.
-The [README](../README.md) contains the requested aggregate checkpoint; detailed
-evidence stays ignored. [Architecture](architecture.md) describes delivered
-ownership and [next work](next-work.md) separates confirmed causes from hypotheses.
+The parser regression fails before the change. An omitted-ACL wiring fault then
+fails the real-FUSE readable-byte assertion; restored wiring passes alongside
+owner-only and mode-0600 denial controls. Both allocator suites, explicit native
+access checks, formatting, Clippy and 99 Python tests pass. Scoped quality passes
+do not close broader-file CRAP or production acceptance. [Verification](testing.md).
 
-Release builds now use ThinLTO and one codegen unit to optimize across the SDK
-and application crate boundaries. With unchanged runtime sources, four rotated
-mount pairs improve throughput, p50/p95/p99 and CPU versus the former Rust build
-in the selected System-allocator fixture. Small RSS/cgroup increases are retained;
-both Go p99 values still win. Default jemalloc builds and release-mode backend
-contracts also pass, but this is not representative-workload acceptance.
+## Reference, cache policy and statistical contract — 2026-11-02
 
-Initial-read joins find additional Rust client work before GET write and after
-required socket bytes. Internal SDK hooks retain the setup/signing/response work
-with external observers removed and with client-wide rather than per-request
-instrumentation. Default endpoint resolution is only part of that work; its two
-calls correspond to auth selection and request endpoint orchestration. These
-boundaries do not establish an SDK defect or a causal contribution to global p99.
-Keep instrumentation outside the runtime and validate a targeted change before
-claiming an improvement.
+Go 0.43.9 is the primary acceptance reference. The unmerged Go experiment remains
+historical evidence, including favorable and adverse measurements. Go-relative
+superiority requires equivalent correctness: demonstrated stale permission
+metadata or weaker durability is not behavior to reproduce for speed.
 
-Hardlink EIO, optional actual-service/CLI/imported-layout compatibility,
-representative performance acceptance and long-lived memory behavior remain open.
-Go live heap series now exist for the persistent run; short phases can still
-lack two valid samples, and observer overhead is not eliminated. Lower daemon
-RSS and higher selected throughput do not close these gates.
-FUSE passthrough/disk caching remain deferred. Dependency rationale and applicable
-upstream links are in [dependency decisions](dependency-decisions.md).
+The operator accepts Go-equivalent bounded negative caching. Use explicit Rust
+negative64 and one-minute stat TTL in read-only comparisons; 64 is a per-directory
+capacity, not seconds. The cache default remains zero. Eight controlled blocks
+attribute the default listing loss to five absent-name checks/15 S3 requests;
+the existing option removes those requests. The separate five-second expiry
+probe demonstrates accepted external-create delay. [Listing diagnosis](performance-listing-diagnosis.md).
+
+Withdraw strict per-pair/all-metric inference from short trials. Require paired
+confidence intervals, eight independent mounts and genuine same-executable A/A
+controls; superiority and practical non-inferiority are separate decisions.
+Lookup-overlap and cached-observation trials remain absent/inconclusive.
+[Protocol](performance-methodology.md).
+
+## Rename notification deadlock and dispatch controls — 2026-11-02
+
+A native four-client rename regression hangs before correction. Synchronous
+post-reply entry notifications can wait for a directory operation while holding
+the notifier lock. Linux/VFS already maintains rename dentries; remove the
+redundant notifications while retaining last-close inode invalidation and durable
+unmount. No extra executor hides the cycle.
+
+Supported receive-loop controls retain allocation/rate objections. Inline first
+polling has inconclusive mixed performance after A/A calibration, but a native
+contended read stalls the sole receive thread: reject it on liveness. Trial
+runtime/tests/CLI remain absent. Backend errno/fallocate helpers preserve behavior.
+[Measurements and public-source analysis](performance-classic-dispatch.md).
+
+## Read-only target and bounded native verification — 2026-11-02
+
+The clarified primary target is LXC serving nginx/rsync/golist, with read-only
+performance first and writer correctness preserved. Isolated actual-kernel
+nginx/rsync checks pass byte/Range/EOF/416 and read-only contracts. Buffered shared
+mmap passes; direct I/O returns `ENODEV`. Corrupt-byte controls fail correctly.
+[Target scope](performance-target-preflight.md).
+
+The transformed read-shape comparison completes eight five-arm blocks. A separate
+guarded real-S3 attempt stops after five complete blocks on an upstream HEAD
+timeout, below acceptance requirements. Retain cumulative budgets, setup failures
+and cleanup receipts. An audit also finds stale disposable rename mounts despite
+failed units: verify actual task exit, ordinary unmount and unchanged unrelated
+mounts rather than trusting unit status. [Read controls](performance-read-shape.md).
+
+## Metadata observation age and bounded directory work — 2026-11-01
+
+Standard LIST renewed cached user metadata's observation time, extending permission
+TTL without fresh metadata. A source-age regression and native mode-only update
+fail before correction. Carry actual observation timestamps through bounded
+selection/type resolution and return remaining TTL. Protect newer HEAD/commit
+observations. Equal-TTL probes independently show stale Go modes at unchanged
+content ETag; lower RPC counts are not equivalent freshness.
+[Diagnosis](metadata-expiry-diagnosis.md), [corrected-source measurements](performance-observation-age.md).
+
+Consumed directory prefixes were repeatedly copied/validated and could trigger
+extra LIST after inode eviction. Resume only the unconsumed suffix without
+extending TTL or pinning inodes. Then align bounded FUSE consumption with the
+backend page size: an 8192-name traversal drops from 65 LIST calls to the expected
+10, including EOF. Kernel-buffer continuation, accurate types, lookup ownership
+and error boundaries remain tested. The READDIRPLUS_AUTO trial stays absent.
+[Directory measurements](performance-directory-remainders.md).
+
+## Owned uploads and clean-close cache retirement — 2026-11-01
+
+A retry regression sends 302 HTTP body bytes for nine dirty bytes because a known
+contiguous body used the generic aws-chunked path. Reuse supported Bytes/Smithy
+known-body APIs for covered extents, retaining charge/activity through the last
+retry owner. Sparse/composed/remote streams, signing/checksum policy and
+post-commit validation are unchanged. Byte/checksum/lifetime faults verify the
+correction. [Owned-upload measurements](performance-owned-uploads.md).
+
+Owned-superblock/page attribution identifies 256 MiB of clean payload pages left
+after close although the next open discards them without `FOPEN_KEEP_CACHE`.
+Use supported best-effort inode invalidation after last clean close; release
+userspace locks before notification and preserve mmap/reopen owners. The retained-
+page regression fails before and passes after correction. Lower temporal file-
+cache means do not prove process-memory superiority or a plateau.
+[Integrated measurements](performance-integrated.md).
+
+## Freshness, handles and admission progress — 2026-10-31
+
+FUSE/HTTP joins place late metadata bursts inside LOOKUP: cached name pages retain
+older child attributes. Validate freshness/type/binding, refresh authoritative
+extended LIST and return remaining kernel TTL. Supported bounded READDIRPLUS
+transfers lookup ownership only on successful replies. V1 marker/V2 start-after
+avoid repeated standard-LIST prefix scans while opaque continuation retains
+priority. Preserve accurate common-prefix metadata and lexical boundaries.
+
+Move adaptive history to each open handle; cache/fills/budgets remain shared.
+Reserve handles before create so `EMFILE` cannot leave a dirty name. Clean fsync
+preserves cache loans when no generation needs uploading. Linux hardlink-as-symlink
+fails after mutation in the reference-style path; Rust now rejects unsupported
+LINK before mutation. [Architecture](architecture.md), [compatibility](compatibility.md).
+
+A rare 30-second read is reproduced by a gated public test: required admission
+does not revisit cache owners published after its first reclamation sweep.
+Notify-driven reclamation retains FIFO place and unchanged budgets. Separately,
+directory-local epochs prevent unrelated writes invalidating all cached listings;
+in-flight binding checks preserve rename/delete correctness.
+[Native checkpoint](performance.md#native-vm-admissiondirectory-checkpoint--2026-10-31).
+
+## Read path and benchmark accounting — 2026-10-27–30
+
+Coalesce overlapping generation-scoped fills and publish into the current cache
+instead of an orphan clone. Charged immutable views avoid redundant cache/reply
+copies; incremental SDK body publication retains checksum barriers. Drop consumed
+transport owners promptly and transfer charges to actual fragment backings.
+Maintained `lru` supplies synchronous payload eviction; metadata stays in Moka.
+
+Cache-hit progress now plans refill after reply publication within the existing
+owned lifetime. Speculation cannot evict another reader's unread backing; required
+admission retains its policy. Reopening resets promoted history without discarding
+payload. Required admission can borrow idle flush capacity, revocable by uploads;
+owned replies cannot export a revocable backing. Byte-budget/lifetime regressions
+fail for the original mechanisms. [Historical cache-policy measurements](performance-cache-policy.md).
+
+The runner now warms the actual operation, excludes cold superiority from warm
+acceptance and reports complete temporal CPU/memory scopes. A bounded Go observer
+reads live HeapAlloc without requesting GC; missing samples stay missing. Go's
+open-handle fsync recovery failures remain failures, distinct from recovery after
+close. ThinLTO/System-allocator comparisons and observer-on/off partial attempts
+retain their exact configurations. None establishes all-workload acceptance.
+
+## Dependency reuse and suspended transport work
+
+Reuse public fuser, AWS SDK, Tokio and maintained ownership/cache APIs instead of
+custom protocols or unsafe adapters. Actual-service coverage remains incomplete.
+Linux 7.3 pool/zero-copy research and standalone C controls do not supply a fitting
+released Rust transport. FUSE io_uring stays an [upstream watch](fuse-io-uring-assessment.md);
+host boot/package recipes and execution checklists are archived outside the PR.

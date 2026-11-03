@@ -9,6 +9,7 @@ pub mod error;
 pub mod filesystem;
 pub mod fuse;
 pub mod inode;
+pub mod metrics;
 pub mod namespace;
 pub mod parts;
 pub mod read;

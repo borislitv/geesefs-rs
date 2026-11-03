@@ -392,6 +392,9 @@ fn retire(node: &Inode, snapshot: &Snapshot, head: ObjectHead) -> Result<()> {
     state.cuts.retain(|&version, _| version > snapshot.version);
     state.extents.retain(|_, e| e.version > snapshot.version);
     state.durable = snapshot.version;
+    // A verified commit is a newer authoritative observation than a LIST that
+    // was already in flight. Its metadata must not replace this generation.
+    state.fetched = std::time::Instant::now();
     Ok(())
 }
 

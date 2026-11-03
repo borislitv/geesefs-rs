@@ -1,8 +1,10 @@
 import copy
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -80,9 +82,37 @@ class WorkerDeadlineTests(unittest.TestCase):
                 self.assertTrue(process.stdout.closed)
 
 
+class NativeAccountingBoundaryTests(unittest.TestCase):
+    def test_current_process_and_reaped_process_memory_remain_distinct(self):
+        current = compare.proc_memory(os.getpid())
+        self.assertGreater(current["rss"], 0)
+        self.assertGreater(current["Pss"], 0)
+        with subprocess.Popen([sys.executable, "-c", "pass"]) as process:
+            self.assertEqual(process.wait(timeout=5), 0)
+            self.assertEqual(compare.proc_memory(process.pid), {})
+
+    def test_preflight_requires_cpu_and_memory_delegation_without_changing_it(self):
+        with self.assertRaisesRegex(RuntimeError, "owned, delegated cgroup"):
+            compare.cgroup_preflight(None)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            controllers = root / "cgroup.subtree_control"
+            controllers.write_text("cpu\n")
+            with self.assertRaisesRegex(RuntimeError, "delegate cpu\\+memory"):
+                compare.cgroup_preflight(root)
+            self.assertEqual(controllers.read_text(), "cpu\n")
+            controllers.write_text("cpu memory\n")
+            self.assertEqual(compare.cgroup_preflight(root), root.resolve())
+            with mock.patch.object(os, "access", return_value=False):
+                with self.assertRaisesRegex(RuntimeError, "delegate cpu\\+memory"):
+                    compare.cgroup_preflight(root)
+            self.assertEqual(controllers.read_text(), "cpu memory\n")
+
+
 class GateTests(unittest.TestCase):
     def setUp(self):
         self.config = json.loads((Path(__file__).parent / "workloads.json").read_text())
+        self.config["non_inferiority_margins"] = dict.fromkeys(compare.REQUIRED_METRICS, 1.05)
         self.compatibility = {"accepted": True, "optional_mode_gaps": [], "capabilities": dict.fromkeys(compare.REQUIRED_COMPATIBILITY, True)}
         self.provenance = {revision: {"source_revision": revision, "binary_sha256": "a" * 64} for revision in compare.REVISIONS}
         self.provenance["rust"] = {"source_revision": "d" * 40, "binary_sha256": "b" * 64}
@@ -91,9 +121,11 @@ class GateTests(unittest.TestCase):
             for state in self.config["states"]:
                 for name in self.config["workloads"]:
                     for repetition in range(self.config["repetitions"]):
-                        for implementation in ["go", "rust"]:
-                            metrics = dict.fromkeys(compare.REQUIRED_METRICS, 10 if implementation == "go" else 8)
-                            metrics["throughput"] = 10 if implementation == "go" else 12
+                        for implementation in ["go", "go-control", "rust"]:
+                            metrics = dict.fromkeys(compare.REQUIRED_METRICS, 8 if implementation == "rust" else 10)
+                            metrics["throughput"] = 12 if implementation == "rust" else 10
+                            metrics['latencies_ms'] = [8 if implementation == 'rust' else 10] * 1000
+                            metrics['operations'] = 1000
                             self.runs.append({"baseline": revision, "state": state, "workload": name, "repetition": repetition,
                                               "implementation": implementation, "correctness": True, "metrics": metrics,
                                                "limits": copy.deepcopy(self.config), "data_generation": {"sha256": "c" * 64},
@@ -107,16 +139,28 @@ class GateTests(unittest.TestCase):
     def test_complete_repeated_equivalent_evidence(self):
         self.assertTrue(self.gate()["accepted"])
 
+    def test_missing_same_binary_control_cannot_pass_acceptance(self):
+        self.runs = [run for run in self.runs if run["implementation"] != "go-control"]
+        self.assertFalse(self.gate()["accepted"], "uncontrolled pairs must remain diagnostic")
+
+    def test_flat_secondary_metric_without_a_predeclared_margin_is_inconclusive(self):
+        self.config.pop("non_inferiority_margins")
+        for run in self.runs:
+            run["metrics"]["daemon_cpu_seconds"] = 10
+        self.assertFalse(self.gate()["accepted"])
+
     def test_cold_only_performance_regressions_are_reported_without_blocking_warm_acceptance(self):
         for run in self.runs:
             if run["state"] == "cold" and run["implementation"] == "rust":
                 run["metrics"] = dict.fromkeys(compare.REQUIRED_METRICS, 12)
                 run["metrics"]["throughput"] = 8
+                run['metrics']['latencies_ms'] = [12] * 1000
+                run['metrics']['operations'] = 1000
         result = self.gate()
         self.assertTrue(result["accepted"], result["errors"])
         cold = result["summaries"][compare.REVISIONS[0] + "/cold/sequential"]
-        self.assertEqual(cold["p99_ms"]["ratios"], [1.2] * 5)
-        self.assertEqual(cold["throughput"]["ratios"], [0.8] * 5)
+        self.assertEqual(cold["p99_ms"]["ratios"], [1.2] * 8)
+        self.assertEqual(cold["throughput"]["ratios"], [0.8] * 8)
 
     def test_warm_tail_regression_still_blocks_acceptance(self):
         for run in self.runs:
@@ -124,7 +168,7 @@ class GateTests(unittest.TestCase):
                 run["metrics"]["p99_ms"] = 12
         result = self.gate()
         self.assertFalse(result["accepted"])
-        self.assertTrue(any("tail latency" in error and "p99_ms" in error for error in result["errors"]))
+        self.assertTrue(any("p99_ms" in error for error in result["errors"]))
 
     def test_no_missing_results_can_pass(self):
         self.runs.pop()
@@ -137,14 +181,71 @@ class GateTests(unittest.TestCase):
             self.assertFalse(self.gate()["accepted"], metric)
             self.runs[0]["metrics"][metric] = saved
 
+    def test_invalid_throughput_returns_a_failed_gate_instead_of_losing_the_report(self):
+        for value in [None, "unavailable", True, float("nan"), float("inf"), -1, 0]:
+            with self.subTest(value=value):
+                self.runs[0]["metrics"]["throughput"] = value
+                result = self.gate()
+                self.assertFalse(result["accepted"])
+                self.assertTrue(any("throughput" in error for error in result["errors"]))
+
+    def test_boolean_is_not_an_integer_workload_budget(self):
+        config = copy.deepcopy(self.config)
+        config["memory_limit_mb"] = True
+        with self.assertRaisesRegex(ValueError, "positive integer required: memory_limit_mb"):
+            compare.validate(config)
+
+    def test_invalid_writer_file_count_is_rejected(self):
+        for value in [0, -1, True, 1.5]:
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "writer_files"):
+                compare.validate(dict(self.config, writer_files=value))
+
+    def test_three_arm_schedule_balances_every_position_without_dropping_runs(self):
+        config = dict(self.config, repetitions=6, states=["warm"], workloads=["random"])
+        cases = list(compare._cases(config, None, False))
+        self.assertEqual(len(cases), 2 * 6 * 3)
+        for revision in compare.REVISIONS:
+            orders = [[case["implementation"] for case in cases
+                       if case["baseline"] == revision and case["repetition"] == repetition]
+                      for repetition in range(6)]
+            for position in range(3):
+                self.assertEqual(sorted(order[position] for order in orders),
+                                 sorted(["go", "go-control", "rust"] * 2))
+        self.assertEqual(len(list(compare._cases(config, None, True))), 3)
+
+    def test_invalid_practical_margin_preserves_a_failed_report(self):
+        for value in [None, {"unknown": 1.05}, {"p99_ms": True}, {"p99_ms": 0.99}]:
+            with self.subTest(value=value):
+                self.config["non_inferiority_margins"] = value
+                self.assertFalse(self.gate()["accepted"])
+
+    def test_zero_or_overflowing_cost_ratios_cannot_crash_or_pass_the_gate(self):
+        for metric, value in [("daemon_cpu_seconds", 0), ("p99_ms", 1e308)]:
+            with self.subTest(metric=metric):
+                for run in self.runs:
+                    run["metrics"][metric] = value if run["implementation"] == "rust" else 1e-308
+                self.assertFalse(self.gate()["accepted"])
+
+    def test_noninteger_repetitions_and_boolean_schema_fail_without_losing_the_report(self):
+        for field, value in [("repetitions", 5.5), ("repetitions", "5"),
+                             ("repetitions", None), ("schema", True)]:
+            with self.subTest(field=field, value=value):
+                config = dict(self.config, **{field: value})
+                result = compare.evaluate(config, self.runs, self.compatibility, self.provenance)
+                self.assertFalse(result["accepted"])
+                self.assertTrue(result["errors"])
+                self.assertEqual(result["summaries"], {})
+
     def test_unsupported_required_capability_blocks_acceptance(self):
         self.compatibility["capabilities"]["patch"] = False
         self.assertFalse(self.gate()["accepted"])
 
-    def test_one_unfavorable_sample_cannot_be_discarded(self):
+    def test_one_noisy_memory_peak_does_not_veto_repeated_improvement(self):
         warm = next(run for run in self.runs if run["state"] == "warm" and run["implementation"] == "rust")
         warm["metrics"]["rss_peak_bytes"] = 11
-        self.assertFalse(self.gate()["accepted"])
+        self.assertTrue(self.gate()["accepted"])
+        self.assertIn(1.1, next(summary for key, summary in self.gate()["summaries"].items()
+                               if "/warm/" in key)["rss_peak_bytes"]["ratios"])
 
     def test_changed_budget_baseline_or_tail_latency_blocks_acceptance(self):
         self.runs[0]["limits"]["memory_limit_mb"] = 32
@@ -156,7 +257,7 @@ class GateTests(unittest.TestCase):
     def test_small_dataset_or_shortened_repetition_is_rejected(self):
         self.config["repetitions"] = 4
         self.assertFalse(self.gate()["accepted"])
-        self.config["repetitions"] = 5
+        self.config["repetitions"] = 8
         self.config["dataset_bytes"] = 1
         self.assertFalse(self.gate()["accepted"])
 
@@ -176,7 +277,7 @@ class GateTests(unittest.TestCase):
         self.assertFalse(self.gate()["accepted"])
 
     def test_actual_rust_payload_budget_must_match(self):
-        self.runs[1]["effective_budgets"]["payload_limit_bytes"] = 33554432
+        next(run for run in self.runs if run["implementation"] == "rust")["effective_budgets"]["payload_limit_bytes"] = 33554432
         self.assertFalse(self.gate()["accepted"])
 
     def test_missing_cpu_counters_cannot_be_reported_as_a_win(self):
@@ -188,7 +289,54 @@ class GateTests(unittest.TestCase):
             run["metrics"]["cgroup_cpu_seconds"] = 12 if run["implementation"] == "rust" else 10
         self.assertFalse(self.gate()["accepted"])
 
+    def test_allocator_and_kernel_components_cannot_hide_behind_total_memory(self):
+        for metric in ['allocator_peak_bytes', 'allocator_steady_bytes',
+                       'file_cache_steady_bytes', 'kernel_steady_bytes']:
+            with self.subTest(metric=metric):
+                for run in self.runs:
+                    if run['state'] == 'warm' and run['implementation'] == 'rust':
+                        run['metrics'][metric] = 12
+                self.assertFalse(self.gate()['accepted'])
+                for run in self.runs:
+                    if run['state'] == 'warm' and run['implementation'] == 'rust':
+                        run['metrics'][metric] = 8
+
+    def test_favorable_mean_run_percentiles_do_not_override_worse_pooled_tail(self):
+        for run in self.runs:
+            if run['state'] == 'warm' and run['implementation'] == 'rust':
+                metrics = run['metrics']
+                metrics['latencies_ms'] = [4] * 1000
+                metrics.update(p50_ms=4, p95_ms=4, p99_ms=4)
+                if run['repetition'] < 2:
+                    metrics['latencies_ms'] = [4] * 940 + [12] * 60
+                    metrics.update(p95_ms=12, p99_ms=12)
+        result = self.gate()
+        self.assertFalse(result['accepted'])
+        self.assertTrue(any('pooled' in error and 'p99_ms' in error for error in result['errors']))
+
+    def test_missing_or_invalid_raw_latencies_cannot_pass_a_pooled_gate(self):
+        warm = next(run for run in self.runs if run['state'] == 'warm' and run['implementation'] == 'rust')
+        for values in [None, [], [float('nan')], [True], [-1]]:
+            with self.subTest(values=values):
+                warm['metrics']['latencies_ms'] = values
+                warm['metrics']['operations'] = len(values) if isinstance(values, list) else 1000
+                self.assertFalse(self.gate()['accepted'])
+
+    def test_raw_latency_operation_count_must_be_an_integer_not_a_boolean_or_float(self):
+        warm = next(run for run in self.runs if run['state'] == 'warm' and run['implementation'] == 'rust')
+        for count, values in [(True, [8]), (1000.0, [8] * 1000)]:
+            with self.subTest(count=count):
+                warm['metrics']['operations'] = count
+                warm['metrics']['latencies_ms'] = values
+                self.assertFalse(self.gate()['accepted'])
+
     def test_zero_cpu_at_counter_precision_does_not_require_division_by_zero(self):
         for run in self.runs:
             run["metrics"]["daemon_cpu_seconds"] = 0
         self.assertTrue(self.gate()["accepted"])
+
+    def test_zero_file_and_kernel_components_are_a_non_regression(self):
+        for run in self.runs:
+            run['metrics']['file_cache_steady_bytes'] = 0
+            run['metrics']['kernel_steady_bytes'] = 0
+        self.assertTrue(self.gate()['accepted'])

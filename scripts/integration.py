@@ -281,9 +281,10 @@ def exercise(path, client, bucket, prefix, source, endpoint, local, checks=None)
             actual = os.pread(stream.fileno(), length, offset)
             assert actual == expected_range(offset, min(length, 16 * 1024 * 1024 - offset)), "unaligned Range/EOF"
         with mmap.mmap(stream.fileno(), 4096, access=mmap.ACCESS_READ) as mapped:
+            stream.close()
             assert mapped[:] == expected_range(0, 4096), "shared read-only mmap"
     assert sorted(p.name for p in (path / "implicit").iterdir()) == [f"{i:06d}" for i in range(32)], "complete directory traversal"
-    checks += ["full-checksum", "range-eof", "mmap", "implicit-directory"]
+    checks += ["full-checksum", "range-eof", "mmap", "mmap-after-fd-close", "implicit-directory"]
     port = free_port()
     http = subprocess.Popen([sys.executable, str(ROOT / "scripts/http_reader.py"), "--file", str(path / "payload"), "--port", str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:

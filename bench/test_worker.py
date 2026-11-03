@@ -60,3 +60,26 @@ class WorkerWarmupTests(unittest.TestCase):
             self.execute(True)
         self.assertEqual(self.output.getvalue(), "")
         self.assertTrue(self.client_closed)
+
+    def test_real_worker_protocol_reports_checked_metadata_and_stops_cleanly(self):
+        environment = compare.integration.private_environment("fixture", "fixture")
+        spec = dict(self.spec, warmup=True)
+        with compare.worker(spec, environment, None, self.path / "client.log") as process:
+            process.stdin.write("start\n")
+            process.stdin.flush()
+            message = compare.read_message(process, 5)
+            self.assertNotIn("error", message)
+            self.assertEqual(message["metrics"]["operations"], 2)
+            self.assertEqual(message["metrics"]["bytes"], 0)
+            self.assertEqual(len(message["metrics"]["latencies_ms"]), 2)
+            process.stdin.write("stop\n")
+            process.stdin.flush()
+        self.assertEqual(process.returncode, 0)
+
+    def test_real_worker_does_not_publish_ready_after_failed_warmup(self):
+        (self.path / "implicit/000000").write_bytes(b"bad")
+        environment = compare.integration.private_environment("fixture", "fixture")
+        with self.assertRaisesRegex(RuntimeError, "worker exited without a result"):
+            with compare.worker(dict(self.spec, warmup=True), environment, None, self.path / "client.log"):
+                self.fail("invalid warmup must not admit measurement")
+        self.assertIn("metadata size", (self.path / "client.log").read_text())

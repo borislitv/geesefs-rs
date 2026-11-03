@@ -145,6 +145,19 @@ pub trait Store: Send + Sync + 'static {
         delimiter: Option<&str>,
         token: Option<&str>,
     ) -> Result<ListPage>;
+
+    /// Skip already consumed names when the protocol supports an exclusive key.
+    /// Callers still filter the bound: adapters without this optimization may
+    /// return earlier entries, and continuation tokens remain protocol-owned.
+    async fn list_after(
+        &self,
+        prefix: &str,
+        delimiter: Option<&str>,
+        token: Option<&str>,
+        _after: Option<&str>,
+    ) -> Result<ListPage> {
+        self.list(prefix, delimiter, token).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -253,6 +266,15 @@ impl Store for s3::S3 {
         token: Option<&str>,
     ) -> Result<ListPage> {
         self.list(prefix, delimiter, token).await
+    }
+    async fn list_after(
+        &self,
+        prefix: &str,
+        delimiter: Option<&str>,
+        token: Option<&str>,
+        after: Option<&str>,
+    ) -> Result<ListPage> {
+        self.list_after(prefix, delimiter, token, after).await
     }
 }
 pub mod auth;

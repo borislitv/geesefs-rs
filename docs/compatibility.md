@@ -42,12 +42,15 @@ tests; actual-service acceptance remains absent.
 These and all-reference CLI parity remain required optional Linux/S3 paths;
 see [backend options and exact limitations](backend-options.md).
 FIFO creation and root directory fsync were exercised on mounted Rust and Go.
-Rust and both pinned Go binaries return EIO for hardlink-as-symlink on Linux 6.8,
+The earlier Rust and both pinned Go binaries return EIO for hardlink-as-symlink on Linux 6.8,
 while the symlink becomes visible after the failed call. The kernel's
 [`fuse_link` / `create_new_entry`](https://github.com/torvalds/linux/blob/v6.8/fs/fuse/dir.c)
 requires the reply's file type to match the source inode; replying with a symlink
 for a regular source violates that contract. This shared reference limitation is
 not hardlink acceptance and must not be hidden by weakening the mounted probe.
+The corrected Rust callback returns EOPNOTSUPP before creating any alias, also
+when the compatibility flag is supplied. A Linux 7.0 native regression checks both
+errno and absence of local/backend side effects; hardlink compatibility stays open.
 
 Both pinned Go sources also explain the observed open-file fsync recovery gap:
 `Inode.SyncFile` clears `forceFlush` before returning a stored `flushError`, while
@@ -56,12 +59,26 @@ The retry interval alone therefore does not guarantee progress on that handle.
 The mounted 75-second failures remain failures; increasing the deadline or
 closing/reopening the file would not establish recovery for the original workload.
 See the public [packaged reference source](https://github.com/yandex-cloud/geesefs/blob/80c214ef14f620d93407454fc76ca01dd71fa25f/core/file.go).
+The separate 2026-10-31 close/recovery probe observes full backend bytes after
+43.37/43.44 seconds for the two unchanged Go binaries and 0.26 seconds for Rust.
+This confirms a different recovery boundary without relabelling the failed open
+handle probe. All three also pass literal nginx 1.28.3 full/Range/EOF checks.
+
+Separate [native permission-freshness probes](metadata-expiry-diagnosis.md) expose
+another reference limitation: both pinned Go binaries retain old permissions after
+an equal stat TTL when backend metadata changes but bytes/size/ETag do not. The
+stat-only case receives fresh permission metadata in HEAD but still returns the
+prior mode; listing before stat likewise fails. Rust returns the new mode, while
+all three pass the changed-ETag positive control. This disposable-fixture result
+does not establish actual-service acceptance. Do not weaken Rust metadata freshness
+to reproduce the reference's lower HEAD count.
 
 ## Reference contracts and acceptance status
 
 | Contract | Reference requirement | Status |
 | --- | --- | --- |
 | fstab | Exactly `program bucket mount -o comma-options`: dash-prefixed tokens become CLI flags, other tokens stay mount options | Normalizer/parser tests; foreground mount dispatch implemented |
+| cross-UID access | Explicit `allow_other` admits other UIDs while preserving kernel permission checks; default remains owner-only | Supported fuser session policy, parser regression and three real-FUSE UID/mode byte-access cases; full target-service acceptance outstanding |
 | metadata | Lowercase escaped names before path-unescape; malformed key/value escapes omit that pair; plus is literal; empty decoded map is known empty | Adapter tests include Unicode printing categories, invalid UTF-8 RuneError and per-byte escaping |
 | defaults | endpoint https://storage.yandexcloud.net; region us-east-1; memory 1000 MiB; entry 100000; modes 0755/0644; symlink key --symlink-target | Parsed subset tested |
 | attributes | Configurable keys uid/gid/mode/rdev/mtime; integer Unix seconds, POSIX mode conversion, cloud/user xattrs; symlink target in metadata | Implemented subset; mounted mode/mtime/symlink/user xattr/FIFO checks on Rust and Go; full cloud/attribute matrix outstanding |
@@ -71,14 +88,23 @@ See the public [packaged reference source](https://github.com/yandex-cloud/geese
 | PATCH | Conditional owned mutation and updated generation metadata | Enable/prefer/drop-conflict writer policies, configured part boundaries, partial progress, metadata replacement, cancellation and explicit-conflict recovery tests; actual-service/imported-layout acceptance outstanding |
 | scheduling/cache | Configurable single/multipart tiers, bounded parallel work, effective read windows and cache policy | Tier/object bounds, virtual 60 GiB layout, streamed 12 MiB real SDK PUT/checksum, parallel copy/parts and 100 MiB read-window tests; effective owner-budget report available; no mounted/performance acceptance for this tranche |
 | read | Conditional unaligned Range; exact bytes; preserve stored gzip; EOF/short-body errors; release bodies | HTTP contracts and actual mounted full-byte/Range/EOF/mmap checks |
-| namespace | Confined implicit/explicit dirs, paged traversal, live stable inode IDs, forget, stale LIST tombstones | Implemented; deterministic paging, stale LIST, implicit directory and replaced-inode eviction tests |
+| namespace | Confined implicit/explicit dirs, paged traversal, live stable inode IDs, forget, stale LIST tombstones | Core generation/TTL tests plus native bounded READDIRPLUS, lookup ownership/error rollback, marker attrs and low-entry-limit pressure |
 | write | Sparse zero holes, truncate/random overwrite/read-after-write, versioned snapshots, immutable flush generations, fsync completion barrier | Implemented subset; deterministic generation tests and mounted fresh S3 byte checks; full durability matrix unaccepted |
 | rename/delete | Copy then delete, source condition, rename before close, delete during upload, no resurrection | Implemented; cached descendant locking, destination ETag refresh, paged partial-directory retry and in-flight commit tests; mounted file rename |
 | pressure | Pinned and queued allocations charged, reserved flush progress, bounded admission | Owner charging, reserved flush lane, full dirty-budget progress and cancelled multipart cleanup tests; not a whole-process RSS bound |
 | FUSE | Exactly-once owned replies, bounded scheduling, xattrs/fallocate/fsyncdir/mmap/RO/shutdown | fuser callbacks implemented; actual mount/unmount, mmap, fsyncdir exercised; full callback/failure matrix outstanding |
-| clients | rsync full/delta, nginx full/Range, concurrent writers, injected upload/copy/completion failures | Actual rsync and aiohttp full/Range checks on Rust/Go; Rust mounted fsync recovery passes; Go open-file recovery remains EAGAIN through 75-second deadline; no literal nginx or all-xfstests claim |
-| performance | Both verified Go baselines, unchanged budgets, repeated cold/warm work, all accounting and tails | Selected read comparisons measured; representative matrix and p99 gate remain unaccepted |
+| clients | rsync full/delta, nginx full/Range, concurrent writers, injected upload/copy/completion failures | Actual rsync, aiohttp and nginx 1.28.3 full/Range/EOF checks on Rust and both Go binaries; Rust mounted fsync recovery passes; Go open-file recovery remains EAGAIN through 75-second deadline; no all-xfstests claim |
+| performance | Go 0.43.9 primary reference, unchanged budgets, repeated cold/warm work, all accounting and tails; unmerged Go experiment historical only | Selected read comparisons measured; representative matrix and p99 gate remain unaccepted |
 
 No atomic S3 rename or writable-unlinked POSIX behavior is promised by the
 reference. A failure of required optional behavior leaves overall compatibility
 unaccepted even when ordinary operations work.
+
+## Actual LXC read-only scope — 2026-11-02
+
+An isolated fixture on Linux `5.15.179-15.2mds` passes the installed nginx 1.24.0
+full/Range/EOF/416 and rsync 3.2.7 full/delta byte checks with buffered and opt-in
+read-only direct I/O. Shared read-only mmap passes buffered, but returns `ENODEV`
+with direct I/O on this kernel. Do not treat the modes as equivalent for mmap
+consumers. These checks use a disposable local backend, not production S3 or the
+served nginx/golist configuration. [Scope and provenance](performance-target-preflight.md).

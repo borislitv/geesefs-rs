@@ -13,13 +13,14 @@ use aws_sdk_s3::{
     error::ProvideErrorMetadata,
     operation::get_object::GetObjectOutput,
     primitives::ByteStream,
-    types::{CompletedMultipartUpload, CompletedPart},
+    types::{CommonPrefix, CompletedMultipartUpload, CompletedPart, Object},
 };
 use futures_util::TryStreamExt;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 
+use super::extended_list::{ListPage, ListedObject, MAX_PAGE_ENTRIES};
 use crate::{
     budget::{Block, Budget, Reservation},
     config::{Config, ListType, SignatureVersion},
@@ -79,6 +80,95 @@ pub struct ObjectProperties {
 pub struct PatchResult {
     pub etag: String,
     pub last_modified: aws_smithy_types::DateTime,
+}
+
+struct StandardListPage {
+    objects: Vec<Object>,
+    prefixes: Vec<CommonPrefix>,
+    truncated: bool,
+    next: Option<String>,
+}
+
+impl StandardListPage {
+    fn decode(mut self, prefix: &str, v1: bool, requested: Option<&str>) -> Result<ListPage> {
+        if self.objects.len() + self.prefixes.len() > MAX_PAGE_ENTRIES {
+            return Err(Error::InvalidResponse("listing entry limit".into()));
+        }
+        if self.truncated && self.next.is_none() && v1 {
+            self.next = self
+                .objects
+                .iter()
+                .filter_map(|o| o.key.clone())
+                .chain(self.prefixes.iter().filter_map(|p| p.prefix.clone()))
+                .max();
+        }
+        Ok(ListPage {
+            next_token: listing_token(self.truncated, self.next, requested)?,
+            objects: listing_objects(self.objects, prefix)?,
+            common_prefixes: listing_prefixes(self.prefixes, prefix)?,
+        })
+    }
+}
+
+fn listing_token(
+    truncated: bool,
+    next: Option<String>,
+    requested: Option<&str>,
+) -> Result<Option<String>> {
+    if truncated
+        && next
+            .as_deref()
+            .is_none_or(|s| s.is_empty() || Some(s) == requested)
+    {
+        return Err(Error::InvalidResponse(
+            "missing/repeated listing token".into(),
+        ));
+    }
+    Ok(if truncated { next } else { None })
+}
+
+fn listing_objects(objects: Vec<Object>, prefix: &str) -> Result<Vec<ListedObject>> {
+    let mut previous: Option<String> = None;
+    objects
+        .into_iter()
+        .map(|object| {
+            let key = object
+                .key
+                .ok_or_else(|| Error::InvalidResponse("listing missing key".into()))?;
+            if !key.starts_with(prefix) || previous.as_ref().is_some_and(|p| *p >= key) {
+                return Err(Error::InvalidResponse(
+                    "unordered/unconfined listing".into(),
+                ));
+            }
+            previous = Some(key.clone());
+            let size = object
+                .size
+                .and_then(|s| u64::try_from(s).ok())
+                .ok_or_else(|| Error::InvalidResponse("listing invalid size".into()))?;
+            Ok(ListedObject {
+                key,
+                size,
+                etag: object.e_tag,
+                last_modified: object.last_modified,
+                metadata: None,
+            })
+        })
+        .collect()
+}
+
+fn listing_prefixes(prefixes: Vec<CommonPrefix>, prefix: &str) -> Result<Vec<String>> {
+    prefixes
+        .into_iter()
+        .map(|common| {
+            let key = common
+                .prefix
+                .ok_or_else(|| Error::InvalidResponse("listing missing prefix".into()))?;
+            if !key.starts_with(prefix) || !key.ends_with('/') {
+                return Err(Error::InvalidResponse("unconfined prefix".into()));
+            }
+            Ok(key)
+        })
+        .collect()
 }
 
 fn backend(operation: &'static str, code: Option<&str>, error: impl std::fmt::Display) -> Error {
@@ -677,131 +767,130 @@ impl S3 {
         delimiter: Option<&str>,
         token: Option<&str>,
     ) -> Result<super::extended_list::ListPage> {
-        use super::extended_list::{ListPage, ListedObject, MAX_PAGE_ENTRIES};
+        self.list_after(relative_prefix, delimiter, token, None)
+            .await
+    }
+
+    pub async fn list_after(
+        &self,
+        relative_prefix: &str,
+        delimiter: Option<&str>,
+        token: Option<&str>,
+        after: Option<&str>,
+    ) -> Result<super::extended_list::ListPage> {
         let prefix = self.key(relative_prefix)?;
-        let mut mode = self.list_mode.load(Ordering::Relaxed);
-        if mode == 3 {
-            match self.list_extended(&prefix, delimiter, token).await {
-                Ok(mut page) => {
-                    self.relativize_page(&mut page)?;
-                    return Ok(page);
-                }
-                Err(Error::Backend { ref code, .. })
-                    if super::extended_list::permits_standard_fallback(code) && token.is_none() =>
-                {
-                    self.list_mode.store(1, Ordering::Relaxed);
-                    mode = 1;
-                }
-                Err(error) => return Err(error),
-            }
+        let after = after.map(|key| self.key(key)).transpose()?;
+        if let Some(mut page) = self.extended_or_fallback(&prefix, delimiter, token).await? {
+            self.relativize_page(&mut page)?;
+            return Ok(page);
         }
-        let (objects, prefixes, truncated, mut next) = if mode == 2 {
-            let page = self
-                .client
-                .list_objects_v2()
-                .bucket(&self.bucket)
-                .prefix(&prefix)
-                .set_delimiter(delimiter.map(str::to_owned))
-                .set_continuation_token(token.map(str::to_owned))
-                .max_keys(1000)
-                .send()
-                .await
-                .map_err(|e| {
-                    backend(
-                        "ListObjectsV2",
-                        e.as_service_error().and_then(|e| e.code()),
-                        &e,
-                    )
-                })?;
-            (
-                page.contents.unwrap_or_default(),
-                page.common_prefixes.unwrap_or_default(),
-                page.is_truncated.unwrap_or(false),
-                page.next_continuation_token,
-            )
-        } else {
-            let page = self
-                .client
-                .list_objects()
-                .bucket(&self.bucket)
-                .prefix(&prefix)
-                .set_delimiter(delimiter.map(str::to_owned))
-                .set_marker(token.map(str::to_owned))
-                .max_keys(1000)
-                .send()
-                .await
-                .map_err(|e| {
-                    backend(
-                        "ListObjects",
-                        e.as_service_error().and_then(|e| e.code()),
-                        &e,
-                    )
-                })?;
-            (
-                page.contents.unwrap_or_default(),
-                page.common_prefixes.unwrap_or_default(),
-                page.is_truncated.unwrap_or(false),
-                page.next_marker,
-            )
-        };
-        if objects.len() + prefixes.len() > MAX_PAGE_ENTRIES {
-            return Err(Error::InvalidResponse("listing entry limit".into()));
-        }
-        if truncated && next.is_none() && mode == 1 {
-            next = objects
-                .iter()
-                .filter_map(|o| o.key.clone())
-                .chain(prefixes.iter().filter_map(|p| p.prefix.clone()))
-                .max();
-        }
-        if truncated
-            && next
-                .as_deref()
-                .is_none_or(|s| s.is_empty() || Some(s) == token)
-        {
-            return Err(Error::InvalidResponse(
-                "missing/repeated listing token".into(),
-            ));
-        }
-        let mut page = ListPage {
-            objects: Vec::with_capacity(objects.len()),
-            common_prefixes: Vec::with_capacity(prefixes.len()),
-            next_token: if truncated { next } else { None },
-        };
-        let mut previous: Option<String> = None;
-        for object in objects {
-            let key = object
-                .key
-                .ok_or_else(|| Error::InvalidResponse("listing missing key".into()))?;
-            if !key.starts_with(&prefix) || previous.as_ref().is_some_and(|p| *p >= key) {
-                return Err(Error::InvalidResponse(
-                    "unordered/unconfined listing".into(),
-                ));
-            }
-            previous = Some(key.clone());
-            let size = object
-                .size
-                .and_then(|s| u64::try_from(s).ok())
-                .ok_or_else(|| Error::InvalidResponse("listing invalid size".into()))?;
-            page.objects.push(ListedObject {
-                key,
-                size,
-                etag: object.e_tag,
-                last_modified: object.last_modified,
-                metadata: None,
-            });
-        }
-        for common in prefixes {
-            let key = common
-                .prefix
-                .ok_or_else(|| Error::InvalidResponse("listing missing prefix".into()))?;
-            if !key.starts_with(&prefix) || !key.ends_with('/') {
-                return Err(Error::InvalidResponse("unconfined prefix".into()));
-            }
-            page.common_prefixes.push(key);
-        }
+        let mut page = self
+            .standard_list(&prefix, delimiter, token, after.as_deref())
+            .await?;
         self.relativize_page(&mut page)?;
         Ok(page)
+    }
+
+    async fn standard_list(
+        &self,
+        prefix: &str,
+        delimiter: Option<&str>,
+        token: Option<&str>,
+        after: Option<&str>,
+    ) -> Result<ListPage> {
+        let mode = self.list_mode.load(Ordering::Relaxed);
+        let wire = if mode == 2 {
+            self.list_v2(prefix, delimiter, token, after).await?
+        } else {
+            self.list_v1(prefix, delimiter, token.or(after)).await?
+        };
+        let requested = if mode == 1 { token.or(after) } else { token };
+        wire.decode(prefix, mode == 1, requested)
+    }
+
+    async fn extended_or_fallback(
+        &self,
+        prefix: &str,
+        delimiter: Option<&str>,
+        token: Option<&str>,
+    ) -> Result<Option<ListPage>> {
+        if self.list_mode.load(Ordering::Relaxed) != 3 {
+            return Ok(None);
+        }
+        match self.list_extended(prefix, delimiter, token).await {
+            Ok(page) => Ok(Some(page)),
+            Err(Error::Backend { ref code, .. })
+                if super::extended_list::permits_standard_fallback(code) && token.is_none() =>
+            {
+                self.list_mode.store(1, Ordering::Relaxed);
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn list_v2(
+        &self,
+        prefix: &str,
+        delimiter: Option<&str>,
+        token: Option<&str>,
+        after: Option<&str>,
+    ) -> Result<StandardListPage> {
+        let page = self
+            .client
+            .list_objects_v2()
+            .bucket(&self.bucket)
+            .prefix(prefix)
+            .set_delimiter(delimiter.map(str::to_owned))
+            .set_continuation_token(token.map(str::to_owned))
+            .set_start_after(after.filter(|_| token.is_none()).map(str::to_owned))
+            .max_keys(1000)
+            .send()
+            .await
+            .map_err(|e| {
+                backend(
+                    "ListObjectsV2",
+                    e.as_service_error().and_then(|e| e.code()),
+                    &e,
+                )
+            })?;
+        Ok(StandardListPage {
+            objects: page.contents.unwrap_or_default(),
+            prefixes: page.common_prefixes.unwrap_or_default(),
+            truncated: page.is_truncated.unwrap_or(false),
+            next: page.next_continuation_token,
+        })
+    }
+
+    async fn list_v1(
+        &self,
+        prefix: &str,
+        delimiter: Option<&str>,
+        marker: Option<&str>,
+    ) -> Result<StandardListPage> {
+        let page = self
+            .client
+            .list_objects()
+            .bucket(&self.bucket)
+            .prefix(prefix)
+            .set_delimiter(delimiter.map(str::to_owned))
+            .set_marker(marker.map(str::to_owned))
+            .max_keys(1000)
+            .send()
+            .await
+            .map_err(|e| {
+                backend(
+                    "ListObjects",
+                    e.as_service_error().and_then(|e| e.code()),
+                    &e,
+                )
+            })?;
+        Ok(StandardListPage {
+            objects: page.contents.unwrap_or_default(),
+            prefixes: page.common_prefixes.unwrap_or_default(),
+            truncated: page.is_truncated.unwrap_or(false),
+            next: page.next_marker,
+        })
     }
 
     fn relativize_page(&self, page: &mut super::extended_list::ListPage) -> Result<()> {

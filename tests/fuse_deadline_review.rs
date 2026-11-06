@@ -785,3 +785,124 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
         assert!(!stderr.contains("private-backend-text"));
     }
 }
+
+/// Same executable on/off control. This includes fuser wire dispatch, the client,
+/// runtime and a gated-store implementation, not a kernel mount or real S3.
+#[test]
+#[ignore = "explicit observer-cost diagnostic; not mounted or Go-relative acceptance"]
+fn observer_cost_diagnostic() {
+    use std::{sync::atomic::Ordering, time::Instant};
+    let mode = std::env::var("GEESEFS_OBSERVER_MODE").unwrap_or_else(|_| "cached".into());
+    assert!(["cached", "cold", "metadata"].contains(&mode.as_str()));
+    let enabled = std::env::var("GEESEFS_OBSERVER_ENABLED").unwrap_or_else(|_| "1".into()) == "1";
+    let calls: usize = std::env::var("GEESEFS_OBSERVER_CALLS")
+        .unwrap_or_else(|_| "25000".into())
+        .parse()
+        .unwrap();
+    assert!((1000..=250000).contains(&calls));
+    let (runtime, store, fs) = configured_fixture(|config| {
+        config.request_timeout = Duration::from_secs(10);
+        config.max_requests = 128;
+        config.no_diagnostics = !enabled;
+        config.stat_cache_ttl = if mode == "metadata" {
+            Duration::ZERO
+        } else {
+            Duration::from_secs(3600)
+        };
+        config.read_ahead = 128;
+        config.read_ahead_small = 128;
+        config.read_ahead_large = 128;
+        config.read_ahead_parallel = 128;
+    });
+    const SIZE: u64 = 1 << 40;
+    store.seed("virtual", &[0; 16]);
+    store.virtual_size.store(SIZE, Ordering::Relaxed);
+    let ino = runtime.block_on(fs.lookup(1, "virtual")).unwrap().ino;
+    let mut session = Session::new(fs.clone(), &runtime);
+    let handle = open(&mut session, ino);
+    let mut buffer = [0u8; 8192];
+    let mut operation = |session: &mut Session, call: usize| {
+        let request = if mode == "metadata" {
+            session.send(3, ino, &[0; 16])
+        } else {
+            let offset = if mode == "cold" {
+                call as u64 * 128 * 1024
+            } else {
+                0
+            };
+            read_range(session, ino, handle, offset, 4096)
+        };
+        let size = session.peer.recv(&mut buffer).unwrap();
+        let reply = &buffer[..size];
+        assert_eq!((unique(reply), errno(reply)), (request, 0));
+        if mode == "metadata" {
+            assert_eq!(u64::from_ne_bytes(reply[40..48].try_into().unwrap()), SIZE);
+        } else {
+            assert_eq!(&reply[16..], &[0u8; 4096]);
+        }
+    };
+    for call in 0..200 {
+        operation(&mut session, call);
+    }
+    runtime.block_on(runtime.spawn(async {})).unwrap();
+    let before_heads = store.head_starts.load(Ordering::Relaxed);
+    let before_reads = store.read_calls.load(Ordering::Relaxed);
+    let cpu_ticks = || {
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+        let fields: Vec<_> = stat
+            .rsplit_once(')')
+            .unwrap()
+            .1
+            .split_whitespace()
+            .collect();
+        [
+            fields[11].parse::<u64>().unwrap(),
+            fields[12].parse::<u64>().unwrap(),
+        ]
+    };
+    let before_cpu = cpu_ticks();
+    let start = Instant::now();
+    let mut latencies = Vec::with_capacity(calls);
+    for call in 200..200 + calls {
+        let start = Instant::now();
+        operation(&mut session, call);
+        latencies.push(start.elapsed().as_nanos());
+    }
+    let wall = start.elapsed().as_nanos();
+    runtime.block_on(runtime.spawn(async {})).unwrap();
+    let after_cpu = cpu_ticks();
+    let reads = store.read_calls.load(Ordering::Relaxed) - before_reads;
+    let heads = store.head_starts.load(Ordering::Relaxed) - before_heads;
+    assert_eq!(reads, if mode == "cold" { calls } else { 0 });
+    assert_eq!(heads, if mode == "metadata" { calls } else { 0 });
+    let start = Instant::now();
+    let mut scrape_bytes = 0;
+    let mut series = 0;
+    for _ in 0..100 {
+        let text = geesefs_rs::metrics::render(&fs).unwrap();
+        scrape_bytes = text.len();
+        series = text.lines().filter(|line| !line.starts_with('#')).count();
+        assert!(!text.contains("virtual\""));
+    }
+    let scrape_ns = start.elapsed().as_nanos() / 100;
+    let mut sorted = latencies.clone();
+    sorted.sort_unstable();
+    let percentile = |percent: usize| sorted[(sorted.len() * percent).div_ceil(100) - 1];
+    println!(
+        "observer_cost_json={}",
+        serde_json::json!({
+            "mode": mode, "enabled": enabled, "calls": calls, "wall_ns": wall,
+            "cpu_user_ticks": after_cpu[0] - before_cpu[0], "cpu_system_ticks": after_cpu[1] - before_cpu[1],
+            "clock_ticks_per_second": rustix::param::clock_ticks_per_second(),
+            "latencies_ns": latencies, "p50_ns": percentile(50), "p95_ns": percentile(95), "p99_ns": percentile(99),
+            "backend_heads": heads, "backend_reads": reads, "scrape_mean_ns": scrape_ns,
+            "scrape_bytes": scrape_bytes, "series": series,
+            "allocator": if cfg!(feature = "system-allocator") { "system" } else { "jemalloc" },
+            "process_status": std::fs::read_to_string("/proc/self/status").unwrap().lines()
+                .filter(|line| line.starts_with("VmRSS:") || line.starts_with("VmHWM:")).collect::<Vec<_>>(),
+            "allocation": geesefs_rs::metrics::allocation_stats(),
+            "scope": "whole fixture process: client, fuser, runtime and memory store; no kernel FUSE or S3"
+        })
+    );
+    session.close();
+}

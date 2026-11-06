@@ -435,6 +435,124 @@ async fn reconfiguring_observation_does_not_retain_an_old_sdk_observer() {
 }
 
 #[tokio::test]
+#[ignore = "explicit SDK observer-cost diagnostic; localhost HTTP, not production or Go acceptance"]
+async fn sdk_observer_cost_diagnostic() {
+    use std::time::Instant;
+    let enabled = std::env::var("GEESEFS_OBSERVER_ENABLED").unwrap_or_else(|_| "1".into()) == "1";
+    let calls: usize = std::env::var("GEESEFS_OBSERVER_CALLS")
+        .unwrap_or_else(|_| "2000".into())
+        .parse()
+        .unwrap();
+    assert!((100..=10000).contains(&calls));
+    const LENGTH: usize = 128 * 1024;
+    const WARM: usize = 100;
+    let server = Server::http("127.0.0.1:0").unwrap();
+    // Reuse the SDK client and connection rather than benchmark client setup.
+    let client = aws_sdk_s3::Config::builder()
+        .behavior_version(BehaviorVersion::latest())
+        .region(Region::new("us-east-1"))
+        .credentials_provider(Credentials::new(
+            "disposable-access",
+            "disposable-secret",
+            None,
+            None,
+            "test-only",
+        ))
+        .endpoint_url(format!("http://{}", server.server_addr()))
+        .force_path_style(true)
+        .build();
+    let (store, fs) = observed_backend_enabled(
+        S3::new(Client::from_conf(client), "bucket".into(), "prefix".into()).unwrap(),
+        enabled,
+    );
+    let task = std::thread::spawn(move || {
+        for _ in 0..calls + WARM {
+            let request = server
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .expect("missing diagnostic GET");
+            assert_eq!(request.method().as_str(), "GET");
+            assert!(
+                request
+                    .headers()
+                    .iter()
+                    .any(|h| h.field.equiv("range") && h.value.as_str() == "bytes=0-131071")
+            );
+            request
+                .respond(
+                    Response::from_data(vec![73; LENGTH])
+                        .with_status_code(206)
+                        .with_header(
+                            Header::from_bytes("Content-Range", "bytes 0-131071/131072").unwrap(),
+                        )
+                        .with_chunked_threshold(usize::MAX),
+                )
+                .unwrap();
+        }
+    });
+    let budget = Budget::new(LENGTH).unwrap();
+    let head = head(LENGTH as u64);
+    let cpu_ticks = || {
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+        let fields: Vec<_> = stat
+            .rsplit_once(')')
+            .unwrap()
+            .1
+            .split_whitespace()
+            .collect();
+        [
+            fields[11].parse::<u64>().unwrap(),
+            fields[12].parse::<u64>().unwrap(),
+        ]
+    };
+    for _ in 0..WARM {
+        let block = store
+            .read_range("private-object-name", 0, LENGTH, &head, &budget)
+            .await
+            .unwrap();
+        assert_eq!(block.as_slice(), &[73; LENGTH]);
+    }
+    let before = cpu_ticks();
+    let start = Instant::now();
+    let mut latencies = Vec::with_capacity(calls);
+    for _ in 0..calls {
+        let start = Instant::now();
+        let block = store
+            .read_range("private-object-name", 0, LENGTH, &head, &budget)
+            .await
+            .unwrap();
+        assert_eq!(block.as_slice(), &[73; LENGTH]);
+        latencies.push(start.elapsed().as_nanos());
+    }
+    let wall = start.elapsed().as_nanos();
+    let after = cpu_ticks();
+    task.join().unwrap();
+    assert_eq!(budget.used(), 0);
+    if enabled {
+        assert_eq!(
+            observation(
+                &fs,
+                "geesefs_s3_attempts_total{operation=\"get\",transport=\"sdk\"}"
+            ),
+            (calls + WARM) as f64
+        );
+        assert_eq!(
+            observation(&fs, "geesefs_s3_body_bytes_total"),
+            ((calls + WARM) * LENGTH) as f64
+        );
+    }
+    println!(
+        "observer_cost_json={}",
+        serde_json::json!({
+            "mode": "sdk", "enabled": enabled, "calls": calls, "wall_ns": wall, "latencies_ns": latencies,
+            "cpu_user_ticks": after[0] - before[0], "cpu_system_ticks": after[1] - before[1],
+            "clock_ticks_per_second": rustix::param::clock_ticks_per_second(),
+            "scope": "whole fixture process: SDK, runtime and localhost tiny_http; system allocator, no TLS or FUSE"
+        })
+    );
+}
+
+#[tokio::test]
 async fn standard_listing_resumes_from_an_exclusive_confined_name_on_the_wire() {
     use geesefs_rs::config::ListType;
     for mode in [ListType::V1, ListType::V2] {

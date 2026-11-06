@@ -5,6 +5,30 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-06: namespace progress for readers and writers
+
+Full clean-namespace scans in periodic flushing and dirty-descendant checks,
+plus directory overlays visiting every descendant, monopolized the same mutex
+used by synchronous inode resolution. Regressions reproduce blocked RO/RW
+resolution, unrelated-state blocking in RW flush/rename and nested listing.
+
+Use a maintained Papaya weak inode index with atomic ownership-aware eviction;
+keep multi-name transactions under the existing mutex. Index dirty generations,
+seek directory children with bounded critical sections and restrict rename scans
+to its bound subtree. Preserve upload retry/cancellation, newer writes and dirty
+rename/unlink semantics. An additional fault-sensitive regression prevents old
+deleted-inode fsync from clearing a recreated name's dirty generation.
+
+The follow-up lock audit removes the redundant mutex spanning cached response
+copies, groups cache-hit metadata work and indexes revocable loan keys. Move
+FUSE replies/scheduling and directory inode work outside unrelated admission,
+registry and inode-state locks. Retain necessary generation/durability gates and
+document remaining contention risks in the [locking audit](locking.md).
+
+The in-process scaling fixture diagnoses the removed clean-cardinality costs;
+its extra inode index increases metadata RSS. It does not establish mounted
+FUSE, Go-relative or production acceptance. See [verification](testing.md#namespace-progress--2026-11-06).
+
 ## 2026-11-03: release 0.1.1 preparation
 
 Advance the package and lockfile version together so the executable identifies

@@ -1497,12 +1497,13 @@ impl Filesystem {
             return Err(Error::Fs(libc::EINVAL));
         }
         let reservation = self.admit(bytes.len()).await?;
+        let block = reservation.copy(bytes)?;
         let mut ns = self.namespace.lock().unwrap();
         let mut state = node.state.lock().unwrap();
         if ns.is_moving(&state.key) || ns.is_deleting(&state.key) {
             return Err(Error::Fs(libc::EAGAIN));
         }
-        write::insert_extent(&mut state, offset, reservation.copy(bytes)?)?;
+        write::insert_extent(&mut state, offset, block)?;
         ns.track_dirty(node.ino, &state);
         Ok(bytes.len())
     }

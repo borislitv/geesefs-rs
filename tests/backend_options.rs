@@ -148,6 +148,7 @@ async fn sse_kms_storage_acl_mime_and_requester_are_signed_on_real_requests() {
     let c = config(
         &endpoint,
         &[
+            "--metrics-listen=127.0.0.1:0",
             "--sse-kms=public-key-id",
             "--storage-class=STANDARD_IA",
             "--cold-min-size=4",

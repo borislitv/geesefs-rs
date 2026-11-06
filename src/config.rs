@@ -20,6 +20,14 @@ pub enum ListType {
     Extended,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, ValueEnum, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagnosticLogLevel {
+    Off,
+    Error,
+    Warn,
+}
+
 /// Only options with implemented configuration semantics are parsed.
 #[derive(Clone, Debug, Parser)]
 #[command(version, about = "GeeseFS Rust rewrite (NOT accepted for production)")]
@@ -180,6 +188,12 @@ pub struct Config {
     /// Optional numeric HTTP listen address; metrics are disabled by default.
     #[arg(long)]
     pub metrics_listen: Option<std::net::SocketAddr>,
+    /// Keep only basic cache/memory observations; allows same-binary overhead controls.
+    #[arg(long)]
+    pub no_diagnostics: bool,
+    /// Diagnostic records: error, or also slow/inflight at warn; off retains metrics.
+    #[arg(long, value_enum, default_value = "error")]
+    pub diagnostic_log_level: DiagnosticLogLevel,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

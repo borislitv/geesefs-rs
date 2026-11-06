@@ -229,6 +229,211 @@ fn filesystem(store: S3) -> std::sync::Arc<geesefs_rs::filesystem::Filesystem> {
     Filesystem::new(config, std::sync::Arc::new(store)).unwrap()
 }
 
+fn observed_backend(store: S3) -> (S3, std::sync::Arc<geesefs_rs::filesystem::Filesystem>) {
+    observed_backend_enabled(store, true)
+}
+
+fn observed_backend_enabled(
+    store: S3,
+    enabled: bool,
+) -> (S3, std::sync::Arc<geesefs_rs::filesystem::Filesystem>) {
+    use clap::Parser;
+    use geesefs_rs::{config::Config, filesystem::Filesystem};
+    let mut config = Config::try_parse_from([
+        "geesefs-rs",
+        "--metrics-listen=127.0.0.1:0",
+        "--list-type=2",
+        "--sdk-max-retries=1",
+        "--http-timeout=3s",
+        "--memory-limit=32",
+        "bucket",
+        "/tmp/mount",
+    ])
+    .unwrap();
+    config.no_diagnostics = !enabled;
+    let store = store.with_options(&config).unwrap();
+    let fs = Filesystem::new(config, std::sync::Arc::new(store.clone())).unwrap();
+    (store, fs)
+}
+
+fn observation(fs: &geesefs_rs::filesystem::Filesystem, name: &str) -> f64 {
+    geesefs_rs::metrics::render(fs)
+        .unwrap()
+        .lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once(' ')?;
+            (key == name).then(|| value.parse().unwrap())
+        })
+        .unwrap_or_else(|| panic!("missing observation {name}"))
+}
+
+#[tokio::test]
+async fn sdk_retries_are_attempts_of_one_header_scope_and_body_bytes_are_separate() {
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let (store, fs) = observed_backend(backend(format!("http://{}", server.server_addr())));
+    let task = std::thread::spawn(move || {
+        for attempt in 0..2 {
+            let mut request = server
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            let captured = capture(&mut request);
+            assert_eq!(captured.method, "GET");
+            assert_eq!(captured.headers["range"], "bytes=0-3");
+            assert_eq!(captured.headers["if-match"], "\"generation-one\"");
+            let response = if attempt == 0 {
+                Response::from_data(b"<Error><Code>ServiceUnavailable</Code></Error>".to_vec())
+                    .with_status_code(503)
+            } else {
+                Response::from_data(b"abcd".to_vec())
+                    .with_status_code(206)
+                    .with_header(Header::from_bytes("Content-Range", "bytes 0-3/4").unwrap())
+            };
+            request.respond(response).unwrap();
+        }
+    });
+    let budget = Budget::new(4).unwrap();
+    let block = store
+        .read_range("private-object-name", 0, 4, &head(4), &budget)
+        .await
+        .unwrap();
+    assert_eq!(block.as_slice(), b"abcd");
+    drop(block);
+    task.join().unwrap();
+    for (name, expected) in [
+        (
+            "geesefs_s3_attempts_total{operation=\"get\",transport=\"sdk\"}",
+            2.,
+        ),
+        (
+            "geesefs_s3_retries_total{operation=\"get\",transport=\"sdk\"}",
+            1.,
+        ),
+        (
+            "geesefs_stage_duration_seconds_count{stage=\"s3_get_headers\"}",
+            1.,
+        ),
+        (
+            "geesefs_stage_duration_seconds_count{stage=\"s3_get_stream\"}",
+            1.,
+        ),
+        ("geesefs_s3_body_bytes_total", 4.),
+        ("geesefs_stage_inflight{stage=\"s3_get_stream\"}", 0.),
+    ] {
+        assert_eq!(observation(&fs, name), expected, "{name}");
+    }
+    let text = geesefs_rs::metrics::render(&fs).unwrap();
+    assert!(!text.contains("private-object-name"));
+    assert!(!text.contains("disposable-secret"));
+    assert_eq!(budget.used(), 0);
+}
+
+#[tokio::test]
+async fn short_get_body_is_a_failed_stream_with_no_leaked_scope_or_fabricated_complete_bytes() {
+    let (store, task) = server(206, &[("Content-Range", "bytes 0-3/4")], b"ab", Some(4));
+    let (store, fs) = observed_backend(store);
+    let budget = Budget::new(4).unwrap();
+    assert!(
+        store
+            .read_range("private-object-name", 0, 4, &head(4), &budget)
+            .await
+            .is_err()
+    );
+    task.join().unwrap();
+    assert_eq!(
+        observation(
+            &fs,
+            "geesefs_stage_completions_total{stage=\"s3_get_stream\",outcome=\"error\"}"
+        ),
+        1.
+    );
+    assert_eq!(
+        observation(
+            &fs,
+            "geesefs_stage_completions_total{stage=\"s3_get_stream\",outcome=\"ok\"}"
+        ),
+        0.
+    );
+    assert_eq!(
+        observation(&fs, "geesefs_stage_inflight{stage=\"s3_get_stream\"}"),
+        0.
+    );
+    assert!(observation(&fs, "geesefs_s3_body_bytes_total") <= 2.);
+    assert_eq!(budget.used(), 0);
+}
+
+#[tokio::test]
+async fn extended_listing_presigning_is_not_a_transmitted_get_attempt() {
+    let (store, task) = server(
+        200,
+        &[],
+        b"<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>",
+        None,
+    );
+    let (store, fs) = observed_backend(store);
+    store
+        .with_list_type(geesefs_rs::config::ListType::Extended)
+        .list("", Some("/"), None)
+        .await
+        .unwrap();
+    assert!(task.join().unwrap().url.contains("list-type=ext-v1"));
+    assert_eq!(
+        observation(
+            &fs,
+            "geesefs_s3_attempts_total{operation=\"list\",transport=\"extension\"}"
+        ),
+        1.
+    );
+    let text = geesefs_rs::metrics::render(&fs).unwrap();
+    assert!(!text.contains("geesefs_s3_attempts_total{operation=\"get\""));
+    assert_eq!(
+        observation(
+            &fs,
+            "geesefs_stage_completions_total{stage=\"s3_list\",outcome=\"ok\"}"
+        ),
+        1.
+    );
+}
+
+#[tokio::test]
+async fn reconfiguring_observation_does_not_retain_an_old_sdk_observer() {
+    for enabled in [true, false] {
+        let (store, task) = server(206, &[("Content-Range", "bytes 0-3/4")], b"abcd", None);
+        let (store, old) = observed_backend(store);
+        let (store, current) = observed_backend_enabled(store, enabled);
+        let budget = Budget::new(4).unwrap();
+        assert_eq!(
+            store
+                .read_range("file", 0, 4, &head(4), &budget)
+                .await
+                .unwrap()
+                .as_slice(),
+            b"abcd"
+        );
+        task.join().unwrap();
+        assert!(
+            !geesefs_rs::metrics::render(&old)
+                .unwrap()
+                .contains("geesefs_s3_attempts_total{")
+        );
+        let text = geesefs_rs::metrics::render(&current).unwrap();
+        if enabled {
+            assert_eq!(
+                observation(
+                    &current,
+                    "geesefs_s3_attempts_total{operation=\"get\",transport=\"sdk\"}"
+                ),
+                1.
+            );
+            assert!(!text.contains("geesefs_s3_retries_total{"));
+        } else {
+            assert_eq!(observation(&current, "geesefs_diagnostics_enabled"), 0.);
+            assert!(!text.contains("geesefs_s3_attempts"));
+        }
+        assert_eq!(budget.used(), 0);
+    }
+}
+
 #[tokio::test]
 async fn standard_listing_resumes_from_an_exclusive_confined_name_on_the_wire() {
     use geesefs_rs::config::ListType;

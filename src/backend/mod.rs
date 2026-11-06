@@ -16,6 +16,7 @@ use std::{collections::HashMap, sync::Mutex};
 pub struct RangeSink {
     sender: tokio::sync::mpsc::Sender<(u64, Block)>,
     owner: Mutex<Reservation>,
+    diagnostics: crate::metrics::Diagnostics,
 }
 
 impl RangeSink {
@@ -23,7 +24,13 @@ impl RangeSink {
         Self {
             sender,
             owner: Mutex::new(owner),
+            diagnostics: crate::metrics::Diagnostics::default(),
         }
+    }
+
+    pub fn with_diagnostics(mut self, diagnostics: crate::metrics::Diagnostics) -> Self {
+        self.diagnostics = diagnostics;
+        self
     }
 
     fn check(&self, length: usize) -> Result<()> {
@@ -51,10 +58,13 @@ impl RangeSink {
             }
             remaining.split(length)
         };
-        self.sender
-            .send((offset, block.with_owner(owner)))
-            .await
-            .map_err(|_| Error::Cancelled)
+        crate::metrics::observe(&self.diagnostics, crate::metrics::Stage::Delivery, async {
+            self.sender
+                .send((offset, block.with_owner(owner)))
+                .await
+                .map_err(|_| Error::Cancelled)
+        })
+        .await
     }
 }
 
@@ -62,6 +72,10 @@ impl RangeSink {
 /// in-memory stores. Filesystem state, generation barriers and overlays are never mocked.
 #[async_trait::async_trait]
 pub trait Store: Send + Sync + 'static {
+    /// Share the real backend's observations with its owning filesystem.
+    fn diagnostics(&self) -> Option<crate::metrics::Diagnostics> {
+        None
+    }
     async fn patch(
         &self,
         _key: &str,
@@ -162,6 +176,9 @@ pub trait Store: Send + Sync + 'static {
 
 #[async_trait::async_trait]
 impl Store for s3::S3 {
+    fn diagnostics(&self) -> Option<crate::metrics::Diagnostics> {
+        Some(self.diagnostics.clone())
+    }
     async fn patch(
         &self,
         key: &str,
@@ -278,6 +295,7 @@ impl Store for s3::S3 {
     }
 }
 pub mod auth;
+mod observations;
 mod options;
 mod signature;
 mod transport;

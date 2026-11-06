@@ -5,6 +5,52 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## READDIRPLUS directory attributes — 2026-11-06
+
+Five non-mounted fuser `Session::from_fd` regressions use real protocol parsing
+and replies with a faithful gated store. They verify overlapping marker HEADs,
+authoritative permissions/owner, shared admission across two directory handles,
+deadline cancellation, warm-cache progress under a busy metadata lane, basic
+READDIR without extra HEADs, full-frame continuation and unsent lookup ownership
+on errors. The serial implementation first fails the overlap assertion. Three
+manual faults produce four assertion failures: premature permit release exceeds
+the global bound; removing the fresh fast path yields ETIMEDOUT; premature lookup
+ownership breaks full-frame and failed-frame counts. All faults are restored.
+Eight selected mutator sites additionally report killed with no reported survivors;
+this is a selected screen, not repository-wide coverage or a classified per-site
+compiler-versus-assertion accounting. Complexity-only CRAP remains unavailable
+without coverage; duplication screening of the two changed modules finds no
+candidates at 0.8.
+
+```bash
+cargo +1.96.0 test --locked --test fuse_deadline_review readdirplus_
+cargo +1.96.0 test --locked --test fuse_deadline_review readdirplus_directory_latency_diagnostic -- --exact --ignored --nocapture
+cargo +1.96.0 fmt --all -- --check
+cargo +1.96.0 clippy --locked --all-targets --all-features -- -D warnings
+cargo +1.96.0 test --locked
+cargo +1.96.0 test --locked --all-features
+```
+
+The explicit diagnostic checks names and unchanged work: 110 implicit directories,
+110 HEADs, 112 LISTs, fixed 2-ms simulated HEAD delay, eight metadata slots and one
+runtime worker. Two same-executable waves per revision each use eight fresh
+filesystem/session instances. Warm-wave request medians are approximately
+381 ms serial and 65 ms pipelined, with peak concurrent HEADs 1 and 8. These are
+unoptimized fuser-protocol fixtures, not kernel mounts, real S3 latency, independent
+mount pairs or a Go comparison. The historical production wait remains unattributed.
+
+For the corresponding warmed eight-session harness jobs, `/usr/bin/time -v`
+records user/system CPU 0.66/0.13 s and peak RSS 97,508 KiB before, versus
+0.52/0.13 s and 97,520 KiB after. These include Cargo/harness work, not isolated
+daemon CPU or steady RSS; heap, cgroup and kernel memory are unmeasured. They do
+not establish a memory reduction or production CPU improvement.
+
+Default and all-feature suites pass 316 cases with 18 explicit ignores, including
+the new diagnostic. Formatting and warning-denying all-target/all-feature Clippy
+pass, along with the public-source audit and Python fixture/benchmark suites.
+The existing local native-mount limitations below remain; served readers
+are not test fixtures.
+
 ## Bounded phase and failure diagnostics — 2026-11-06
 
 Real SDK/loopback HTTP and fuser wire fixtures verify attempt/retry accounting,

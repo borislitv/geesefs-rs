@@ -35,6 +35,20 @@ snapshot. Sampling overhead remains part of the observed server cost.
 
 ## Narrow application state
 
+### READDIRPLUS metadata pipeline — 2026-11-06
+
+Reuse [futures-util 0.3.34 FuturesOrdered](https://docs.rs/futures-util/0.3.34/futures_util/stream/struct.FuturesOrdered.html)
+for concurrent borrowed futures with ordered output, and the existing Tokio
+metadata semaphore for a global bound. Create a network future only after its
+permit; cached attributes return a ready future. Cancellation drops the queue
+in the request, without detached tasks or a new executor/cache/dependency.
+
+Reviewed the pinned [fuser 0.18.0 release](https://github.com/cberner/fuser/releases/tag/v0.18.0)
+and [entry/attribute TTL issue 756](https://github.com/cberner/fuser/issues/756).
+The latter concerns separate reply TTLs, not our sequential S3 attribute refresh;
+keep the current supported reply/TTL API. fuser retains parsing, frame capacity
+and exactly-once wire replies. The application changes only request scheduling.
+
 ### Namespace progress — 2026-11-06
 
 Select released [papaya 0.2.5](https://docs.rs/papaya/0.2.5/papaya/)

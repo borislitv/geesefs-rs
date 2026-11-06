@@ -15,6 +15,7 @@ The package continues to forbid unsafe code and uses safe dependency APIs only.
 | `flush_activity` | Async shared guards owned by uploads/bodies; lending only tries an exclusive guard | Required to prevent new loans during uploads, including cancellation and retained retry bodies. Independent uploads share the guard; speculative lending never waits for it. |
 | FUSE file/directory registries | Separate short map transactions; clone owners before using them | File release drops its owner outside the registry. Directory open no longer waits for inode state or writes a reply while holding its registry. A shared file-handle lookup still takes a short registry lock. |
 | FUSE admission | Closing flag plus nonblocking request-permit acquisition | Scheduling and error replies occur after unlocking. A retained permit still makes shutdown wait for an admitted job even if it has not yet been scheduled. |
+| Metadata admission | One global semaphore for directory type resolution and expired-attribute refresh | READDIRPLUS admits before creating each borrowed future and polls at most `max_requests` futures per page in output order. One admission waiter per page; no detached per-entry tasks. Fresh attributes bypass the semaphore. Errors, full frames and deadlines release pending work and permits. |
 
 The read-cache outer mutex was not needed for payload correctness: a borrowed
 loaned backing is copied into admitted output synchronously and never exported
@@ -33,7 +34,7 @@ and inode-state locks; validation and extent/generation publication stay atomic.
 | `Inode::preload` | Async per-directory single-flight, spans one metadata request | Concurrent cold lookups of the same directory can wait up to the request timeout. Other directories remain independent. |
 | `Inode::pattern`, `OpenFile::pattern` | Small adaptive-history updates, at most 64 samples | Per-handle policy in normal FUSE reads; legacy inode-only API has a per-inode pattern. No backend work or payload copy under the lock. |
 | `Inode::read_fills` | Register/query/retire bounded in-flight intervals; notify followers | Per-inode metadata only. Overlapping same-generation reads deliberately wait on a watch channel after unlocking; disjoint fills proceed independently. |
-| FUSE `Directory` cursor | Async per-open-handle pagination/cookie gate, spans LIST | Same-handle readdir is serialized to preserve cursor semantics; separate handles are independent. |
+| FUSE `Directory` cursor | Async per-open-handle pagination/cookie gate, spans LIST and bounded attribute refresh | Same-handle readdir is serialized to preserve cursor semantics; separate handles are independent. Attribute requests within a PLUS page overlap while replies retain cookie/name order. |
 | FUSE `notifier` | Clone configured sender before kernel notification | Actual potentially blocking notification runs on a separately admitted blocking worker without the mutex. |
 | FUSE `shutdown_error` | Terminal diagnostic publication/take | Not a request hot path. |
 | `RangeSink::owner` | Split an already admitted reservation | Per-producer, no allocation or channel send while locked. Channel backpressure happens after release. |

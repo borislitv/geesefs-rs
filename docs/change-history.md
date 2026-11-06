@@ -5,6 +5,27 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-06: overlap READDIRPLUS directory attributes
+
+An extended delimiter LIST supplies common-prefix names, not authoritative
+directory-marker attributes. READDIRPLUS subsequently refreshed these inodes
+serially, so one fast parent LIST still led to a sum of per-directory HEAD/LIST
+waits before publication. A real fuser wire regression first reproduces this
+serialization with two independent marker requests gated before either response.
+
+Pipeline owned refresh futures through the existing futures-util `FuturesOrdered`
+and global metadata semaphore. Admission precedes network-job creation; fresh
+attributes bypass that lane. Preserve names/cookies, marker metadata, observation
+times, concurrent-writer generation checks and lookup ownership. Full buffers,
+errors and deadlines drop pending futures and their permits. Basic READDIR keeps
+its direct path and performs no new attribute work. No dependency, cache budget,
+TTL, worker count or served mount changes.
+
+The checked 110-directory protocol fixture falls from roughly 381 ms to 65 ms
+with identical backend operation counts. This demonstrates removal of the serial
+critical path in the fixture, not attribution of a past request or a measured
+production/Go speedup. [Verification and limitations](testing.md#readdirplus-directory-attributes--2026-11-06).
+
 ## 2026-11-06: bounded latency and remote-work diagnostics
 
 Cache/RSS counters and terminal errno alone cannot attribute read tails, namespace

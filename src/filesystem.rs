@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    future::Future,
     ops::Bound::{Excluded, Included, Unbounded},
     sync::{
         Arc, Mutex,
@@ -20,7 +21,11 @@ use crate::{
     write::{self, MAX_IO},
 };
 use fuser::{FileAttr, FileType};
-use futures_util::{StreamExt, stream::FuturesUnordered};
+use futures_util::{
+    StreamExt,
+    future::{Either, ready},
+    stream::FuturesUnordered,
+};
 use tokio::sync::{Notify, RwLock, Semaphore};
 
 pub struct Filesystem {
@@ -626,6 +631,15 @@ impl Filesystem {
     /// replaced name. Root is synthetic; implicit directories are checked by
     /// LIST, not by assuming a marker exists. Dirty attributes remain local.
     pub async fn refresh_inode_if_expired(&self, ino: u64) -> Result<Arc<Inode>> {
+        self.prepare_inode_refresh(ino).await?.await
+    }
+
+    /// Admit before creating network jobs, but never queue fresh attributes
+    /// behind unrelated metadata I/O. The caller owns and cancels the future.
+    pub(crate) async fn prepare_inode_refresh(
+        &self,
+        ino: u64,
+    ) -> Result<impl Future<Output = Result<Arc<Inode>>> + Send + '_> {
         let started = std::time::Instant::now();
         let node = self.node(ino)?;
         let (key, directory, remote, version, epoch, list_only) = {
@@ -635,7 +649,7 @@ impl Filesystem {
                 return Err(Error::Fs(libc::ENOENT));
             }
             if ino == 1 {
-                return Ok(node.clone());
+                return Ok(Either::Left(ready(Ok(node.clone()))));
             }
             if ns.is_moving(&s.key) || ns.is_deleting(&s.key) {
                 return Err(self.again("refresh_binding_busy"));
@@ -645,11 +659,11 @@ impl Filesystem {
                 || s.data_key.is_some()
                 || s.metadata_known && s.fetched.elapsed() < self.config.stat_cache_ttl
             {
-                return Ok(node.clone());
+                return Ok(Either::Left(ready(Ok(node.clone()))));
             }
             let directory = file_type(s.mode) == FileType::Directory;
             if directory && ns.has_dirty_descendants(&s.key) {
-                return Ok(node.clone());
+                return Ok(Either::Left(ready(Ok(node.clone()))));
             }
             (
                 s.key.clone(),
@@ -660,81 +674,87 @@ impl Filesystem {
                 directory && self.config.no_dir_object,
             )
         };
-        // An implicit directory may acquire a marker with authoritative metadata.
-        // Skip its HEAD only when directory objects are explicitly disabled.
-        let fetched = if list_only {
-            let page = self.store.list(&format!("{key}/"), Some("/"), None).await;
-            match page {
-                Ok(page) if !page.objects.is_empty() || !page.common_prefixes.is_empty() => {
-                    Ok(None)
-                }
-                Ok(_) => Err(Error::Fs(libc::ENOENT)),
-                Err(e) => Err(e),
-            }
-        } else {
-            match self
-                .store
-                .head(&if directory {
-                    format!("{key}/")
-                } else {
-                    key.clone()
-                })
-                .await
-            {
-                Ok(head) => Ok(Some(head)),
-                Err(error) if directory && not_found(&error) && !self.config.no_implicit_dir => {
-                    match self.store.list(&format!("{key}/"), Some("/"), None).await {
-                        Ok(page)
-                            if !page.objects.is_empty() || !page.common_prefixes.is_empty() =>
-                        {
-                            Ok(None)
-                        }
-                        Ok(_) => Err(Error::Fs(libc::ENOENT)),
-                        Err(e) => Err(e),
+        let permit = self.metadata_permit().await?;
+        Ok(Either::Right(async move {
+            let _permit = permit;
+            // An implicit directory may acquire a marker with authoritative metadata.
+            // Skip its HEAD only when directory objects are explicitly disabled.
+            let fetched = if list_only {
+                let page = self.store.list(&format!("{key}/"), Some("/"), None).await;
+                match page {
+                    Ok(page) if !page.objects.is_empty() || !page.common_prefixes.is_empty() => {
+                        Ok(None)
                     }
+                    Ok(_) => Err(Error::Fs(libc::ENOENT)),
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
+            } else {
+                match self
+                    .store
+                    .head(&if directory {
+                        format!("{key}/")
+                    } else {
+                        key.clone()
+                    })
+                    .await
+                {
+                    Ok(head) => Ok(Some(head)),
+                    Err(error)
+                        if directory && not_found(&error) && !self.config.no_implicit_dir =>
+                    {
+                        match self.store.list(&format!("{key}/"), Some("/"), None).await {
+                            Ok(page)
+                                if !page.objects.is_empty() || !page.common_prefixes.is_empty() =>
+                            {
+                                Ok(None)
+                            }
+                            Ok(_) => Err(Error::Fs(libc::ENOENT)),
+                            Err(e) => Err(e),
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
+            };
+            let mut ns = self.lock_namespace();
+            let mut s = node.state.lock().unwrap();
+            if s.deleted
+                || s.key != key
+                || ns.names.get(&key) != Some(&ino)
+                || ns.is_moving(&key)
+                || ns.is_deleting(&key)
+            {
+                return Err(self.again("refresh_binding_changed"));
             }
-        };
-        let mut ns = self.lock_namespace();
-        let mut s = node.state.lock().unwrap();
-        if s.deleted
-            || s.key != key
-            || ns.names.get(&key) != Some(&ino)
-            || ns.is_moving(&key)
-            || ns.is_deleting(&key)
-        {
-            return Err(self.again("refresh_binding_changed"));
-        }
-        if s.version != version
-            || s.remote.as_ref().map(|h| &h.etag) != remote.as_ref().map(|h| &h.etag)
-            || !s.can_replace_metadata(started)
-            || directory && ns.has_dirty_descendants(&key)
-        {
-            return Ok(node.clone());
-        }
-        if directory && ns.epoch != epoch && fetched.as_ref().is_err_and(not_found) {
-            return Err(self.again("refresh_directory_changed"));
-        }
-        match fetched {
-            Ok(head) => {
-                let mut fresh = Inode::new(ino, key, directory, head, &self.config)
-                    .state
-                    .into_inner()
-                    .unwrap();
-                fresh.fetched = started;
-                s.replace_metadata(fresh);
+            if s.version != version
+                || s.remote.as_ref().map(|h| &h.etag) != remote.as_ref().map(|h| &h.etag)
+                || !s.can_replace_metadata(started)
+                || directory && ns.has_dirty_descendants(&key)
+            {
+                return Ok(node.clone());
             }
-            Err(error) if not_found(&error) => {
-                s.deleted = true;
-                ns.names.remove(&key);
-                ns.changed(&key);
-                return Err(error);
+            if directory && ns.epoch != epoch && fetched.as_ref().is_err_and(not_found) {
+                return Err(self.again("refresh_directory_changed"));
             }
-            Err(error) => return Err(error),
-        }
-        drop(s);
-        Ok(node)
+            match fetched {
+                Ok(head) => {
+                    let mut fresh = Inode::new(ino, key, directory, head, &self.config)
+                        .state
+                        .into_inner()
+                        .unwrap();
+                    fresh.fetched = started;
+                    s.replace_metadata(fresh);
+                }
+                Err(error) if not_found(&error) => {
+                    s.deleted = true;
+                    ns.names.remove(&key);
+                    ns.changed(&key);
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+            }
+            drop(s);
+            Ok(node)
+        }))
     }
     fn missing(
         &self,
@@ -1965,11 +1985,7 @@ impl Filesystem {
                 completed = jobs.next(), if !jobs.is_empty() => {
                     completed.expect("admitted metadata job")?;
                 }
-                admitted = metrics::observe(&self.diagnostics, Stage::MetadataSlots, async {
-                    tokio::time::timeout(self.config.http_timeout, self.metadata_slots.clone().acquire_owned())
-                        .await.map_err(|_| Error::Timeout("directory metadata admission"))?
-                        .map_err(|_| Error::Cancelled)
-                }), if next.is_some() => {
+                admitted = self.metadata_permit(), if next.is_some() => {
                     let permit = admitted?;
                     let (name, entry) = next.take().expect("selected unknown type");
                     // Admission precedes creation of each future: concurrent
@@ -1981,6 +1997,19 @@ impl Filesystem {
             }
         }
         Ok(())
+    }
+
+    async fn metadata_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit> {
+        metrics::observe(&self.diagnostics, Stage::MetadataSlots, async {
+            tokio::time::timeout(
+                self.config.http_timeout,
+                self.metadata_slots.clone().acquire_owned(),
+            )
+            .await
+            .map_err(|_| Error::Timeout("directory metadata admission"))?
+            .map_err(|_| Error::Cancelled)
+        })
+        .await
     }
 
     async fn resolve_directory_entry(

@@ -26,6 +26,14 @@ struct Session {
 
 impl Session {
     fn new(fs: Arc<Filesystem>, runtime: &tokio::runtime::Runtime) -> Self {
+        Self::with_capabilities(fs, runtime, 0)
+    }
+
+    fn with_capabilities(
+        fs: Arc<Filesystem>,
+        runtime: &tokio::runtime::Runtime,
+        flags: u32,
+    ) -> Self {
         let adapter = Fuse::new(fs, runtime.handle().clone());
         let shutdown_error = adapter.shutdown_error.clone();
         let (peer, device) = UnixDatagram::pair().unwrap();
@@ -40,7 +48,7 @@ impl Session {
             shutdown_error,
             sequence: 1,
         };
-        let init = [7u32, 31, 131072, 0]
+        let init = [7u32, 31, 131072, flags]
             .into_iter()
             .flat_map(u32::to_ne_bytes)
             .collect::<Vec<_>>();
@@ -124,6 +132,356 @@ fn errno(reply: &[u8]) -> i32 {
 }
 fn unique(reply: &[u8]) -> u64 {
     u64::from_ne_bytes(reply[8..16].try_into().unwrap())
+}
+
+fn open_directory(session: &mut Session, ino: u64) -> u64 {
+    session.send(27, ino, &[0; 8]);
+    let reply = session.receive();
+    assert_eq!(errno(&reply), 0);
+    u64::from_ne_bytes(reply[16..24].try_into().unwrap())
+}
+
+fn read_directory(
+    session: &mut Session,
+    ino: u64,
+    handle: u64,
+    offset: u64,
+    size: u32,
+    plus: bool,
+) -> u64 {
+    let mut body = handle.to_ne_bytes().to_vec();
+    body.extend_from_slice(&offset.to_ne_bytes());
+    body.extend_from_slice(&size.to_ne_bytes());
+    body.extend_from_slice(&[0; 20]);
+    session.send(if plus { 44 } else { 28 }, ino, &body)
+}
+
+fn plus_names(reply: &[u8]) -> Vec<String> {
+    assert_eq!(errno(reply), 0);
+    let mut entries = &reply[16..];
+    let mut names = Vec::new();
+    while !entries.is_empty() {
+        // Linux fuse_direntplus: 128-byte entry_out, 24-byte dirent, aligned name.
+        let length = u32::from_ne_bytes(entries[144..148].try_into().unwrap()) as usize;
+        names.push(
+            std::str::from_utf8(&entries[152..152 + length])
+                .unwrap()
+                .to_owned(),
+        );
+        entries = &entries[(152 + length).next_multiple_of(8)..];
+    }
+    names
+}
+
+fn plus_session(fs: Arc<Filesystem>, runtime: &tokio::runtime::Runtime) -> Session {
+    Session::with_capabilities(
+        fs,
+        runtime,
+        fuser::InitFlags::FUSE_DO_READDIRPLUS
+            .bits()
+            .try_into()
+            .unwrap(),
+    )
+}
+
+#[test]
+fn readdirplus_overlaps_directory_metadata_and_preserves_marker_attributes_and_references() {
+    use std::sync::atomic::Ordering;
+    let (runtime, store, fs) = configured_fixture(|config| {
+        config.max_requests = 2;
+        config.request_timeout = Duration::from_secs(5);
+    });
+    for name in ["a", "b", "c", "d"] {
+        store.seed(&format!("{name}/"), b"");
+        store
+            .objects
+            .lock()
+            .unwrap()
+            .get_mut(&format!("{name}/"))
+            .unwrap()
+            .metadata
+            .extend([
+                ("mode".into(), (libc::S_IFDIR | 0o750).to_string()),
+                ("uid".into(), "1234".into()),
+            ]);
+    }
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *store.head_gate.lock().unwrap() = Some(gate.clone());
+    let mut session = plus_session(fs.clone(), &runtime);
+    let handle = open_directory(&mut session, 1);
+    let request = read_directory(&mut session, 1, handle, 0, 4096, true);
+    let overlapped = runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while store.head_starts.load(Ordering::SeqCst) < 2 {
+                store.head_started.notified().await;
+            }
+        })
+        .await
+        .is_ok()
+    });
+    gate.add_permits(4);
+    let reply = session.receive();
+    assert_eq!(unique(&reply), request);
+    assert_eq!(plus_names(&reply), [".", "..", "a", "b", "c", "d"]);
+    runtime.block_on(runtime.spawn(async {})).unwrap();
+    let namespace = fs.namespace.lock().unwrap();
+    for name in ["a", "b", "c", "d"] {
+        let node = namespace.named(name).unwrap();
+        assert_eq!(node.attr().perm, 0o750);
+        assert_eq!(node.attr().uid, 1234);
+        assert_eq!(node.state.lock().unwrap().lookups, 1);
+    }
+    drop(namespace);
+    assert_eq!(store.head_starts.load(Ordering::SeqCst), 4);
+    assert_eq!(
+        fs.node(1).unwrap().state.lock().unwrap().lookups,
+        1,
+        "dot entries do not transfer lookup ownership"
+    );
+    assert_eq!(store.active_heads.load(Ordering::SeqCst), 0);
+    assert_eq!(fs.effective_budgets().metadata_resolution_jobs_in_use, 0);
+    session.close();
+    assert!(
+        overlapped,
+        "independent directory marker HEADs are serialized before the first reply"
+    );
+    assert_eq!(store.peak_heads.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn readdirplus_metadata_is_globally_bounded_and_deadlines_cancel_all_work() {
+    use std::sync::atomic::Ordering;
+    let (runtime, store, fs) = configured_fixture(|config| {
+        config.max_requests = 2;
+        config.request_timeout = Duration::from_millis(250);
+    });
+    let mut parents = Vec::new();
+    for parent in ["left", "right"] {
+        store.seed(&format!("{parent}/"), b"");
+        for name in ["a", "b", "c", "d"] {
+            store.seed(&format!("{parent}/{name}/"), b"");
+        }
+        parents.push(runtime.block_on(fs.lookup(1, parent)).unwrap().ino);
+    }
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *store.head_gate.lock().unwrap() = Some(gate);
+    store.head_starts.store(0, Ordering::SeqCst);
+    store.peak_heads.store(0, Ordering::SeqCst);
+    let mut session = plus_session(fs.clone(), &runtime);
+    let first = open_directory(&mut session, parents[0]);
+    let second = open_directory(&mut session, parents[1]);
+    let ids = [
+        read_directory(&mut session, parents[0], first, 0, 4096, true),
+        read_directory(&mut session, parents[1], second, 0, 4096, true),
+    ];
+    let mut replies = Vec::new();
+    for _ in 0..2 {
+        let reply = session.receive();
+        assert_eq!(errno(&reply), -libc::ETIMEDOUT);
+        replies.push(unique(&reply));
+    }
+    replies.sort_unstable();
+    assert_eq!(replies, ids);
+    runtime.block_on(runtime.spawn(async {})).unwrap();
+    assert_eq!(store.peak_heads.load(Ordering::SeqCst), 2);
+    assert_eq!(store.active_heads.load(Ordering::SeqCst), 0);
+    assert_eq!(fs.effective_budgets().metadata_resolution_jobs_in_use, 0);
+    assert!(
+        fs.namespace
+            .lock()
+            .unwrap()
+            .nodes
+            .values()
+            .all(|node| { node.ino == 1 || node.state.lock().unwrap().lookups == 0 })
+    );
+    session.close();
+}
+
+#[test]
+fn readdirplus_fresh_attributes_do_not_wait_for_a_busy_metadata_lane() {
+    use std::sync::atomic::Ordering;
+    let (runtime, store, fs) = configured_fixture(|config| {
+        config.max_requests = 1;
+        config.request_timeout = Duration::from_secs(1);
+    });
+    store.seed("warm/", b"");
+    store.seed("warm/child/", b"");
+    store.seed("cold", b"cold payload");
+    let parent = runtime.block_on(fs.lookup(1, "warm")).unwrap();
+    let page = runtime
+        .block_on(fs.directory_chunk(parent.ino, "", 8))
+        .unwrap();
+    runtime
+        .block_on(fs.refresh_inode_if_expired(page[0].ino))
+        .unwrap();
+    let cold = runtime.block_on(fs.lookup(1, "cold")).unwrap();
+    cold.state.lock().unwrap().fetched = std::time::Instant::now() - 2 * fs.config.stat_cache_ttl;
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *store.head_gate.lock().unwrap() = Some(gate.clone());
+    let heads = store.head_starts.load(Ordering::SeqCst);
+    let refresh = runtime.spawn({
+        let fs = fs.clone();
+        async move { fs.refresh_inode_if_expired(cold.ino).await }
+    });
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while store.head_starts.load(Ordering::SeqCst) == heads {
+                store.head_started.notified().await;
+            }
+        })
+        .await
+        .unwrap();
+    });
+    let mut session = plus_session(fs.clone(), &runtime);
+    let handle = open_directory(&mut session, parent.ino);
+    read_directory(&mut session, parent.ino, handle, 0, 4096, true);
+    let reply = session.receive();
+    gate.add_permits(1);
+    runtime.block_on(refresh).unwrap().unwrap();
+    assert_eq!(plus_names(&reply), [".", "..", "child"]);
+    assert_eq!(store.head_starts.load(Ordering::SeqCst), heads + 1);
+    session.close();
+}
+
+#[test]
+fn readdirplus_full_frames_keep_order_and_only_transfer_emitted_references() {
+    use std::sync::atomic::Ordering;
+    let (runtime, store, fs) = configured_fixture(|config| {
+        config.max_requests = 2;
+        config.request_timeout = Duration::from_secs(5);
+    });
+    for name in ["a", "b", "c", "d"] {
+        store.seed(&format!("{name}/"), b"");
+    }
+    let mut session = plus_session(fs.clone(), &runtime);
+    let handle = open_directory(&mut session, 1);
+    read_directory(&mut session, 1, handle, 0, 4096, false);
+    assert_eq!(errno(&session.receive()), 0);
+    assert_eq!(
+        store.head_starts.load(Ordering::SeqCst),
+        0,
+        "basic READDIR needs no marker metadata"
+    );
+    read_directory(&mut session, 1, handle, 0, 512, true);
+    assert_eq!(plus_names(&session.receive()), [".", "..", "a"]);
+    runtime.block_on(runtime.spawn(async {})).unwrap();
+    {
+        let ns = fs.namespace.lock().unwrap();
+        for name in ["a", "b", "c", "d"] {
+            assert_eq!(
+                ns.named(name).unwrap().state.lock().unwrap().lookups,
+                u64::from(name == "a")
+            );
+        }
+    }
+    assert_eq!(store.active_heads.load(Ordering::SeqCst), 0);
+    assert_eq!(fs.effective_budgets().metadata_resolution_jobs_in_use, 0);
+    read_directory(&mut session, 1, handle, 3, 4096, true);
+    assert_eq!(plus_names(&session.receive()), ["b", "c", "d"]);
+    runtime.block_on(runtime.spawn(async {})).unwrap();
+    for name in ["a", "b", "c", "d"] {
+        assert_eq!(
+            fs.namespace
+                .lock()
+                .unwrap()
+                .named(name)
+                .unwrap()
+                .state
+                .lock()
+                .unwrap()
+                .lookups,
+            1
+        );
+    }
+    session.close();
+}
+
+#[test]
+fn readdirplus_metadata_error_cancels_siblings_without_lookup_references() {
+    use std::sync::atomic::Ordering;
+    let (runtime, store, fs) = configured_fixture(|config| {
+        config.max_requests = 2;
+        config.request_timeout = Duration::from_secs(5);
+    });
+    store.seed("a/", b"");
+    store.seed("b/", b"");
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *store.head_gate.lock().unwrap() = Some(gate.clone());
+    let mut session = plus_session(fs.clone(), &runtime);
+    let handle = open_directory(&mut session, 1);
+    read_directory(&mut session, 1, handle, 0, 4096, true);
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while store.head_starts.load(Ordering::SeqCst) < 2 {
+                store.head_started.notified().await;
+            }
+        })
+        .await
+        .unwrap();
+    });
+    store.fail_head_once.store(true, Ordering::SeqCst);
+    gate.add_permits(1);
+    assert_eq!(errno(&session.receive()), -libc::EIO);
+    runtime.block_on(runtime.spawn(async {})).unwrap();
+    assert_eq!(store.active_heads.load(Ordering::SeqCst), 0);
+    assert_eq!(fs.effective_budgets().metadata_resolution_jobs_in_use, 0);
+    for name in ["a", "b"] {
+        assert_eq!(
+            fs.namespace
+                .lock()
+                .unwrap()
+                .named(name)
+                .unwrap()
+                .state
+                .lock()
+                .unwrap()
+                .lookups,
+            0
+        );
+    }
+    session.close();
+}
+
+#[test]
+#[ignore = "explicit delayed-backend FUSE protocol diagnostic, not mounted acceptance"]
+fn readdirplus_directory_latency_diagnostic() {
+    use std::{sync::atomic::Ordering, time::Instant};
+    let mut samples = Vec::new();
+    for _ in 0..8 {
+        let (runtime, store, fs) = configured_fixture(|config| {
+            config.max_requests = 8;
+            config.request_timeout = Duration::from_secs(5);
+        });
+        let expected: Vec<_> = [".".into(), "..".into()]
+            .into_iter()
+            .chain((0..110).map(|i| format!("dir-{i:03}")))
+            .collect();
+        for name in &expected[2..] {
+            store.seed(&format!("{name}/child"), b"independent fixture bytes");
+        }
+        *store.head_delay.lock().unwrap() = Duration::from_millis(2);
+        let mut session = plus_session(fs.clone(), &runtime);
+        let handle = open_directory(&mut session, 1);
+        let started = Instant::now();
+        read_directory(&mut session, 1, handle, 0, 32768, true);
+        let reply = session.receive();
+        let elapsed = started.elapsed().as_nanos();
+        assert_eq!(plus_names(&reply), expected);
+        assert_eq!(store.head_starts.load(Ordering::SeqCst), 110);
+        assert_eq!(store.list_calls.load(Ordering::SeqCst), 112);
+        runtime.block_on(runtime.spawn(async {})).unwrap();
+        assert_eq!(store.active_heads.load(Ordering::SeqCst), 0);
+        samples.push(serde_json::json!({"wall_ns":elapsed,
+            "peak_heads":store.peak_heads.load(Ordering::SeqCst)}));
+        session.close();
+    }
+    println!(
+        "readdirplus_latency_json={}",
+        serde_json::json!({"samples":samples,
+        "directories":110,"head_delay_ms":2,"metadata_slots":8,
+        "heads_per_sample":110,"lists_per_sample":112,
+        "scope":"fuser protocol, faithful delayed store, unoptimized test binary; not kernel/production/Go acceptance"})
+    );
 }
 
 fn fixture() -> (

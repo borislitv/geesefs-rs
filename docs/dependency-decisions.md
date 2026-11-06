@@ -34,6 +34,39 @@ snapshot. Sampling overhead remains part of the observed server cost.
 
 ## Narrow application state
 
+### Namespace progress — 2026-11-06
+
+Select released [papaya 0.2.5](https://docs.rs/papaya/0.2.5/papaya/)
+(MIT, [maintained upstream](https://github.com/ibraheemdev/papaya)) for a
+lock-free inode-number index. Its `pin().get()` returns a protected `Weak<Inode>`;
+upgrade to an owned `Arc` and drop the pin before taking inode locks or awaiting.
+Namespace bindings and their single canonical strong inode owner remain under
+the existing transaction mutex. Unlike another strong-value cache, this index
+does not pin eviction victims. `Arc::try_unwrap`, not a racy strong-count check,
+decides eviction against concurrent weak upgrades. No custom atomic pointers,
+unsafe code, reclamation scheme or process-wide shared collector is introduced.
+
+Evaluated standard `RwLock` and DashMap: readers can still block behind a writer
+or shard lock. Moka is already appropriate for replaceable pages, but its policy
+maintenance and strong value ownership do not provide canonical inode lifetime.
+Copy-on-write `arc-swap` of the complete map copies the namespace on insertion.
+Papaya provides the required independent lookup without those tradeoffs; ordered
+prefix transactions remain in the existing BTreeMaps rather than pretending
+multi-name rename is a lock-free single-key operation.
+
+Reviewed [0.2.5 release notes](https://github.com/ibraheemdev/papaya/releases/tag/v0.2.5)
+(blocking-resize deadlock fix) and open
+[shared-collector issue 102](https://github.com/ibraheemdev/papaya/issues/102).
+Use one default, privately owned collector per filesystem index, never
+`shared_collector`; map destruction cannot race a pin borrowing that same map.
+Do not iterate the hash index or retain a pin across blocking/async operations.
+
+Dirty generations use an application-owned ordered key/inode index updated under
+the existing namespace/state lock order. This is filesystem generation state,
+not a replacement concurrent container. Flush snapshots visit only dirty inodes;
+descendant existence is a prefix query. Directory overlays seek past descendants
+in the existing ordered names map and yield between bounded transactions.
+
 ### Prometheus observation — 2026-11-03
 
 Select released [prometheus-client 0.25.2](https://docs.rs/prometheus-client/0.25.2/prometheus_client/)

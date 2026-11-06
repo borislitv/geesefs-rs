@@ -5,6 +5,99 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Namespace progress — 2026-11-06
+
+`tests/namespace_progress.rs` adds fourteen public-API regressions for RO/RW
+resolution during namespace maintenance, unrelated-state-independent flush,
+rename and nested listing, every writer mutation, error/cancellation/newer-write
+generations, dirty rename/unlink/implicit parents, lexical pagination, cooperative
+wide scans and concurrent resolver/eviction ownership. Initial progress cases
+fail before correction; removing the recreated-name identity guard independently
+loses the new backend object. The [lock audit](locking.md) covers all remaining
+application mutex/RwLock domains and explicit residual risks.
+
+Existing cache-index, read/refill/window/view, loan, FUSE-wire/deadline/lifecycle,
+SDK and writer suites cover the follow-up cache/lock corrections. Faults that
+export a loaned cached reply or omit a loan-key insertion respectively retain
+128 KiB of revocable memory and leave loans unreclaimed; the existing assertions
+fail, then pass with the required ownership/index updates restored.
+
+```bash
+cargo +1.96.0 fmt --all -- --check
+cargo +1.96.0 clippy --locked --all-targets --all-features -- -D warnings
+cargo +1.96.0 test --locked --all-targets
+cargo +1.96.0 test --locked --all-targets --all-features
+```
+
+Both final Rust configurations pass 300 cases, with 15 explicitly ignored cases
+as scoped below. Formatting, warning-denying Clippy, the 344-package public-source
+audit, 14 Python fixture tests and 99 Python benchmark tests pass. The default
+jemalloc release executable also builds with Rust 1.96.0.
+
+The Python fixture/benchmark environment must be on `PATH` for the embedded
+performance gate. Also run the CI public-source audit and Python test/bench
+suites. The package's `unsafe_code = "forbid"` applies to all compiled targets;
+there are no application unsafe blocks or local FFI shims. The initial local
+toolchain was too old and nightly lacked Clippy; Rust 1.96.0 plus its supported
+formatter/Clippy were installed for minimum-version verification. Its linter
+also exposed an existing equivalent XATTR boolean expression, now simplified.
+
+### In-process scaling diagnostics
+
+The ignored `tests/namespace_scaling.rs` fixtures run without FUSE, private
+credentials or a live backend. Use the identical fixture on baseline `b76269b`
+and runtime correction `0d8c587`, build each once, retain executable hashes, and alternate
+AB/BA order in fresh processes. They are **unoptimized test-profile/System
+allocator** diagnostics on Linux 6.17, not release, jemalloc or mounted results.
+The subsequent writer-input copy handoff does not alter these timed flush/read
+paths; writer input admission/copy happens before each flush timer starts.
+At 100,000 clean cached children, eight process pairs give these median per-run
+p50 values; eight resolver threads perform 200,000 total lookups:
+
+| Operation | Baseline | Candidate |
+| --- | --- | --- |
+| Idle flush | 22.207 ms | 0.420 µs |
+| One dirty-generation flush | 22.660 ms | 0.116 ms |
+| Expired implicit directory lookup | 70.649 ms | 0.030 ms |
+| Root listing with nested cached descendants | 97.349 ms | 0.157 ms |
+| Concurrent inode resolver batch | 883.810 ms | 37.622 ms |
+| Process user/system CPU during measured work | 8.275 / 0.600 s | 0.250 / 0.000 s |
+| Post-setup RSS | 111982 KiB | 117632 KiB |
+| Post-workload RSS / VmHWM | 112404 / 112404 KiB | 118086 / 118086 KiB |
+
+Four additional 10,000-entry pairs diagnose scaling; four same-executable A/A
+pairs at 100,000 entries retain noise controls. The extra weak index costs about
+5.5 MiB at 100,000 entries; this is not a metadata RSS reduction or an extrapolated
+large-mount bound. Backend bytes and identical operation counts are checked.
+
+The warm-cache fixture has eight readers, 256 byte-checked 1 MiB reads each, with
+no new backend reads. Eight AB pairs and eight same-executable AA pairs per
+fragment size distinguish copying from a single-backing control:
+
+| Cached backing size | Wall, baseline → candidate | Median reader p99 | User/system CPU | RSS / VmHWM, baseline → candidate |
+| --- | --- | --- | --- | --- |
+| 64 KiB fragments | 751.024 → 208.348 ms | 4.913 → 1.307 ms | 1.160/0.050 → 1.360/0.060 s | 52892/52892 → 53088/53088 KiB |
+| One 1 MiB backing | 73.354 → 74.841 ms | 0.101 → 0.096 ms | 0.445/0.010 → 0.460/0.005 s | 36544/36544 → 36784/36784 KiB |
+
+Fragment throughput/latency improve while consuming more process CPU. The
+single-backing control has a small raw wall increase, not demonstrated superiority.
+These are fresh-process pairs, **not independent mount pairs**; cgroup/heap/kernel
+memory, client/daemon separation, sustained target workloads and Go-relative
+acceptance remain unmeasured. Raw results, original failures and binary/source
+hashes stay outside tracked source.
+
+```bash
+GEESEFS_SCALE_ENTRIES=100000 cargo +1.96.0 test --locked --test namespace_scaling namespace_scale_diagnostic -- --ignored --exact --nocapture
+GEESEFS_CACHE_FRAGMENT_KIB=64 cargo +1.96.0 test --locked --test namespace_scaling cache_scale_diagnostic -- --ignored --exact --nocapture
+GEESEFS_CACHE_FRAGMENT_KIB=1024 cargo +1.96.0 test --locked --test namespace_scaling cache_scale_diagnostic -- --ignored --exact --nocapture
+```
+
+Native isolated mount verification is blocked locally: noninteractive sudo
+requires a password, and user/mount/network `unshare` fails writing `uid_map` with
+`Operation not permitted`. The thirteen existing native cases remain explicitly
+ignored by default; these diagnostics add two separately ignored large fixtures.
+Do not count that as native acceptance or reuse an existing served mount.
+
 ## Independent review regressions — 2026-11-03
 
 Four targeted suites cover the corrected review failures:

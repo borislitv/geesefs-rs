@@ -43,6 +43,34 @@ tombstones and move/delete leases prevent stale responses from resurrecting
 removed or renamed bindings. Pending operations remain retryable rather than
 pretending S3 copy/delete is an atomic POSIX rename.
 
+Inode-number resolution uses a private Papaya weak index. A lookup upgrades its
+protected weak reference to an owned `Arc` before leaving the index; no pin spans
+an inode lock or await. Name bindings and canonical strong owners remain under
+the namespace transaction mutex. Eviction uses `Arc::try_unwrap` to arbitrate
+against concurrent resolution, never reuses an inode number and cannot detach a
+retained owner. This is lock-free inode lookup, not a lock-free filesystem.
+
+An ordered dirty-generation index is maintained under namespace-then-inode lock
+order for every writer mutation. Flush snapshots visit dirty owners only;
+ancestor retention uses an ordered prefix existence query. Commit completion
+reconciles the current generation, preserving newer writes, failed/cancelled
+uploads and renamed descendants. Retiring a deleted identity cannot erase a
+recreated name's dirty owner. Rename pins/rekeys only bound source entries and
+their relevant subtree, rather than locking unrelated cached inodes.
+
+Local directory overlays seek directly between immediate children, skipping
+entire cached subtrees. Expired wide directories yield after at most 128 ordered
+scan steps per namespace critical section. Existing epoch/binding validation
+still rejects publication across mutations. Rename/delete transactions and
+per-inode state/flush locks remain; dirty snapshots and subtree mutations cost
+proportionally to their own pending work.
+
+The [locking audit](locking.md) records every application mutex/RwLock domain and
+remaining contention risks. Payload cache reads use only short internal metadata
+transactions, with no outer mutex spanning response allocation/copying. Loan-key
+tracking makes revocation proportional to actual loans; synchronous in-progress
+copies retain their byte charges until they finish, never across an await.
+
 Moka bounds directory-page/preload retention; listing and type resolution are
 paged and admission-limited. Remote metadata is validated against the observed
 binding/generation before installation. Dirty or newly durable local state is not
@@ -115,7 +143,7 @@ with cloned upload budgets into SDK bodies and jobs, preventing new loans until
 the last allocation-capable upload owner finishes, including after caller
 cancellation. Cache lending only tries exclusive activity synchronously and
 never waits. Loaned bytes are copied into an already admitted data reply before
-an owned `Block` can leave the cache, so callers cannot pin a revocable reserve.
+a caller-owned `Block` can leave the cache, so callers cannot pin a revocable reserve.
 
 ## Reads, generations and cache
 

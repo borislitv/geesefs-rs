@@ -1,15 +1,19 @@
 use crate::{
     error::{Error, Result},
-    inode::Inode,
+    inode::{Inode, State},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Mutex, atomic::Ordering},
+    sync::{Arc, Mutex, Weak, atomic::Ordering},
     time::{Duration, Instant},
 };
 
+pub(crate) type InodeIndex = papaya::HashMap<u64, Weak<Inode>>;
+
 pub struct Namespace {
     pub nodes: BTreeMap<u64, Arc<Inode>>,
+    pub(crate) inodes: Arc<InodeIndex>,
+    dirty: BTreeMap<String, u64>,
     pub names: BTreeMap<String, u64>,
     pub tombstones: BTreeMap<String, Instant>,
     pub epoch: u64,
@@ -26,8 +30,13 @@ pub struct Namespace {
 
 impl Namespace {
     pub fn new(root: Inode, limit: usize) -> Self {
+        let root = Arc::new(root);
+        let inodes = Arc::new(InodeIndex::new());
+        inodes.pin().insert(1, Arc::downgrade(&root));
         Self {
-            nodes: BTreeMap::from([(1, Arc::new(root))]),
+            nodes: BTreeMap::from([(1, root)]),
+            inodes,
+            dirty: BTreeMap::new(),
             names: BTreeMap::from([("".into(), 1)]),
             tombstones: BTreeMap::new(),
             epoch: 0,
@@ -47,6 +56,25 @@ impl Namespace {
 
     pub fn named(&self, key: &str) -> Option<Arc<Inode>> {
         self.names.get(key).and_then(|i| self.nodes.get(i)).cloned()
+    }
+
+    pub(crate) fn bindings(&self, key: &str, descendants: bool) -> Vec<(String, u64)> {
+        let mut bindings: Vec<_> = self
+            .names
+            .get(key)
+            .map(|ino| (key.to_owned(), *ino))
+            .into_iter()
+            .collect();
+        if descendants {
+            let prefix = format!("{key}/");
+            bindings.extend(
+                self.names
+                    .range(prefix.clone()..)
+                    .take_while(|(name, _)| name.starts_with(&prefix))
+                    .map(|(name, ino)| (name.clone(), *ino)),
+            );
+        }
+        bindings
     }
 
     pub(crate) fn changed(&mut self, key: &str) {
@@ -84,15 +112,30 @@ impl Namespace {
             .next()
             .is_some_and(|(name, _)| name.starts_with(&prefix))
             || self
-                .names
+                .dirty
                 .range(prefix.clone()..)
-                .take_while(|(name, _)| name.starts_with(&prefix))
-                .any(|(_, ino)| {
-                    self.nodes.get(ino).is_some_and(|node| {
-                        let state = node.state.lock().unwrap();
-                        !state.deleted && state.version > state.durable
-                    })
-                })
+                .next()
+                .is_some_and(|(name, _)| name.starts_with(&prefix))
+    }
+
+    /// Caller holds namespace then inode state, including after a commit.
+    pub(crate) fn track_dirty(&mut self, ino: u64, state: &State) {
+        if !state.deleted && state.version > state.durable {
+            self.dirty.insert(state.key.clone(), ino);
+        } else if self.dirty.get(&state.key) == Some(&ino) {
+            self.dirty.remove(&state.key);
+        }
+    }
+
+    pub(crate) fn forget_dirty(&mut self, key: &str) {
+        self.dirty.remove(key);
+    }
+
+    pub(crate) fn dirty_nodes(&self) -> Vec<Arc<Inode>> {
+        self.dirty
+            .values()
+            .map(|ino| self.nodes[ino].clone())
+            .collect()
     }
 
     pub fn hidden(&mut self, key: &str) -> bool {
@@ -135,7 +178,9 @@ impl Namespace {
                 if ino == 1 || Arc::strong_count(node) > 1 {
                     return None;
                 }
-                let s = node.state.lock().unwrap();
+                // A weak resolver can acquire state after the strong-count
+                // check. Eviction must not wait for it under the global mutex.
+                let s = node.state.try_lock().ok()?;
                 (s.lookups == 0
                     && s.opens == 0
                     && s.version == s.durable
@@ -144,11 +189,23 @@ impl Namespace {
                 .filter(|ino| !self.pending_deletes.values().any(|pending| pending == ino))
             });
             if let Some(ino) = victim {
-                self.evictions += 1;
-                let node = self.nodes.remove(&ino).unwrap();
-                let key = node.state.lock().unwrap().key.clone();
-                if self.names.get(&key) == Some(&ino) {
-                    self.names.remove(&key);
+                let owner = self.nodes.remove(&ino).unwrap();
+                match Arc::try_unwrap(owner) {
+                    Ok(node) => {
+                        self.evictions += 1;
+                        self.inodes.pin().remove(&ino);
+                        let key = node.state.into_inner().unwrap().key;
+                        if self.names.get(&key) == Some(&ino) {
+                            self.names.remove(&key);
+                        }
+                    }
+                    Err(owner) => {
+                        // A lock-free lookup upgraded its weak identity after
+                        // the eligibility check. Preserve that live inode.
+                        self.nodes.insert(ino, owner);
+                        self.capacity_failures += 1;
+                        return Err(Error::Fs(libc::ENOMEM));
+                    }
                 }
             } else {
                 self.capacity_failures += 1;
@@ -163,6 +220,7 @@ impl Namespace {
         let node = Arc::new(make(ino));
         self.nodes.insert(ino, node.clone());
         self.names.insert(key.into(), ino);
+        self.inodes.pin().insert(ino, Arc::downgrade(&node));
         Ok(node)
     }
 }

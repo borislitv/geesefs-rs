@@ -270,15 +270,22 @@ impl Fuse {
         F: FnOnce(Arc<Core>, DeadlineReply<R>) -> T + Send + 'static,
         T: Future<Output = ()> + Send + 'static,
     {
-        let admission = self.admission.lock().unwrap();
-        if admission.closing {
-            reply.fail(Errno::EINTR);
-            return;
-        }
-        let permit = match admission.semaphore.clone().try_acquire_owned() {
+        let admitted = {
+            let admission = self.admission.lock().unwrap();
+            if admission.closing {
+                Err(Errno::EINTR)
+            } else {
+                admission
+                    .semaphore
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| Errno::EAGAIN)
+            }
+        };
+        let permit = match admitted {
             Ok(permit) => permit,
-            Err(_) => {
-                reply.fail(Errno::EAGAIN);
+            Err(error) => {
+                reply.fail(error);
                 return;
             }
         };
@@ -875,9 +882,15 @@ impl fuser::Filesystem for Fuse {
     fn readlink(&self, _: &Request, ino: INodeNo, reply: ReplyData) {
         match self.fs.node(ino.0) {
             Ok(node) => {
-                let state = node.state.lock().unwrap();
-                match state.metadata.get(&self.fs.config.symlink_attr) {
-                    Some(target) => reply.data(target),
+                let target = node
+                    .state
+                    .lock()
+                    .unwrap()
+                    .metadata
+                    .get(&self.fs.config.symlink_attr)
+                    .cloned();
+                match target {
+                    Some(target) => reply.data(&target),
                     None => reply.error(Errno::EINVAL),
                 }
             }
@@ -985,13 +998,15 @@ impl fuser::Filesystem for Fuse {
                 return;
             }
         }
-        let mut directories = self.directories.lock().unwrap();
-        if directories.len() >= self.fs.config.max_requests * 4 {
-            reply.error(Errno::EMFILE);
-            return;
-        }
         if let Err(error) = self.fs.open(ino.0, false) {
             reply.error(errno(error));
+            return;
+        }
+        let mut directories = self.directories.lock().unwrap();
+        if directories.len() >= self.fs.config.max_requests * 4 {
+            drop(directories);
+            self.fs.release(ino.0);
+            reply.error(Errno::EMFILE);
             return;
         }
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
@@ -1003,6 +1018,7 @@ impl fuser::Filesystem for Fuse {
                 cookie: 0,
             })),
         );
+        drop(directories);
         reply.opened(FileHandle(handle), FopenFlags::empty());
     }
     fn readdir(

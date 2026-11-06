@@ -1,6 +1,6 @@
 use lru::LruCache;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     num::NonZeroUsize,
     ops::Range,
     sync::{Arc, Mutex},
@@ -39,6 +39,7 @@ struct State {
     index: BTreeMap<Key, Span>,
     weight: u64,
     loaned: usize,
+    loans: BTreeSet<Key>,
     evictions: u64,
     evicted_bytes: u64,
     insertions: u64,
@@ -62,11 +63,58 @@ pub struct CacheStats {
 }
 
 impl State {
+    fn covering(
+        &mut self,
+        inode: u64,
+        generation: u64,
+        offset: u64,
+        length: usize,
+    ) -> Option<(Block, usize)> {
+        let exact = (inode, generation, offset);
+        let key = if self
+            .entries
+            .peek(&exact)
+            .is_some_and(|block| block.as_slice().len() >= length)
+        {
+            exact
+        } else {
+            *self
+                .index
+                .range((inode, generation, 0)..=exact)
+                .rev()
+                .find(|&(&(_, _, start), span)| {
+                    span.length
+                        .checked_sub((offset - start) as usize)
+                        .is_some_and(|available| available >= length)
+                })?
+                .0
+        };
+        let relative = (offset - key.2) as usize;
+        Some((
+            self.entries
+                .get(&key)
+                .expect("range index owns a cache entry")
+                .clone(),
+            relative,
+        ))
+    }
+
+    fn consumed(&mut self, key: Key, relative: usize, length: usize) {
+        if let Some(span) = self.index.get_mut(&key)
+            && relative <= span.consumed
+        {
+            span.consumed = span
+                .consumed
+                .max(relative.saturating_add(length).min(span.length));
+        }
+    }
+
     fn removed(&mut self, key: Key, block: Block) {
         self.index.remove(&key);
         self.weight -= block.as_slice().len() as u64;
         if block.is_loaned() {
             self.loaned -= block.as_slice().len();
+            self.loans.remove(&key);
         }
     }
 
@@ -103,6 +151,7 @@ impl ReadCache {
                 index: BTreeMap::new(),
                 weight: 0,
                 loaned: 0,
+                loans: BTreeSet::new(),
                 evictions: 0,
                 evicted_bytes: 0,
                 insertions: 0,
@@ -146,46 +195,28 @@ impl ReadCache {
         offset: u64,
         length: usize,
     ) -> Option<(Block, usize)> {
-        if let Some(block) = self.get(inode, generation, offset)
-            && block.as_slice().len() >= length
-        {
-            return Some((block, 0));
-        }
-        let mut upper = (inode, generation, offset);
-        loop {
-            let candidate = self
-                .state
-                .lock()
-                .unwrap()
-                .index
-                .range((inode, generation, 0)..=upper)
-                .rev()
-                // Reject unusable spans without updating recency or cloning
-                // payload owners. An older overlapping span may still cover it.
-                .find(|&(&(_, _, start), span)| {
-                    span.length
-                        .checked_sub((offset - start) as usize)
-                        .is_some_and(|available| available >= length)
-                })
-                .map(|(&key, _)| key);
-            let Some((_, _, start)) = candidate else {
-                break;
-            };
-            if let Some(block) = self.get(inode, generation, start) {
-                let relative = (offset - start) as usize;
-                if relative
-                    .checked_add(length)
-                    .is_some_and(|end| end <= block.as_slice().len())
-                {
-                    return Some((block, relative));
-                }
-            }
-            if start == 0 {
-                break;
-            }
-            upper = (inode, generation, start - 1);
-        }
-        None
+        self.state
+            .lock()
+            .unwrap()
+            .covering(inode, generation, offset, length)
+    }
+
+    fn read_span(
+        &self,
+        inode: u64,
+        generation: u64,
+        offset: u64,
+        length: usize,
+    ) -> Option<(Block, usize)> {
+        let mut state = self.state.lock().unwrap();
+        let (block, relative) = state.covering(inode, generation, offset, 1)?;
+        let amount = (block.as_slice().len() - relative).min(length);
+        state.consumed(
+            (inode, generation, offset - relative as u64),
+            relative,
+            amount,
+        );
+        Some((block, relative))
     }
 
     /// Reuse one immutable view, or join adjacent fragments into admitted output.
@@ -198,35 +229,22 @@ impl ReadCache {
         length: usize,
         reply: Reservation,
     ) -> Option<Block> {
-        let (mut block, mut relative) = self.covering(inode, generation, offset, 1)?;
+        let (mut block, mut relative) = self.read_span(inode, generation, offset, length)?;
         if block.as_slice().len() - relative >= length && !block.is_loaned() {
-            self.consumed(
-                inode,
-                generation,
-                offset - relative as u64,
-                relative,
-                length,
-            );
             return Some(block.slice(relative..relative + length));
         }
         let mut result = reply.zeroed();
         let mut filled = 0;
         loop {
             let amount = (block.as_slice().len() - relative).min(length - filled);
-            self.consumed(
-                inode,
-                generation,
-                offset + filled as u64 - relative as u64,
-                relative,
-                amount,
-            );
             result.as_mut_slice()[filled..filled + amount]
                 .copy_from_slice(&block.as_slice()[relative..relative + amount]);
             filled += amount;
             if filled == length {
                 return Some(result);
             }
-            (block, relative) = self.covering(inode, generation, offset + filled as u64, 1)?;
+            (block, relative) =
+                self.read_span(inode, generation, offset + filled as u64, length - filled)?;
         }
     }
 
@@ -273,18 +291,10 @@ impl ReadCache {
         relative: usize,
         length: usize,
     ) {
-        if let Some(span) = self
-            .state
+        self.state
             .lock()
             .unwrap()
-            .index
-            .get_mut(&(inode, generation, start))
-            && relative <= span.consumed
-        {
-            span.consumed = span
-                .consumed
-                .max(relative.saturating_add(length).min(span.length));
-        }
+            .consumed((inode, generation, start), relative, length);
     }
 
     /// Release one cache owner; caller views retain their complete backing charge.
@@ -300,9 +310,14 @@ impl ReadCache {
             .iter_mut()
             .rev()
             .find(|(_, block)| !block.is_loaned())
-            .and_then(|(_, block)| block.try_loan(lane).then_some(block.as_slice().len()));
-        if let Some(length) = loaned {
+            .and_then(|(key, block)| {
+                block
+                    .try_loan(lane)
+                    .then_some((*key, block.as_slice().len()))
+            });
+        if let Some((key, length)) = loaned {
             state.loaned += length;
+            state.loans.insert(key);
             true
         } else {
             false
@@ -313,19 +328,15 @@ impl ReadCache {
         self.state.lock().unwrap().loaned
     }
 
-    /// Filesystem serializes this with all cache reads and lending attempts.
+    /// Upload activity excludes new loans. A concurrent synchronous cache copy
+    /// may briefly retain a loaned backing; byte admission waits for its release.
+    /// Cache reads never export a loaned owner or await while retaining one.
     pub(crate) fn reclaim_loans(&self) {
         let mut state = self.state.lock().unwrap();
         if state.loaned == 0 {
             return;
         }
-        let keys: Vec<_> = state
-            .entries
-            .iter()
-            .filter(|(_, block)| block.is_loaned())
-            .map(|(&key, _)| key)
-            .collect();
-        for key in keys {
+        while let Some(key) = state.loans.first().copied() {
             let block = state.entries.pop(&key).expect("loaned cache owner");
             state.evicted(key, block);
         }
@@ -377,5 +388,6 @@ impl ReadCache {
         state.index.clear();
         state.weight = 0;
         state.loaned = 0;
+        state.loans.clear();
     }
 }

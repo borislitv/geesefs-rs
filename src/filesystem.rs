@@ -1,10 +1,11 @@
 use std::{
     collections::BTreeMap,
+    ops::Bound::{Excluded, Included, Unbounded},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use crate::{
@@ -25,9 +26,10 @@ pub struct Filesystem {
     pub config: Arc<Config>,
     pub store: Arc<dyn Store>,
     pub namespace: Mutex<Namespace>,
+    inodes: Arc<crate::namespace::InodeIndex>,
     pub ingress: Budget,
     data: Budget,
-    cache: Mutex<crate::cache::ReadCache>,
+    cache: crate::cache::ReadCache,
     cache_published: Notify,
     flush_lane: Budget,
     flush_activity: Arc<RwLock<()>>,
@@ -234,7 +236,7 @@ impl Filesystem {
                 ns.capacity_failures,
             )
         };
-        let cache = self.cache.try_lock().ok()?.try_stats()?;
+        let cache = self.cache.try_stats()?;
         Some(crate::metrics::Snapshot {
             namespace,
             cache,
@@ -258,7 +260,7 @@ impl Filesystem {
             payload_limit_bytes: self.ingress.limit() + self.data.limit() + self.flush_lane.limit(),
             data_shared_bytes: self.data.limit(),
             read_cache_policy_bytes: self.data.limit() + self.flush_lane.limit(),
-            read_cache_loaned_bytes: self.cache.lock().unwrap().loaned_bytes(),
+            read_cache_loaned_bytes: self.cache.loaned_bytes(),
             ingress_bytes: self.ingress.limit(),
             flush_bytes: self.flush_lane.limit(),
             data_used_bytes: self.data.used(),
@@ -309,14 +311,16 @@ impl Filesystem {
         let config = Arc::new(config);
         let root = Inode::new(1, "".into(), true, None, &config);
         root.state.lock().unwrap().lookups = 1;
+        let namespace = Namespace::new(root, config.entry_limit as usize);
         Ok(Arc::new(Self {
-            namespace: Mutex::new(Namespace::new(root, config.entry_limit as usize)),
+            inodes: namespace.inodes.clone(),
+            namespace: Mutex::new(namespace),
             ingress: Budget::new(ingress_bytes)?,
             data: Budget::new(data_bytes)?,
-            cache: Mutex::new(crate::cache::ReadCache::with_entry_limit(
+            cache: crate::cache::ReadCache::with_entry_limit(
                 (data_bytes + flush_bytes) as u64,
                 config.entry_limit as usize,
-            )),
+            ),
             cache_published: Notify::new(),
             flush_lane: Budget::new(flush_bytes)?,
             flush_activity: Arc::new(RwLock::new(())),
@@ -336,7 +340,11 @@ impl Filesystem {
     }
 
     pub fn node(&self, ino: u64) -> Result<Arc<Inode>> {
-        self.namespace.lock().unwrap().get(ino)
+        self.inodes
+            .pin()
+            .get(&ino)
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or(Error::Fs(libc::ENOENT))
     }
 
     pub fn check_write(&self) -> Result<()> {
@@ -870,6 +878,7 @@ impl Filesystem {
                 state.size = target.len() as u64;
             }
             self.prepare_metadata(&mut state);
+            ns.track_dirty(node.ino, &state);
         }
         Ok(node)
     }
@@ -1005,13 +1014,7 @@ impl Filesystem {
         };
         // A concurrent fill may have published and relinquished its interval
         // between planning and ownership. Retry speculation on a later read.
-        if self
-            .cache
-            .lock()
-            .unwrap()
-            .gap(ino, generation, range.clone())
-            != Some(range.clone())
-        {
+        if self.cache.gap(ino, generation, range.clone()) != Some(range.clone()) {
             return Ok(());
         }
         let Some(charge) = self.try_refill_admission(ino, generation, consumed, length) else {
@@ -1053,21 +1056,13 @@ impl Filesystem {
     ) -> Option<std::ops::Range<u64>> {
         let trigger = consumed.saturating_add((window / 2) as u64).min(size - 1);
         if read::fill_covers(node, generation, trigger)
-            || self
-                .cache
-                .lock()
-                .unwrap()
-                .contains(node.ino, generation, trigger)
+            || self.cache.contains(node.ino, generation, trigger)
         {
             return None;
         }
         let mut cursor = consumed;
         loop {
-            let gap = self
-                .cache
-                .lock()
-                .unwrap()
-                .gap(node.ino, generation, cursor..size)?;
+            let gap = self.cache.gap(node.ino, generation, cursor..size)?;
             cursor = gap.end;
             if let Some(range) = read::unfilled(node, generation, gap) {
                 return Some(range.start..range.end.min(range.start.saturating_add(window as u64)));
@@ -1087,7 +1082,7 @@ impl Filesystem {
     ) -> Option<crate::budget::Reservation> {
         // No waiting, flushing, or bypassing FIFO for speculative bytes. Reclaim
         // old owners only while the still-needed current backing stays intact.
-        let cache = self.cache.lock().unwrap();
+        let cache = &self.cache;
         loop {
             if let Ok(charge) = self.data.try_reserve(length) {
                 return Some(charge);
@@ -1159,12 +1154,7 @@ impl Filesystem {
         if length == 0 {
             return reply.copy(&[]).map(Some);
         }
-        if let Some(block) = self
-            .cache
-            .lock()
-            .unwrap()
-            .read(ino, generation, offset, length, reply)
-        {
+        if let Some(block) = self.cache.read(ino, generation, offset, length, reply) {
             self.read_metrics.hits.inc();
             self.read_metrics.hit_bytes.inc_by(length as u64);
             return Ok(Some(block));
@@ -1208,11 +1198,7 @@ impl Filesystem {
         let fill = loop {
             let admission = read::start_fill(&node, generation, start, start + prefetch as u64);
             let reply = self.admit(length).await?;
-            let cached = self
-                .cache
-                .lock()
-                .unwrap()
-                .read(ino, generation, offset, length, reply);
+            let cached = self.cache.read(ino, generation, offset, length, reply);
             if let Some(block) = cached {
                 return Ok(Some(block));
             }
@@ -1414,7 +1400,7 @@ impl Filesystem {
             if let Some((ino, generation)) = cache_key {
                 // Publish into the cache followers inspect, including after
                 // pressure reclamation while the GET was in flight.
-                let cache = self.cache.lock().unwrap();
+                let cache = &self.cache;
                 cache.insert(ino, generation, at, block);
                 if right > left {
                     cache.consumed(
@@ -1442,8 +1428,8 @@ impl Filesystem {
                 // Reclaim only as much old cache ownership as admission needs.
                 // Pinned borrowers retain their permits; FIFO waiters stay ahead.
                 {
-                    let cache = self.cache.lock().unwrap();
-                    while self.try_cache_loan(&cache) || cache.evict_lru() {
+                    let cache = &self.cache;
+                    while self.try_cache_loan(cache) || cache.evict_lru() {
                         if let Ok(reservation) = self.data.try_reserve(size) {
                             return Ok(reservation);
                         }
@@ -1470,8 +1456,8 @@ impl Filesystem {
                             result = &mut reservation => return result,
                             _ = async {
                                 let reclaimed = {
-                                    let cache = self.cache.lock().unwrap();
-                                    self.try_cache_loan(&cache) || cache.evict_lru()
+                                    let cache = &self.cache;
+                                    self.try_cache_loan(cache) || cache.evict_lru()
                                 };
                                 if !reclaimed {
                                     published.await;
@@ -1511,12 +1497,13 @@ impl Filesystem {
             return Err(Error::Fs(libc::EINVAL));
         }
         let reservation = self.admit(bytes.len()).await?;
-        let ns = self.namespace.lock().unwrap();
+        let mut ns = self.namespace.lock().unwrap();
         let mut state = node.state.lock().unwrap();
         if ns.is_moving(&state.key) || ns.is_deleting(&state.key) {
             return Err(Error::Fs(libc::EAGAIN));
         }
         write::insert_extent(&mut state, offset, reservation.copy(bytes)?)?;
+        ns.track_dirty(node.ino, &state);
         Ok(bytes.len())
     }
 
@@ -1526,7 +1513,7 @@ impl Filesystem {
             return Err(Error::Fs(libc::EFBIG));
         }
         let node = self.node(ino)?;
-        let ns = self.namespace.lock().unwrap();
+        let mut ns = self.namespace.lock().unwrap();
         let mut state = node.state.lock().unwrap();
         if ns.is_moving(&state.key) || ns.is_deleting(&state.key) {
             return Err(Error::Fs(libc::EAGAIN));
@@ -1534,7 +1521,9 @@ impl Filesystem {
         if file_type(state.mode) != FileType::RegularFile {
             return Err(Error::Fs(libc::EINVAL));
         }
-        write::truncate(&mut state, size)
+        let result = write::truncate(&mut state, size);
+        ns.track_dirty(node.ino, &state);
+        result
     }
 
     fn prepare_metadata(&self, state: &mut State) {
@@ -1556,6 +1545,14 @@ impl Filesystem {
     }
 
     async fn flush_node_locked(&self, node: &Inode) -> Result<()> {
+        let result = self.commit_node_locked(node).await;
+        let mut ns = self.namespace.lock().unwrap();
+        let state = node.state.lock().unwrap();
+        ns.track_dirty(node.ino, &state);
+        result
+    }
+
+    async fn commit_node_locked(&self, node: &Inode) -> Result<()> {
         {
             let mut state = node.state.lock().unwrap();
             if state.deleted {
@@ -1582,7 +1579,7 @@ impl Filesystem {
         let lane = self
             .flush_lane
             .with_activity(self.flush_activity.clone().read_owned().await);
-        self.cache.lock().unwrap().reclaim_loans();
+        self.cache.reclaim_loans();
         write::flush_locked(
             &self.store,
             node,
@@ -1596,19 +1593,8 @@ impl Filesystem {
 
     pub async fn flush_all(&self) -> Result<()> {
         self.reconcile_pending_deletes().await?;
-        // Snapshot only bounded live inode IDs, not a backend directory tree.
-        let nodes: Vec<_> = self
-            .namespace
-            .lock()
-            .unwrap()
-            .nodes
-            .values()
-            .filter(|n| {
-                let s = n.state.lock().unwrap();
-                !s.deleted && s.version > s.durable
-            })
-            .cloned()
-            .collect();
+        // Cost follows pending writes, never the clean namespace cardinality.
+        let nodes = self.namespace.lock().unwrap().dirty_nodes();
         for node in nodes {
             self.fsync(node.ino).await?;
         }
@@ -1697,10 +1683,9 @@ impl Filesystem {
             }
             snapshot
         };
-        let mut selected = {
-            let mut ns = self.namespace.lock().unwrap();
-            self.local_directory_entries(&mut ns, &snapshot.prefix, after, limit)
-        };
+        let mut selected = self
+            .local_directory_entries(&snapshot.prefix, after, limit)
+            .await;
         self.remote_directory_entries(&snapshot.prefix, after, limit, fetched, &mut selected)
             .await?;
         // Standard LIST cannot supply a safe concrete fuser type. Resolve only
@@ -1797,30 +1782,51 @@ impl Filesystem {
         })
     }
 
-    fn local_directory_entries(
+    async fn local_directory_entries(
         &self,
-        ns: &mut Namespace,
         prefix: &str,
         after: &str,
         limit: usize,
     ) -> DirectorySelection {
         let mut selected = DirectorySelection::new();
-        let hidden: Vec<_> = ns.tombstones.keys().cloned().collect();
-        for (name, _) in ns.names.range(prefix.to_owned()..) {
-            if !name.starts_with(prefix) {
-                break;
-            }
-            let relative = &name[prefix.len()..];
-            if !direct_directory_name(relative) || relative <= after || hidden.contains(name) {
-                continue;
-            }
-            if let Some(entry) = self.fresh_local_directory_entry(ns, name) {
-                selected.insert(relative.into(), entry);
-            }
-            trim_directory_selection(&mut selected, limit);
+        if limit == 0 {
+            return selected;
         }
-        ns.hidden("");
-        selected
+        let mut cursor = Excluded(format!("{prefix}{after}"));
+        loop {
+            {
+                let ns = self.namespace.lock().unwrap();
+                // Bound each critical section even when every cached child has
+                // expired. Descendants are skipped by ordered seek, not visited.
+                for _ in 0..128 {
+                    let Some((name, _)) = ns.names.range((cursor.clone(), Unbounded)).next() else {
+                        return selected;
+                    };
+                    let Some(relative) = name.strip_prefix(prefix) else {
+                        return selected;
+                    };
+                    if let Some((directory, _)) = relative.split_once('/') {
+                        // '/' is immediately before '0' in UTF-8 byte ordering.
+                        // Names such as 'a!' and 'a.' have already been visited.
+                        cursor = Included(format!("{prefix}{directory}0"));
+                        continue;
+                    }
+                    cursor = Excluded(name.clone());
+                    if ns
+                        .tombstones
+                        .get(name)
+                        .is_none_or(|until| *until <= Instant::now())
+                        && let Some(entry) = self.fresh_local_directory_entry(&ns, name)
+                    {
+                        selected.insert(relative.into(), entry);
+                        if selected.len() >= limit {
+                            return selected;
+                        }
+                    }
+                }
+            }
+            tokio::task::yield_now().await;
+        }
     }
 
     async fn remote_directory_entries(
@@ -2120,6 +2126,7 @@ impl Filesystem {
         state.deleted = true;
         state.extents.clear();
         state.durable = state.version;
+        ns.track_dirty(node.ino, &state);
         Ok(())
     }
 
@@ -2179,13 +2186,9 @@ impl Filesystem {
         let _moving = MoveLease::begin(&self.namespace, vec![old.clone(), destination.clone()])?;
         let mut pinned: Vec<_> = {
             let ns = self.namespace.lock().unwrap();
-            ns.nodes
-                .values()
-                .filter(|node| {
-                    let state = node.state.lock().unwrap();
-                    state.key == old || directory && state.key.starts_with(&format!("{old}/"))
-                })
-                .cloned()
+            ns.bindings(&old, directory)
+                .into_iter()
+                .map(|(_, ino)| ns.nodes[&ino].clone())
                 .collect()
         };
         if let Some(target) = &target {
@@ -2327,17 +2330,14 @@ impl Filesystem {
             state.extents.clear();
             state.durable = state.version;
         }
-        let changed: Vec<_> = ns
-            .names
-            .iter()
-            .filter(|(key, _)| **key == old || key.starts_with(&format!("{old}/")))
-            .map(|(key, &ino)| (key.clone(), ino))
-            .collect();
+        ns.forget_dirty(&destination);
+        let changed = ns.bindings(&old, directory);
         for (key, ino) in changed {
             let new = format!("{destination}{}", &key[old.len()..]);
             ns.names.remove(&key);
             ns.names.insert(new.clone(), ino);
-            if let Some(node) = ns.nodes.get(&ino) {
+            ns.forget_dirty(&key);
+            if let Ok(node) = ns.get(ino) {
                 let mut state = node.state.lock().unwrap();
                 state.key = new;
                 state.data_key = None;
@@ -2353,6 +2353,7 @@ impl Filesystem {
                 {
                     state.remote = Some(head);
                 }
+                ns.track_dirty(ino, &state);
             }
         }
         ns.changed(&destination);
@@ -2381,7 +2382,7 @@ impl Filesystem {
         }
         let node = self.node(ino)?;
         {
-            let ns = self.namespace.lock().unwrap();
+            let mut ns = self.namespace.lock().unwrap();
             let mut state = node.state.lock().unwrap();
             if ns.is_moving(&state.key) || ns.is_deleting(&state.key) {
                 return Err(Error::Fs(libc::EAGAIN));
@@ -2405,6 +2406,7 @@ impl Filesystem {
             }
             state.version += 1;
             self.prepare_metadata(&mut state);
+            ns.track_dirty(node.ino, &state);
         }
         Ok(node.attr())
     }
@@ -2435,7 +2437,7 @@ impl Filesystem {
         if ino == 1 {
             return Err(Error::Fs(libc::EOPNOTSUPP));
         }
-        let ns = self.namespace.lock().unwrap();
+        let mut ns = self.namespace.lock().unwrap();
         let mut state = node.state.lock().unwrap();
         if ns.is_moving(&state.key) || ns.is_deleting(&state.key) {
             return Err(Error::Fs(libc::EAGAIN));
@@ -2456,7 +2458,7 @@ impl Filesystem {
         if flags & libc::XATTR_CREATE != 0 && exists {
             return Err(Error::Fs(libc::EEXIST));
         }
-        if flags & libc::XATTR_REPLACE != 0 && !exists || value.is_none() && !exists {
+        if !exists && (flags & libc::XATTR_REPLACE != 0 || value.is_none()) {
             return Err(Error::Fs(libc::ENODATA));
         }
         let size: usize = state
@@ -2474,6 +2476,7 @@ impl Filesystem {
             state.metadata.remove(name);
         }
         state.version += 1;
+        ns.track_dirty(node.ino, &state);
         Ok(())
     }
 
@@ -2488,14 +2491,7 @@ impl Filesystem {
             .await
             .map_err(|_| Error::Cancelled)?;
         result?;
-        if self
-            .namespace
-            .lock()
-            .unwrap()
-            .nodes
-            .values()
-            .any(|node| node.state.lock().unwrap().rename_target.is_some())
-        {
+        if !self.namespace.lock().unwrap().pending_moves.is_empty() {
             return Err(Error::Backend {
                 operation: "shutdown",
                 code: "PendingRename".into(),

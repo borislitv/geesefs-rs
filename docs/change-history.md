@@ -5,6 +5,13 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-06: release 0.1.2 preparation
+
+Advance the package and lockfile version together for the namespace-progress and
+lock-scope corrections below. Release assets must come from successful merged-main
+CI with their source provenance and checksums. A versioned release and an explicitly
+authorized reader update do not close filesystem or comparative-performance gates.
+
 ## 2026-11-06: namespace progress for readers and writers
 
 Full clean-namespace scans in periodic flushing and dirty-descendant checks,

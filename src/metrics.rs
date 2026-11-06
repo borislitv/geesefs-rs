@@ -1,8 +1,13 @@
 //! Bounded-cardinality, read-only observations. No paths, credentials or S3 I/O.
 mod allocator;
+mod diagnostics;
 mod server;
 
 pub use allocator::allocation_stats;
+pub use diagnostics::Diagnostics;
+pub(crate) use diagnostics::{
+    NamespaceGuard, Opcode, Stage, Trace, context, error_reason, namespace_lock, observe, scope,
+};
 pub use server::MetricsServer;
 
 use prometheus_client::{
@@ -26,9 +31,9 @@ pub(crate) struct ReadMetrics {
 }
 
 pub(crate) struct Snapshot {
-    pub(crate) namespace: (usize, usize, u64, u64),
+    pub(crate) namespace: Option<(usize, usize, u64, u64)>,
     pub(crate) entry_limit: u64,
-    pub(crate) cache: CacheStats,
+    pub(crate) cache: Option<CacheStats>,
     pub(crate) lanes: [(&'static str, usize, usize); 3],
     pub(crate) reads: ReadMetrics,
 }
@@ -109,8 +114,29 @@ fn cache_metrics(registry: &mut Registry, cache: &CacheStats) {
 }
 
 fn filesystem_metrics(registry: &mut Registry, snapshot: Snapshot) {
-    cache_metrics(registry, &snapshot.cache);
-    let (entries, names, evictions, failures) = snapshot.namespace;
+    let available = Family::<Vec<(&str, &str)>, Observation>::default();
+    for (component, present) in [
+        ("namespace", snapshot.namespace.is_some()),
+        ("read_cache", snapshot.cache.is_some()),
+    ] {
+        available
+            .get_or_create(&vec![("component", component)])
+            .set(u8::from(present) as f64);
+    }
+    registry.register("geesefs_metrics_snapshot_available", "Current component snapshot acquired without waiting; missing gauges are not zero occupancy", available);
+    if let Some(cache) = &snapshot.cache {
+        cache_metrics(registry, cache);
+    }
+    if let Some(namespace) = snapshot.namespace {
+        namespace_metrics(registry, namespace);
+    }
+    independent_filesystem_metrics(registry, snapshot);
+}
+
+fn namespace_metrics(
+    registry: &mut Registry,
+    (entries, names, evictions, failures): (usize, usize, u64, u64),
+) {
     gauge(
         registry,
         "geesefs_namespace_entries",
@@ -123,12 +149,6 @@ fn filesystem_metrics(registry: &mut Registry, snapshot: Snapshot) {
         "Live namespace name bindings",
         names as u64,
     );
-    gauge(
-        registry,
-        "geesefs_namespace_entry_limit",
-        "Configured namespace inode limit",
-        snapshot.entry_limit,
-    );
     counter(
         registry,
         "geesefs_namespace_evictions",
@@ -140,6 +160,15 @@ fn filesystem_metrics(registry: &mut Registry, snapshot: Snapshot) {
         "geesefs_namespace_capacity_failures",
         "Entry-limit admission failures with no eligible victim",
         failures,
+    );
+}
+
+fn independent_filesystem_metrics(registry: &mut Registry, snapshot: Snapshot) {
+    gauge(
+        registry,
+        "geesefs_namespace_entry_limit",
+        "Configured namespace inode limit",
+        snapshot.entry_limit,
     );
     let used = Family::<Vec<(&str, &str)>, Observation>::default();
     let limits = Family::<Vec<(&str, &str)>, Observation>::default();
@@ -249,13 +278,43 @@ fn memory_metrics(registry: &mut Registry) {
     }
 }
 
-/// OpenMetrics text accepted by Prometheus. Contended snapshots fail rather than
-/// block a filesystem operation or expose misleading zero occupancy.
+fn cpu_metrics(registry: &mut Registry) {
+    let Ok(stat) = std::fs::read_to_string("/proc/self/stat") else {
+        return;
+    };
+    let Some((_, fields)) = stat.rsplit_once(')') else {
+        return;
+    };
+    let mut fields = fields.split_whitespace().skip(11);
+    let ticks = fields
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .zip(fields.next().and_then(|value| value.parse::<u64>().ok()));
+    let Some((user, system)) = ticks else {
+        return;
+    };
+    let hz = rustix::param::clock_ticks_per_second() as f64;
+    let cpu = Family::<Vec<(&str, &str)>, Counter<f64, AtomicU64>>::default();
+    for (mode, ticks) in [("user", user), ("system", system)] {
+        cpu.get_or_create(&vec![("mode", mode)])
+            .inc_by(ticks as f64 / hz);
+    }
+    registry.register(
+        "geesefs_process_cpu_seconds",
+        "Daemon user/system CPU from Linux self stat; excludes other processes and unattributed cgroup work",
+        cpu,
+    );
+}
+
+/// OpenMetrics text accepted by Prometheus. Contended components are explicitly
+/// unavailable; independent observations survive without waiting on filesystem locks.
 pub fn render(fs: &Filesystem) -> Option<String> {
-    let snapshot = fs.metrics_snapshot()?;
+    let snapshot = fs.metrics_snapshot();
     let mut registry = Registry::default();
     filesystem_metrics(&mut registry, snapshot);
+    fs.diagnostics.register(&mut registry);
     memory_metrics(&mut registry);
+    cpu_metrics(&mut registry);
     let mut text = String::new();
     encode(&mut text, &registry).expect("encoding into a String cannot fail");
     Some(text)

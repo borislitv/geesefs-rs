@@ -22,6 +22,7 @@ remains outstanding. See LICENSE and NOTICE for source attribution.
 | System comparison | stats_alloc 0.1.10 (MIT) delegates to System; six requested-allocation counters are not native heap/RSS. peak_alloc was rejected because its realloc/calloc implementation changes the measured behavior. |
 | Fixtures | tiny_http 0.12 (MIT OR Apache-2.0), rcgen/tempfile (MIT OR Apache-2.0), Moto and SeaweedFS (Apache-2.0); real HTTP/TLS boundaries plus faithful gated storage fakes. |
 | CPU accounting | psutil 7.2.2 (BSD-3-Clause) process counters and owned cgroup `cpu.stat`; wall time is not CPU consumed. |
+| Diagnostic output | [tracing-appender 0.2.5](https://docs.rs/tracing-appender/0.2.5/tracing_appender/non_blocking/) (MIT): supported bounded lossy `NonBlockingBuilder`, off-thread stderr and drop counter; no custom queue, global tracing subscriber or synchronous writer in the detailed FUSE path. |
 | Go heap accounting | Go's public `net/http/pprof` debug text exposes live `runtime.MemStats`. Python standard-library HTTP, response bounds and a narrow field adapter avoid implementing a heap-profile decoder or adding another runtime dependency. |
 | Redistribution inventory | [cargo-about 0.9.3](https://github.com/EmbarkStudios/cargo-about/releases/tag/0.9.3) (MIT OR Apache-2.0) plus Cargo's source-vendor command: verified locked HTML/native-source notice bundle. Checksum-specific webpki clarification retains ISC/BSD/Apache texts; bundled C/assembly/file notices remain with full upstream sources. See [distribution](distribution.md). |
 
@@ -80,6 +81,38 @@ web framework/exporter runtime is unnecessary for one GET route. Use the existin
 jemalloc/stats_alloc APIs; the narrow Linux RSS adapter reads only self status.
 Snapshot existing cache/namespace cardinalities under their current locks; never
 scan inodes, reserve payload, refresh caches or contact storage during a scrape.
+
+For phase diagnosis reuse 0.25.2's supported
+[classic Histogram](https://docs.rs/prometheus-client/0.25.2/prometheus_client/metrics/histogram/struct.Histogram.html)
+with explicit seconds buckets and prebound handles. Native-only histograms cannot
+use this endpoint's OpenMetrics text encoding. Histograms have an internal mutex;
+measure their observer cost rather than claiming lock-free instrumentation.
+Use Tokio's task-local scope for request ownership across awaits, explicitly
+propagating it into owned read jobs. Small lifetime guards describe application
+reply/phase boundaries; no tracing/exporter framework or custom histogram is needed.
+
+The maintained tracing-appender 0.2.5 release supports Rust 1.63 and adds the
+nonblocking writer without requiring a global tracing subscriber. Its
+[release notes](https://github.com/tokio-rs/tracing/blob/tracing-appender-0.2.5/tracing-appender/CHANGELOG.md)
+and [implementation](https://github.com/tokio-rs/tracing/blob/tracing-appender-0.2.5/tracing-appender/src/non_blocking.rs)
+confirm lossy `try_send`, fixed queue capacity and a finite shutdown flush.
+Use 16 queued records, retain `WorkerGuard` with the filesystem observations and
+export enqueue drops. Format one bounded record only after filtering/rate admission.
+The default 128,000-line queue is unnecessary. Direct `eprintln!` can hold a runtime
+worker behind stderr/journald; an application-owned queue or logging framework is
+not needed. Process exit or stderr I/O failure still cannot guarantee delivery.
+
+The pinned Smithy runtime API 1.19.1 exposes
+[Intercept](https://docs.rs/aws-smithy-runtime-api/1.19.1/aws_smithy_runtime_api/client/interceptors/trait.Intercept.html)
+hooks before execution/transmit and execution-local ConfigBag storage. Count
+transport attempts there, including retries, without reading URLs, headers or
+bodies. Presigning also runs the before-transmit hook: exclude query signing via
+the public `aws-runtime` `SigV4OperationSigningConfig`/`HttpSignatureType`, not S3's
+private `PresigningMarker`. Sent SDK operations use header signing. These counts
+include transport failures before wire transmission. GET `.send()` ends at headers and is not a network-only timer;
+observe streamed body consumption separately. Retain SDK signing, retry and
+checksum semantics. The performance issues already reviewed below do not justify
+replacing the transport merely to obtain these observations.
 
 The [Linux 7.3 assessment](fuse-io-uring-assessment.md) compares versioned kernel
 UAPI, installed fuser 0.18.0, the unmerged Skory transport stack, Apache-2.0

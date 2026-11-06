@@ -14,6 +14,7 @@ use crate::{
     config::{Config, PayloadBudgets},
     error::{Error, Result},
     inode::{Inode, State, file_type},
+    metrics::{self, Stage},
     namespace::{MoveLease, Namespace, child},
     read,
     write::{self, MAX_IO},
@@ -40,6 +41,7 @@ pub struct Filesystem {
     preloaded_directories: moka::sync::Cache<u64, std::time::Instant>,
     closing: AtomicBool,
     read_metrics: crate::metrics::ReadMetrics,
+    pub(crate) diagnostics: crate::metrics::Diagnostics,
 }
 
 struct DirectoryPage {
@@ -225,19 +227,29 @@ pub fn not_found(error: &Error) -> bool {
 }
 
 impl Filesystem {
+    fn lock_namespace(&self) -> metrics::NamespaceGuard<'_, Namespace> {
+        metrics::namespace_lock(&self.namespace, &self.diagnostics)
+    }
+
+    fn again(&self, reason: &'static str) -> Error {
+        self.diagnostics.event(reason);
+        if let Some(trace) = metrics::context() {
+            trace.again(reason);
+        }
+        Error::Fs(libc::EAGAIN)
+    }
     /// Constant-time observations; no inode walk, storage I/O or cache refresh.
-    pub(crate) fn metrics_snapshot(&self) -> Option<crate::metrics::Snapshot> {
-        let namespace = {
-            let ns = self.namespace.try_lock().ok()?;
+    pub(crate) fn metrics_snapshot(&self) -> crate::metrics::Snapshot {
+        let namespace = self.namespace.try_lock().ok().map(|ns| {
             (
                 ns.nodes.len(),
                 ns.names.len(),
                 ns.evictions,
                 ns.capacity_failures,
             )
-        };
-        let cache = self.cache.try_stats()?;
-        Some(crate::metrics::Snapshot {
+        });
+        let cache = self.cache.try_stats();
+        crate::metrics::Snapshot {
             namespace,
             cache,
             entry_limit: self.config.entry_limit,
@@ -247,7 +259,7 @@ impl Filesystem {
                 ("flush", self.flush_lane.used(), self.flush_lane.limit()),
             ],
             reads: self.read_metrics.clone(),
-        })
+        }
     }
 
     pub fn effective_budgets(&self) -> EffectiveBudgets {
@@ -312,6 +324,15 @@ impl Filesystem {
         let root = Inode::new(1, "".into(), true, None, &config);
         root.state.lock().unwrap().lookups = 1;
         let namespace = Namespace::new(root, config.entry_limit as usize);
+        let diagnostics = store
+            .diagnostics()
+            .filter(crate::metrics::Diagnostics::enabled)
+            .unwrap_or_else(|| {
+                crate::metrics::Diagnostics::new(
+                    config.metrics_listen.is_some() && !config.no_diagnostics,
+                    config.diagnostic_log_level,
+                )
+            });
         Ok(Arc::new(Self {
             inodes: namespace.inodes.clone(),
             namespace: Mutex::new(namespace),
@@ -334,6 +355,7 @@ impl Filesystem {
             preloaded_directories: moka::sync::Cache::new(config.entry_limit),
             closing: AtomicBool::new(false),
             read_metrics: crate::metrics::ReadMetrics::default(),
+            diagnostics,
             config,
             store,
         }))
@@ -376,7 +398,7 @@ impl Filesystem {
             && !self.config.stat_cache_ttl.is_zero()
         {
             let preload = {
-                let mut ns = self.namespace.lock().unwrap();
+                let mut ns = self.lock_namespace();
                 let negative = ns
                     .get(parent)?
                     .state
@@ -400,12 +422,12 @@ impl Filesystem {
             }
         }
         let (epoch, observed) = {
-            let mut ns = self.namespace.lock().unwrap();
+            let mut ns = self.lock_namespace();
             if ns.is_moving(&key) {
-                return Err(Error::Fs(libc::EAGAIN));
+                return Err(self.again("lookup_moving"));
             }
             if ns.is_deleting(&key) {
-                return Err(Error::Fs(libc::EAGAIN));
+                return Err(self.again("lookup_deleting"));
             }
             if ns.hidden(&key) {
                 return Err(Error::Fs(libc::ENOENT));
@@ -474,16 +496,16 @@ impl Filesystem {
             }
             Err(error) => return Err(error),
         };
-        let mut ns = self.namespace.lock().unwrap();
+        let mut ns = self.lock_namespace();
         {
             let parent = ns.get(parent)?;
             let state = parent.state.lock().unwrap();
             if state.deleted || child(&state.key, name)? != key {
-                return Err(Error::Fs(libc::EAGAIN));
+                return Err(self.again("lookup_parent_changed"));
             }
         }
         if ns.is_moving(&key) || ns.is_deleting(&key) || ns.hidden(&key) {
-            return Err(Error::Fs(libc::EAGAIN));
+            return Err(self.again("lookup_binding_busy"));
         }
         if let Some(node) = ns.named(&key) {
             let mut fresh = Inode::new(node.ino, key.clone(), directory, head, &self.config)
@@ -499,7 +521,7 @@ impl Filesystem {
                     state.remote.as_ref().map(|h| h.etag.clone()),
                 ))
             {
-                return Err(Error::Fs(libc::EAGAIN));
+                return Err(self.again("lookup_generation_changed"));
             }
             if state.can_replace_metadata(started) {
                 state.replace_metadata(fresh);
@@ -508,7 +530,7 @@ impl Filesystem {
             return Ok(node);
         }
         if observed.is_some() {
-            return Err(Error::Fs(libc::EAGAIN));
+            return Err(self.again("lookup_binding_removed"));
         }
         ns.install(&key, |ino| {
             let node = Inode::new(ino, key.clone(), directory, head, &self.config);
@@ -521,7 +543,7 @@ impl Filesystem {
         let node = self.node(parent)?;
         let _gate = node.preload.lock().await;
         let (prefix, epoch) = {
-            let ns = self.namespace.lock().unwrap();
+            let ns = self.lock_namespace();
             if self
                 .preloaded_directories
                 .get(&parent)
@@ -531,7 +553,7 @@ impl Filesystem {
             }
             let state = node.state.lock().unwrap();
             if state.deleted || ns.is_moving(&state.key) || ns.is_deleting(&state.key) {
-                return Err(Error::Fs(libc::EAGAIN));
+                return Err(self.again("preload_binding_busy"));
             }
             let prefix = if state.key.is_empty() {
                 String::new()
@@ -542,9 +564,9 @@ impl Filesystem {
         };
         let fetched = std::time::Instant::now();
         let page = self.store.list(&prefix, Some("/"), None).await;
-        let mut ns = self.namespace.lock().unwrap();
+        let mut ns = self.lock_namespace();
         if ns.epoch != epoch {
-            return Err(Error::Fs(libc::EAGAIN));
+            return Err(self.again("preload_epoch_changed"));
         }
         // This records an attempt, not an authoritative negative listing.
         self.preloaded_directories.insert(parent, fetched);
@@ -607,7 +629,7 @@ impl Filesystem {
         let started = std::time::Instant::now();
         let node = self.node(ino)?;
         let (key, directory, remote, version, epoch, list_only) = {
-            let ns = self.namespace.lock().unwrap();
+            let ns = self.lock_namespace();
             let s = node.state.lock().unwrap();
             if s.deleted {
                 return Err(Error::Fs(libc::ENOENT));
@@ -616,7 +638,7 @@ impl Filesystem {
                 return Ok(node.clone());
             }
             if ns.is_moving(&s.key) || ns.is_deleting(&s.key) {
-                return Err(Error::Fs(libc::EAGAIN));
+                return Err(self.again("refresh_binding_busy"));
             }
             if s.version > s.durable
                 || s.rename_target.is_some()
@@ -674,7 +696,7 @@ impl Filesystem {
                 Err(e) => Err(e),
             }
         };
-        let mut ns = self.namespace.lock().unwrap();
+        let mut ns = self.lock_namespace();
         let mut s = node.state.lock().unwrap();
         if s.deleted
             || s.key != key
@@ -682,7 +704,7 @@ impl Filesystem {
             || ns.is_moving(&key)
             || ns.is_deleting(&key)
         {
-            return Err(Error::Fs(libc::EAGAIN));
+            return Err(self.again("refresh_binding_changed"));
         }
         if s.version != version
             || s.remote.as_ref().map(|h| &h.etag) != remote.as_ref().map(|h| &h.etag)
@@ -692,7 +714,7 @@ impl Filesystem {
             return Ok(node.clone());
         }
         if directory && ns.epoch != epoch && fetched.as_ref().is_err_and(not_found) {
-            return Err(Error::Fs(libc::EAGAIN));
+            return Err(self.again("refresh_directory_changed"));
         }
         match fetched {
             Ok(head) => {
@@ -723,9 +745,9 @@ impl Filesystem {
         started: std::time::Instant,
         observed: &Option<(u64, u64, Option<String>)>,
     ) -> Result<Error> {
-        let mut ns = self.namespace.lock().unwrap();
+        let mut ns = self.lock_namespace();
         if ns.epoch != epoch {
-            return Ok(Error::Fs(libc::EAGAIN));
+            return Ok(self.again("missing_epoch_changed"));
         }
         if let Some(node) = ns.named(key) {
             let mut state = node.state.lock().unwrap();
@@ -738,7 +760,7 @@ impl Filesystem {
                         state.remote.as_ref().map(|h| h.etag.clone()),
                     ))
             {
-                return Ok(Error::Fs(libc::EAGAIN));
+                return Ok(self.again("missing_generation_changed"));
             }
             state.deleted = true;
             drop(state);
@@ -778,9 +800,7 @@ impl Filesystem {
         };
         let key = node.state.lock().unwrap().key.clone();
         let parent = key.rsplit_once('/').map_or("", |(parent, _)| parent);
-        self.namespace
-            .lock()
-            .unwrap()
+        self.lock_namespace()
             .named(parent)
             .map_or(1, |node| node.ino)
     }
@@ -837,7 +857,7 @@ impl Filesystem {
             Err(error) => return Err(error),
         }
         let directory = mode & libc::S_IFMT == libc::S_IFDIR;
-        let mut ns = self.namespace.lock().unwrap();
+        let mut ns = self.lock_namespace();
         {
             let p = ns.get(parent)?;
             let s = p.state.lock().unwrap();
@@ -850,7 +870,7 @@ impl Filesystem {
             }
         }
         if ns.is_moving(&key) || ns.is_deleting(&key) || Self::pending_rename(&ns, &key, None) {
-            return Err(Error::Fs(libc::EAGAIN));
+            return Err(self.again("create_binding_busy"));
         }
         if ns.named(&key).is_some() {
             return Err(Error::Fs(libc::EEXIST));
@@ -1154,7 +1174,13 @@ impl Filesystem {
         if length == 0 {
             return reply.copy(&[]).map(Some);
         }
-        if let Some(block) = self.cache.read(ino, generation, offset, length, reply) {
+        let cached = {
+            let timer = self.diagnostics.stage(Stage::CacheRead);
+            let cached = self.cache.read(ino, generation, offset, length, reply);
+            timer.ok();
+            cached
+        };
+        if let Some(block) = cached {
             self.read_metrics.hits.inc();
             self.read_metrics.hit_bytes.inc_by(length as u64);
             return Ok(Some(block));
@@ -1208,9 +1234,13 @@ impl Filesystem {
                     // Subscribe before the cache check so a completed chunk
                     // cannot be missed between lookup and waiting. Closing also
                     // wakes followers after error or cancellation; retry normally.
-                    let _ = tokio::time::timeout(self.config.request_timeout, done.changed())
-                        .await
-                        .map_err(|_| Error::Timeout("overlapping read fill"))?;
+                    metrics::observe(&self.diagnostics, Stage::FillWait, async {
+                        let _ = tokio::time::timeout(self.config.request_timeout, done.changed())
+                            .await
+                            .map_err(|_| Error::Timeout("overlapping read fill"))?;
+                        Ok(())
+                    })
+                    .await?;
                 }
             }
         };
@@ -1302,12 +1332,15 @@ impl Filesystem {
                 let mut owner = charge.split((if single_buffer { 1 } else { 2 }) * amount);
                 let (store, snapshot) = (self.store.clone(), snapshot.clone());
                 let metrics = self.read_metrics.clone();
+                let diagnostics = self.diagnostics.clone();
+                let context = metrics::context();
                 let sender = sender.clone();
-                tasks.spawn(async move {
+                tasks.spawn(metrics::scope(context, async move {
                     metrics.fill_jobs.inc();
                     let result = async {
                         let local = Budget::new(2 * amount)?;
-                        let output = crate::backend::RangeSink::new(sender, owner.split(amount));
+                        let output = crate::backend::RangeSink::new(sender, owner.split(amount))
+                            .with_diagnostics(diagnostics);
                         if single_buffer {
                             store
                                 .read_range_chunks(
@@ -1330,7 +1363,7 @@ impl Filesystem {
                         metrics.fill_errors.inc();
                     }
                     (at, result)
-                });
+                }));
             }
             let completed = tokio::select! {
                 // A producer can finish with a late body error after enqueueing
@@ -1425,52 +1458,61 @@ impl Filesystem {
         match self.data.try_reserve(size) {
             Ok(reservation) => Ok(reservation),
             Err(Error::Fs(code)) if code == libc::ENOMEM => {
-                // Reclaim only as much old cache ownership as admission needs.
-                // Pinned borrowers retain their permits; FIFO waiters stay ahead.
-                {
-                    let cache = &self.cache;
-                    while self.try_cache_loan(cache) || cache.evict_lru() {
-                        if let Ok(reservation) = self.data.try_reserve(size) {
-                            return Ok(reservation);
-                        }
-                    }
-                }
-                if let Ok(reservation) = self.data.try_reserve(size) {
-                    return Ok(reservation);
-                }
-                if self.config.use_enomem {
-                    return self.data.try_reserve(size);
-                }
-                self.flush_all().await?;
-                tokio::time::timeout(Duration::from_secs(30), async {
-                    // Retain the same FIFO reservation while reclaiming owners
-                    // published by fills that were in flight at the first sweep.
-                    let reservation = self.data.reserve(size);
-                    tokio::pin!(reservation);
-                    loop {
-                        let published = self.cache_published.notified();
-                        // notify_waiters covers futures created before the
-                        // cache check, including ones not yet polled.
-                        tokio::select! {
-                            biased;
-                            result = &mut reservation => return result,
-                            _ = async {
-                                let reclaimed = {
-                                    let cache = &self.cache;
-                                    self.try_cache_loan(cache) || cache.evict_lru()
-                                };
-                                if !reclaimed {
-                                    published.await;
-                                }
-                            } => {}
-                        }
-                    }
-                })
-                .await
-                .map_err(|_| Error::Timeout("payload admission"))?
+                return metrics::observe(
+                    &self.diagnostics,
+                    Stage::PayloadAdmission,
+                    self.admit_pressured(size),
+                )
+                .await;
             }
             Err(error) => Err(error),
         }
+    }
+
+    async fn admit_pressured(&self, size: usize) -> Result<crate::budget::Reservation> {
+        // Reclaim only as much old cache ownership as admission needs.
+        // Pinned borrowers retain their permits; FIFO waiters stay ahead.
+        {
+            let cache = &self.cache;
+            while self.try_cache_loan(cache) || cache.evict_lru() {
+                if let Ok(reservation) = self.data.try_reserve(size) {
+                    return Ok(reservation);
+                }
+            }
+        }
+        if let Ok(reservation) = self.data.try_reserve(size) {
+            return Ok(reservation);
+        }
+        if self.config.use_enomem {
+            return self.data.try_reserve(size);
+        }
+        self.flush_all().await?;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            // Retain the same FIFO reservation while reclaiming owners
+            // published by fills that were in flight at the first sweep.
+            let reservation = self.data.reserve(size);
+            tokio::pin!(reservation);
+            loop {
+                let published = self.cache_published.notified();
+                // notify_waiters covers futures created before the
+                // cache check, including ones not yet polled.
+                tokio::select! {
+                    biased;
+                    result = &mut reservation => return result,
+                    _ = async {
+                        let reclaimed = {
+                            let cache = &self.cache;
+                            self.try_cache_loan(cache) || cache.evict_lru()
+                        };
+                        if !reclaimed {
+                            published.await;
+                        }
+                    } => {}
+                }
+            }
+        })
+        .await
+        .map_err(|_| Error::Timeout("payload admission"))?
     }
 
     fn try_cache_loan(&self, cache: &crate::cache::ReadCache) -> bool {
@@ -1498,10 +1540,10 @@ impl Filesystem {
         }
         let reservation = self.admit(bytes.len()).await?;
         let block = reservation.copy(bytes)?;
-        let mut ns = self.namespace.lock().unwrap();
+        let mut ns = self.lock_namespace();
         let mut state = node.state.lock().unwrap();
         if ns.is_moving(&state.key) || ns.is_deleting(&state.key) {
-            return Err(Error::Fs(libc::EAGAIN));
+            return Err(self.again("write_binding_busy"));
         }
         write::insert_extent(&mut state, offset, block)?;
         ns.track_dirty(node.ino, &state);
@@ -1514,10 +1556,10 @@ impl Filesystem {
             return Err(Error::Fs(libc::EFBIG));
         }
         let node = self.node(ino)?;
-        let mut ns = self.namespace.lock().unwrap();
+        let mut ns = self.lock_namespace();
         let mut state = node.state.lock().unwrap();
         if ns.is_moving(&state.key) || ns.is_deleting(&state.key) {
-            return Err(Error::Fs(libc::EAGAIN));
+            return Err(self.again("truncate_binding_busy"));
         }
         if file_type(state.mode) != FileType::RegularFile {
             return Err(Error::Fs(libc::EINVAL));
@@ -1536,18 +1578,18 @@ impl Filesystem {
         let _gate = node.flush.lock().await;
         let key = node.state.lock().unwrap().key.clone();
         let busy = {
-            let ns = self.namespace.lock().unwrap();
+            let ns = self.lock_namespace();
             ns.is_moving(&key) || ns.is_deleting(&key) || Self::pending_rename(&ns, &key, None)
         };
         if busy {
-            return Err(Error::Fs(libc::EAGAIN));
+            return Err(self.again("fsync_binding_busy"));
         }
         self.flush_node_locked(&node).await
     }
 
     async fn flush_node_locked(&self, node: &Inode) -> Result<()> {
         let result = self.commit_node_locked(node).await;
-        let mut ns = self.namespace.lock().unwrap();
+        let mut ns = self.lock_namespace();
         let state = node.state.lock().unwrap();
         ns.track_dirty(node.ino, &state);
         result
@@ -1595,7 +1637,7 @@ impl Filesystem {
     pub async fn flush_all(&self) -> Result<()> {
         self.reconcile_pending_deletes().await?;
         // Cost follows pending writes, never the clean namespace cardinality.
-        let nodes = self.namespace.lock().unwrap().dirty_nodes();
+        let nodes = self.lock_namespace().dirty_nodes();
         for node in nodes {
             self.fsync(node.ino).await?;
         }
@@ -1674,7 +1716,7 @@ impl Filesystem {
     ) -> Result<DirectoryRemainder> {
         let fetched = std::time::Instant::now();
         let snapshot = {
-            let ns = self.namespace.lock().unwrap();
+            let ns = self.lock_namespace();
             let snapshot = self.directory_snapshot(&ns, ino, resolve_types, fetched)?;
             if resolve_types
                 && let Some(page) =
@@ -1715,7 +1757,7 @@ impl Filesystem {
             return Err(Error::Fs(libc::ENOENT));
         }
         if resolve_types && (ns.is_moving(&state.key) || ns.is_deleting(&state.key)) {
-            return Err(Error::Fs(libc::EAGAIN));
+            return Err(self.again("directory_binding_busy"));
         }
         let prefix = if state.key.is_empty() {
             String::new()
@@ -1796,7 +1838,7 @@ impl Filesystem {
         let mut cursor = Excluded(format!("{prefix}{after}"));
         loop {
             {
-                let ns = self.namespace.lock().unwrap();
+                let ns = self.lock_namespace();
                 // Bound each critical section even when every cached child has
                 // expired. Descendants are skipped by ordered seek, not visited.
                 for _ in 0..128 {
@@ -1899,7 +1941,7 @@ impl Filesystem {
                 continue;
             }
             let full = child(prefix.trim_end_matches('/'), name)?;
-            if self.namespace.lock().unwrap().hidden(&full) {
+            if self.lock_namespace().hidden(&full) {
                 continue;
             }
             selected.entry(name.into()).or_insert(entry);
@@ -1923,13 +1965,12 @@ impl Filesystem {
                 completed = jobs.next(), if !jobs.is_empty() => {
                     completed.expect("admitted metadata job")?;
                 }
-                admitted = tokio::time::timeout(
-                    self.config.http_timeout,
-                    self.metadata_slots.clone().acquire_owned(),
-                ), if next.is_some() => {
-                    let permit = admitted
-                        .map_err(|_| Error::Timeout("directory metadata admission"))?
-                        .map_err(|_| Error::Cancelled)?;
+                admitted = metrics::observe(&self.diagnostics, Stage::MetadataSlots, async {
+                    tokio::time::timeout(self.config.http_timeout, self.metadata_slots.clone().acquire_owned())
+                        .await.map_err(|_| Error::Timeout("directory metadata admission"))?
+                        .map_err(|_| Error::Cancelled)
+                }), if next.is_some() => {
+                    let permit = admitted?;
                     let (name, entry) = next.take().expect("selected unknown type");
                     // Admission precedes creation of each future: concurrent
                     // pages cannot accumulate per-entry semaphore waiters.
@@ -1971,12 +2012,12 @@ impl Filesystem {
         selected: DirectorySelection,
         resolve_types: bool,
     ) -> Result<Arc<DirectoryPage>> {
-        let mut ns = self.namespace.lock().unwrap();
+        let mut ns = self.lock_namespace();
         let ino = snapshot.node.ino;
         if snapshot.node.directory_epoch.load(Ordering::Relaxed) != snapshot.epoch
             || ns.names.get(snapshot.prefix.trim_end_matches('/')) != Some(&ino)
         {
-            return Err(Error::Fs(libc::EAGAIN));
+            return Err(self.again("directory_generation_changed"));
         }
         let mut entries = Vec::with_capacity(selected.len());
         for (name, entry) in selected {
@@ -2011,7 +2052,7 @@ impl Filesystem {
         self.check_write()?;
         let key = self.child_key(parent, name)?;
         let pending = {
-            let ns = self.namespace.lock().unwrap();
+            let ns = self.lock_namespace();
             ns.pending_deletes
                 .get(&key)
                 .and_then(|ino| ns.nodes.get(ino))
@@ -2036,7 +2077,7 @@ impl Filesystem {
     /// binding excludes recreation; only the original inode can complete it.
     pub async fn reconcile_pending_deletes(&self) -> Result<()> {
         let pending: Vec<_> = {
-            let ns = self.namespace.lock().unwrap();
+            let ns = self.lock_namespace();
             ns.pending_deletes
                 .iter()
                 .map(|(key, ino)| Ok((key.clone(), ns.get(*ino)?)))
@@ -2058,7 +2099,7 @@ impl Filesystem {
     ) -> Result<()> {
         let _gate = node.flush.lock().await;
         {
-            let ns = self.namespace.lock().unwrap();
+            let ns = self.lock_namespace();
             let state = node.state.lock().unwrap();
             if state.deleted
                 || state.key != key
@@ -2070,7 +2111,7 @@ impl Filesystem {
         }
         let _reservation = MoveLease::begin_delete(&self.namespace, key.clone(), node.ino)?;
         {
-            let ns = self.namespace.lock().unwrap();
+            let ns = self.lock_namespace();
             let state = node.state.lock().unwrap();
             if state.deleted || state.key != key || ns.names.get(&key) != Some(&node.ino) {
                 return Err(Error::Fs(libc::ENOENT));
@@ -2095,7 +2136,7 @@ impl Filesystem {
             return Err(Error::Fs(libc::ENOTEMPTY));
         }
         {
-            let mut ns = self.namespace.lock().unwrap();
+            let mut ns = self.lock_namespace();
             ns.tombstone(&key)?;
             ns.pending_deletes.insert(key.clone(), node.ino);
         }
@@ -2112,14 +2153,14 @@ impl Filesystem {
             // ordinary lookup on authorization/validation failures only.
             if matches!(&error,Error::Backend{code,..} if matches!(code.as_str(),"AccessDenied"|"InvalidAccessKeyId"|"SignatureDoesNotMatch"|"InvalidArgument"|"InvalidRequest"))
             {
-                let mut ns = self.namespace.lock().unwrap();
+                let mut ns = self.lock_namespace();
                 ns.pending_deletes.remove(&key);
                 ns.tombstones.remove(&key);
                 ns.changed(&key);
             }
             return Err(error);
         }
-        let mut ns = self.namespace.lock().unwrap();
+        let mut ns = self.lock_namespace();
         ns.pending_deletes.remove(&key);
         ns.names.remove(&key);
         ns.changed(&key);
@@ -2143,7 +2184,7 @@ impl Filesystem {
         let destination = self.child_key(newparent, newname)?;
         let old = source.state.lock().unwrap().key.clone();
         {
-            let ns = self.namespace.lock().unwrap();
+            let ns = self.lock_namespace();
             if Self::pending_rename(&ns, &old, Some(source.ino))
                 || Self::pending_rename(&ns, &destination, Some(source.ino))
                 || [&old, &destination].into_iter().any(|key| {
@@ -2186,7 +2227,7 @@ impl Filesystem {
         };
         let _moving = MoveLease::begin(&self.namespace, vec![old.clone(), destination.clone()])?;
         let mut pinned: Vec<_> = {
-            let ns = self.namespace.lock().unwrap();
+            let ns = self.lock_namespace();
             ns.bindings(&old, directory)
                 .into_iter()
                 .map(|(_, ino)| ns.nodes[&ino].clone())
@@ -2216,7 +2257,7 @@ impl Filesystem {
             state.rename_target = Some(destination.clone());
         }
         {
-            let mut ns = self.namespace.lock().unwrap();
+            let mut ns = self.lock_namespace();
             ns.pending_moves.insert(old.clone(), source.ino);
             ns.pending_moves.insert(destination.clone(), source.ino);
         }
@@ -2240,7 +2281,7 @@ impl Filesystem {
                         .as_ref()
                         .is_some_and(|key: &String| object.key <= *key)
                     {
-                        return Err(Error::Fs(libc::EAGAIN));
+                        return Err(self.again("rename_listing_repeated"));
                     }
                     let suffix = object
                         .key
@@ -2320,7 +2361,7 @@ impl Filesystem {
                 }
             }
         }
-        let mut ns = self.namespace.lock().unwrap();
+        let mut ns = self.lock_namespace();
         ns.tombstone(&old)?;
         ns.tombstones.remove(&destination);
         if let Some(ino) = ns.names.remove(&destination)
@@ -2383,10 +2424,10 @@ impl Filesystem {
         }
         let node = self.node(ino)?;
         {
-            let mut ns = self.namespace.lock().unwrap();
+            let mut ns = self.lock_namespace();
             let mut state = node.state.lock().unwrap();
             if ns.is_moving(&state.key) || ns.is_deleting(&state.key) {
-                return Err(Error::Fs(libc::EAGAIN));
+                return Err(self.again("setattr_binding_busy"));
             }
             if state.deleted {
                 return Err(Error::Fs(libc::ENOENT));
@@ -2438,10 +2479,10 @@ impl Filesystem {
         if ino == 1 {
             return Err(Error::Fs(libc::EOPNOTSUPP));
         }
-        let mut ns = self.namespace.lock().unwrap();
+        let mut ns = self.lock_namespace();
         let mut state = node.state.lock().unwrap();
         if ns.is_moving(&state.key) || ns.is_deleting(&state.key) {
-            return Err(Error::Fs(libc::EAGAIN));
+            return Err(self.again("setxattr_binding_busy"));
         }
         if state.deleted {
             return Err(Error::Fs(libc::ENOENT));
@@ -2492,7 +2533,7 @@ impl Filesystem {
             .await
             .map_err(|_| Error::Cancelled)?;
         result?;
-        if !self.namespace.lock().unwrap().pending_moves.is_empty() {
+        if !self.lock_namespace().pending_moves.is_empty() {
             return Err(Error::Backend {
                 operation: "shutdown",
                 code: "PendingRename".into(),

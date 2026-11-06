@@ -5,6 +5,41 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Bounded phase and failure diagnostics — 2026-11-06
+
+Real SDK/loopback HTTP and fuser wire fixtures verify attempt/retry accounting,
+presigning exclusion, observer reconfiguration, unchanged write-signing options,
+terminal replies, admission/source attribution, owned READ tails, busy scrapes,
+cancellation and rate-limited path-free records. An invalid extended LIST reaches
+READDIR as EIO with `invalid_response` and a failed `s3_list` phase; cancelling a
+gated HTTP LIST produces one ETIMEDOUT reply and a cancelled, not failed, phase.
+The source-class and phase assertions first fail before their corrections.
+Blocked-stderr and real-rate full-queue controls verify continued FUSE replies and
+admission, bounded enqueue drops, complete JSON and independent off/error/warn
+filtering. The synchronous writer and missing CLI option are observed failing
+before the nonblocking correction; four additional selected logger mutations fail
+behavioral assertions, including lossless backpressure and filtering at equality.
+
+Both default and all-feature Rust suites pass **311 cases**, with **17 ignored**:
+thirteen native cases, two namespace scaling diagnostics and two observer-cost
+diagnostics. Formatting, warning-denying all-target/all-feature Clippy, the
+349-package public-source audit, 14 Python fixture and 99 Python benchmark cases
+pass with Rust 1.96.0 and the fixture virtual environment on `PATH`.
+
+Selected mutation receipts distinguish 15 behavioral failures (six SDK and nine
+diagnostics) from two compiler-rejected SDK mutants. The SDK's unreachable default
+for already-initialized execution state was removed; no selected mutant survives.
+This is a scoped failure-sensitivity check, not repository-wide mutation coverage.
+Complexity-only screening of the two new modules has CC 12 for the closed errno
+mapping and 10 for the error-class mapping; without LLVM coverage, CRAP is unknown.
+Duplication screening at 0.8 finds no candidates in those two modules.
+
+The [observer fixtures](metrics.md#observer-cost-fixtures) compare the same release
+executable with detailed diagnostics on/off. Their client/runtime/backend work is
+in the measured process; they do not replace kernel-mounted or Go-relative
+acceptance. Native isolation remains blocked locally by noninteractive sudo and
+the denied user-namespace `uid_map`; served mounts are not substitutes.
+
 ## Namespace progress — 2026-11-06
 
 `tests/namespace_progress.rs` adds fourteen public-API regressions for RO/RW

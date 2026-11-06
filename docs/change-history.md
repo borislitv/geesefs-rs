@@ -5,6 +5,42 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-06: bounded latency and remote-work diagnostics
+
+Cache/RSS counters and terminal errno alone cannot attribute read tails, namespace
+retry conditions or excess remote work. Completed jobs also hide unfinished work,
+and READ read-ahead can outlive its successful reply. Add opt-in, fixed-vocabulary
+reply/phase histograms, inflight/oldest observations, source events, SDK attempts
+and bytes, process CPU and rate-limited path-free JSON records. Use supported
+prometheus-client/Smithy APIs without changing storage or retry semantics.
+Exclude presigning from transport attempts and replace our SDK observer when
+reapplying configuration. Keep reply publication distinct from tail cancellation.
+Retain bounded error classes before errno conversion and per-stage failure/
+cancellation flags, so a metadata EIO can identify a failed LIST without exposing
+backend messages. This supplies evidence for subsequent failures, not a diagnosis
+of historical EIOs.
+
+A real fuser regression reproduces a blocked stderr retaining the sole async
+worker even after its EIO reply. Use tracing-appender's bounded lossy output worker,
+with a 16-record queue and enqueue-drop counter. Explicit `off`/`error`/`warn`
+levels default to errors and keep metrics independent of log filtering. The
+blocked-output and full-queue controls verify continued replies/admission, drops
+and path-free complete records. Output delivery is best effort, not durability.
+
+Busy namespace/cache snapshots now omit only the affected component, with explicit
+availability; they no longer hide independent observations behind HTTP 503. No
+stale snapshot or fabricated occupancy is retained. `--no-diagnostics` keeps basic
+metrics for same-binary observer controls. Real fuser/HTTP regressions cover reply,
+retry, cancellation, source attribution and log bounds. The [collection guide](metrics.md)
+defines comparison limits and ignored overhead fixtures. This adds diagnosis;
+it does not explain old requests retrospectively or close mounted/performance gates.
+
+## 2026-11-06: release 0.1.3 preparation
+
+Advance package and lockfile together for the bounded diagnostic build. Release
+assets require successful merged-main CI and source/checksum provenance. The
+authorized single-reader update remains a scoped trial, not general acceptance.
+
 ## 2026-11-06: release 0.1.2 preparation
 
 Advance the package and lockfile version together for the namespace-progress and

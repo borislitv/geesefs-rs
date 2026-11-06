@@ -8,6 +8,13 @@ use std::{
     time::Duration,
 };
 
+#[global_allocator]
+#[cfg(not(feature = "system-allocator"))]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+#[global_allocator]
+#[cfg(feature = "system-allocator")]
+static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
+
 /// Exercise fuser's real parsing, reply ownership and Drop without a kernel mount.
 struct Session {
     peer: UnixDatagram,
@@ -124,6 +131,16 @@ fn fixture() -> (
     Arc<support::MemoryStore>,
     Arc<Filesystem>,
 ) {
+    configured_fixture(|_| {})
+}
+
+fn configured_fixture(
+    configure: impl FnOnce(&mut geesefs_rs::config::Config),
+) -> (
+    tokio::runtime::Runtime,
+    Arc<support::MemoryStore>,
+    Arc<Filesystem>,
+) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
@@ -134,11 +151,24 @@ fn fixture() -> (
     config.request_timeout = Duration::from_millis(100);
     config.shutdown_timeout = Duration::from_secs(1);
     config.max_requests = 1;
+    config.metrics_listen = Some("127.0.0.1:0".parse().unwrap());
     config.large_read_cutoff = 0;
     config.read_ahead_large = 1024;
     config.read_ahead_parallel = 512;
+    configure(&mut config);
     let fs = Filesystem::new(config, store.clone()).unwrap();
     (runtime, store, fs)
+}
+
+fn metric(fs: &Filesystem, name: &str) -> f64 {
+    geesefs_rs::metrics::render(fs)
+        .unwrap()
+        .lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once(' ')?;
+            (key == name).then(|| value.parse().unwrap())
+        })
+        .unwrap_or_else(|| panic!("missing metric {name}"))
 }
 
 #[test]
@@ -146,7 +176,7 @@ fn lookup_deadline_returns_etimedout_and_returns_the_request_slot() {
     let (runtime, store, fs) = fixture();
     store.seed("slow", b"independent bytes");
     *store.head_gate.lock().unwrap() = Some(Arc::new(tokio::sync::Semaphore::new(0)));
-    let mut session = Session::new(fs, &runtime);
+    let mut session = Session::new(fs.clone(), &runtime);
     let request = session.send(1, 1, b"slow\0");
     let reply = session.receive();
     assert_eq!(unique(&reply), request);
@@ -162,6 +192,27 @@ fn lookup_deadline_returns_etimedout_and_returns_the_request_slot() {
     // The wire reply precedes the last local destructors. With one worker this
     // barrier runs after the timed-out poll has returned its admission permit.
     runtime.block_on(runtime.spawn(async {})).unwrap();
+    assert_eq!(
+        metric(
+            &fs,
+            "geesefs_fuse_reply_duration_seconds_count{opcode=\"lookup\"}"
+        ),
+        1.
+    );
+    assert_eq!(
+        metric(
+            &fs,
+            "geesefs_fuse_replies_total{opcode=\"lookup\",errno=\"ETIMEDOUT\"}"
+        ),
+        1.
+    );
+    assert_eq!(
+        metric(
+            &fs,
+            "geesefs_fuse_inflight{opcode=\"lookup\",state=\"reply_pending\"}"
+        ),
+        0.
+    );
     *store.head_gate.lock().unwrap() = None;
     let request = session.send(1, 1, b"slow\0");
     let reply = session.receive();
@@ -182,9 +233,13 @@ fn open(session: &mut Session, ino: u64) -> u64 {
 }
 
 fn read(session: &mut Session, ino: u64, handle: u64) -> u64 {
+    read_range(session, ino, handle, 0, 128)
+}
+
+fn read_range(session: &mut Session, ino: u64, handle: u64, offset: u64, size: u32) -> u64 {
     let mut body = handle.to_ne_bytes().to_vec();
-    body.extend_from_slice(&0u64.to_ne_bytes()); // offset
-    body.extend_from_slice(&128u32.to_ne_bytes());
+    body.extend_from_slice(&offset.to_ne_bytes());
+    body.extend_from_slice(&size.to_ne_bytes());
     body.extend_from_slice(&[0u8; 20]);
     session.send(15, ino, &body)
 }
@@ -223,7 +278,53 @@ fn read_deadline_after_publication_preserves_bytes_without_a_second_reply() {
     assert_eq!(unique(&reply), request);
     assert_eq!(errno(&reply), 0);
     assert_eq!(&reply[16..], &[73u8; 128]);
+    runtime.block_on(runtime.spawn(async {})).unwrap();
+    assert_eq!(
+        metric(
+            &fs,
+            "geesefs_fuse_reply_duration_seconds_count{opcode=\"read\"}"
+        ),
+        1.
+    );
+    assert_eq!(
+        metric(
+            &fs,
+            "geesefs_fuse_replies_total{opcode=\"read\",errno=\"OK\"}"
+        ),
+        1.
+    );
+    assert_eq!(
+        metric(
+            &fs,
+            "geesefs_fuse_inflight{opcode=\"read\",state=\"reply_pending\"}"
+        ),
+        0.
+    );
+    assert_eq!(
+        metric(
+            &fs,
+            "geesefs_fuse_inflight{opcode=\"read\",state=\"after_reply\"}"
+        ),
+        1.
+    );
     session.close();
+    assert_eq!(
+        metric(
+            &fs,
+            "geesefs_fuse_replies_total{opcode=\"read\",errno=\"ETIMEDOUT\"}"
+        ),
+        0.
+    );
+    assert_eq!(
+        metric(
+            &fs,
+            "geesefs_diagnostic_events_total{reason=\"deadline_after_reply\"}"
+        ),
+        1.
+    );
+    runtime.block_on(runtime.spawn(async {})).unwrap();
+    assert_eq!(metric(&fs, "geesefs_read_post_reply_seconds_count"), 1.);
+    assert!(metric(&fs, "geesefs_read_post_reply_seconds_sum") > 0.);
     tail.add_permits(1);
     assert_eq!(
         tail.available_permits(),
@@ -235,4 +336,573 @@ fn read_deadline_after_publication_preserves_bytes_without_a_second_reply() {
         2
     );
     assert_eq!(fs.effective_budgets().data_used_bytes, 512 * 1024);
+}
+
+#[test]
+fn full_admission_is_attributed_without_inventing_a_backend_failure() {
+    let (runtime, store, fs) = fixture();
+    store.seed("slow", b"independent bytes");
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *store.head_gate.lock().unwrap() = Some(gate.clone());
+    let started = store.head_started.notified();
+    let mut session = Session::new(fs.clone(), &runtime);
+    let first = session.send(1, 1, b"slow\0");
+    runtime
+        .block_on(async { tokio::time::timeout(Duration::from_secs(1), started).await })
+        .unwrap();
+    assert_eq!(
+        metric(
+            &fs,
+            "geesefs_fuse_inflight{opcode=\"lookup\",state=\"reply_pending\"}"
+        ),
+        1.
+    );
+    assert!(
+        metric(
+            &fs,
+            "geesefs_fuse_oldest_seconds{opcode=\"lookup\",state=\"reply_pending\"}"
+        ) > 0.
+    );
+    let rejected = session.send(1, 1, b"slow\0");
+    let reply = session.receive();
+    assert_eq!((unique(&reply), errno(&reply)), (rejected, -libc::EAGAIN));
+    assert_eq!(
+        metric(
+            &fs,
+            "geesefs_diagnostic_events_total{reason=\"admission_full\"}"
+        ),
+        1.
+    );
+    assert_eq!(
+        metric(
+            &fs,
+            "geesefs_fuse_replies_total{opcode=\"lookup\",errno=\"EAGAIN\"}"
+        ),
+        1.
+    );
+    gate.add_permits(1);
+    let reply = session.receive();
+    assert_eq!((unique(&reply), errno(&reply)), (first, 0));
+    session.close();
+    assert_eq!(
+        store.head_starts.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+#[test]
+fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
+    const CHILD: &str = "GEESEFS_DIAGNOSTIC_LOG_CHILD";
+    if let Ok(mode) = std::env::var(CHILD) {
+        if mode == "blocked_stderr" || mode == "queue_full" {
+            let queue_full = mode == "queue_full";
+            let (runtime, store, fs) = configured_fixture(|config| {
+                config.request_timeout = Duration::from_secs(5);
+            });
+            store.seed("success", b"independent bytes");
+            let (ready, held) = mpsc::channel();
+            let (release, wait) = mpsc::channel();
+            let blocker = std::thread::spawn(move || {
+                let _stderr = std::io::stderr().lock();
+                ready.send(()).unwrap();
+                wait.recv_timeout(Duration::from_secs(30)).unwrap();
+            });
+            held.recv_timeout(Duration::from_secs(1)).unwrap();
+            let mut session = Session::new(fs.clone(), &runtime);
+            let mut worker_free = true;
+            for index in 0..if queue_full { 18 } else { 1 } {
+                store
+                    .fail_head_once
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                session.send(1, 1, b"private-request-path\0");
+                assert_eq!(errno(&session.receive()), -libc::EIO);
+                let (finished, receiver) = mpsc::channel();
+                runtime.spawn(async move {
+                    finished.send(()).unwrap();
+                });
+                worker_free = receiver.recv_timeout(Duration::from_secs(1)).is_ok();
+                if !worker_free {
+                    break;
+                }
+                if queue_full && index != 17 {
+                    // Keep stderr blocked beyond queue capacity at the real
+                    // one-record/second rate, also checking no duplicate reply.
+                    session
+                        .peer
+                        .set_read_timeout(Some(Duration::from_millis(1100)))
+                        .unwrap();
+                    assert!(matches!(
+                        session.peer.recv(&mut [0; 256]).unwrap_err().kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ));
+                    session
+                        .peer
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                }
+            }
+            let dropped = metric(&fs, "geesefs_diagnostic_logs_dropped_total");
+            if worker_free {
+                let request = session.send(1, 1, b"success\0");
+                let reply = session.receive();
+                assert_eq!(
+                    (unique(&reply), errno(&reply)),
+                    (request, 0),
+                    "admission must be returned while stderr is blocked"
+                );
+            }
+            release.send(()).unwrap();
+            blocker.join().unwrap();
+            session.close();
+            assert!(
+                worker_free,
+                "blocked stderr must not retain the only runtime worker or request admission"
+            );
+            if queue_full {
+                assert!(
+                    (1. ..=2.).contains(&dropped),
+                    "18 records exceed 16 queued plus at most one being written: {dropped}"
+                );
+                assert_eq!(metric(&fs, "geesefs_diagnostic_logs_suppressed_total"), 0.);
+            }
+            return;
+        }
+        if mode == "background" {
+            read_deadline_after_publication_preserves_bytes_without_a_second_reply();
+            return;
+        }
+        if mode == "listing" || mode == "listing_cancelled" {
+            let cancelled = mode == "listing_cancelled";
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            let endpoint = format!("http://{}", server.server_addr());
+            let (release, wait) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let request = server
+                    .recv_timeout(Duration::from_secs(3))
+                    .unwrap()
+                    .unwrap();
+                assert!(request.url().contains("list-type=ext-v1"));
+                if cancelled {
+                    wait.recv_timeout(Duration::from_secs(3)).unwrap();
+                } else {
+                    request
+                        .respond(tiny_http::Response::from_string("<private-backend-text/>"))
+                        .unwrap();
+                }
+            });
+            let fs = {
+                let _entered = runtime.enter();
+                let mut config = support::MemoryStore::config(32);
+                config.metrics_listen = Some("127.0.0.1:0".parse().unwrap());
+                config.sdk_max_retries = 0;
+                config.http_timeout = Duration::from_secs(2);
+                config.list_type = Some(geesefs_rs::config::ListType::Extended);
+                if cancelled {
+                    config.request_timeout = Duration::from_millis(100);
+                }
+                let sdk = aws_sdk_s3::Config::builder()
+                    .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+                    .region(aws_sdk_s3::config::Region::new("us-east-1"))
+                    .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                        "disposable-access",
+                        "disposable-secret",
+                        None,
+                        None,
+                        "test-only",
+                    ))
+                    .endpoint_url(endpoint)
+                    .force_path_style(true)
+                    .build();
+                let store = geesefs_rs::backend::s3::S3::new(
+                    aws_sdk_s3::Client::from_conf(sdk),
+                    "bucket".into(),
+                    "".into(),
+                )
+                .unwrap()
+                .with_options(&config)
+                .unwrap();
+                Filesystem::new(config, Arc::new(store)).unwrap()
+            };
+            let mut session = Session::new(fs, &runtime);
+            session.send(27, 1, &[0; 8]); // OPENDIR
+            let reply = session.receive();
+            assert_eq!(errno(&reply), 0);
+            let mut body = reply[16..24].to_vec();
+            body.extend_from_slice(&0u64.to_ne_bytes());
+            body.extend_from_slice(&4096u32.to_ne_bytes());
+            body.extend_from_slice(&[0; 20]);
+            let request = session.send(28, 1, &body); // READDIR
+            let reply = session.receive();
+            assert_eq!(
+                (unique(&reply), errno(&reply)),
+                (
+                    request,
+                    if cancelled {
+                        -libc::ETIMEDOUT
+                    } else {
+                        -libc::EIO
+                    }
+                )
+            );
+            if cancelled {
+                release.send(()).unwrap();
+            }
+            session.close();
+            worker.join().unwrap();
+            return;
+        }
+        let (runtime, store, fs) = configured_fixture(|config| {
+            config.request_timeout = Duration::from_secs(5);
+            if mode == "backend_off" {
+                config.diagnostic_log_level = geesefs_rs::config::DiagnosticLogLevel::Off;
+            } else if mode == "slow_warn" || mode == "backend_warn" {
+                config.diagnostic_log_level = geesefs_rs::config::DiagnosticLogLevel::Warn;
+            }
+        });
+        let mut session = Session::new(fs.clone(), &runtime);
+        if mode == "slow_warn" || mode == "slow_error" {
+            store.seed("private-request-path", b"independent bytes");
+            let gate = Arc::new(tokio::sync::Semaphore::new(0));
+            *store.head_gate.lock().unwrap() = Some(gate.clone());
+            let started = store.head_started.notified();
+            let request = session.send(1, 1, b"private-request-path\0");
+            runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(1), started)
+                    .await
+                    .unwrap();
+            });
+            // Observe an intentionally gated operation beyond the one-second
+            // slow threshold. This is a timing contract, not a sleep for a race.
+            session
+                .peer
+                .set_read_timeout(Some(Duration::from_millis(1100)))
+                .unwrap();
+            assert!(matches!(
+                session.peer.recv(&mut [0; 256]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ));
+            session
+                .peer
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            gate.add_permits(1);
+            let reply = session.receive();
+            assert_eq!((unique(&reply), errno(&reply)), (request, 0));
+        } else if mode == "admission" {
+            store.seed("private-request-path", b"fixture");
+            let gate = Arc::new(tokio::sync::Semaphore::new(0));
+            *store.head_gate.lock().unwrap() = Some(gate.clone());
+            let started = store.head_started.notified();
+            let first = session.send(1, 1, b"private-request-path\0");
+            runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(1), started)
+                    .await
+                    .unwrap();
+            });
+            for _ in 0..20 {
+                let rejected = session.send(1, 1, b"private-request-path\0");
+                let reply = session.receive();
+                assert_eq!((unique(&reply), errno(&reply)), (rejected, -libc::EAGAIN));
+            }
+            assert_eq!(metric(&fs, "geesefs_diagnostic_logs_suppressed_total"), 19.);
+            gate.add_permits(1);
+            assert_eq!(unique(&session.receive()), first);
+        } else if mode == "generation" {
+            let (started, release) = store.pause_head();
+            session.send(1, 1, b"private-request-path\0");
+            runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(1), started)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                fs.create(1, "local-generation", libc::S_IFREG | 0o644, None, 0)
+                    .await
+                    .unwrap();
+            });
+            release.send(()).unwrap();
+            assert_eq!(errno(&session.receive()), -libc::EAGAIN);
+        } else {
+            assert!(["backend", "backend_off", "backend_warn"].contains(&mode.as_str()));
+            store
+                .fail_head_once
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            session.send(1, 1, b"private-request-path\0");
+            assert_eq!(errno(&session.receive()), -libc::EIO);
+        }
+        session.close();
+        if mode == "backend_off" {
+            assert_eq!(metric(&fs, "geesefs_diagnostics_enabled"), 1.);
+            assert_eq!(
+                metric(
+                    &fs,
+                    "geesefs_fuse_replies_total{opcode=\"lookup\",errno=\"EIO\"}"
+                ),
+                1.
+            );
+            assert_eq!(metric(&fs, "geesefs_diagnostic_logs_dropped_total"), 0.);
+        }
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for (mode, event, reason, errno, replied) in [
+        (
+            "blocked_stderr",
+            "fuse_reply",
+            "backend_response",
+            libc::EIO,
+            true,
+        ),
+        (
+            "queue_full",
+            "fuse_reply",
+            "backend_response",
+            libc::EIO,
+            true,
+        ),
+        (
+            "backend_off",
+            "fuse_reply",
+            "backend_response",
+            libc::EIO,
+            true,
+        ),
+        (
+            "backend_warn",
+            "fuse_reply",
+            "backend_response",
+            libc::EIO,
+            true,
+        ),
+        ("slow_error", "fuse_reply", "ok", 0, true),
+        ("slow_warn", "fuse_reply", "ok", 0, true),
+        (
+            "admission",
+            "fuse_reply",
+            "admission_full",
+            libc::EAGAIN,
+            true,
+        ),
+        (
+            "generation",
+            "fuse_reply",
+            "missing_epoch_changed",
+            libc::EAGAIN,
+            true,
+        ),
+        ("backend", "fuse_reply", "backend_response", libc::EIO, true),
+        ("listing", "fuse_reply", "invalid_response", libc::EIO, true),
+        (
+            "listing_cancelled",
+            "fuse_reply",
+            "deadline",
+            libc::ETIMEDOUT,
+            true,
+        ),
+        (
+            "background",
+            "fuse_background_deadline",
+            "deadline_after_reply",
+            libc::ETIMEDOUT,
+            true,
+        ),
+    ] {
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env(CHILD, mode)
+            .kill_on_drop(true);
+        let output = runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(if mode == "queue_full" { 35 } else { 10 }),
+                child.output(),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+        });
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{mode}: {stderr}");
+        let records: Vec<serde_json::Value> = stderr
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        if mode == "backend_off" || mode == "slow_error" {
+            assert!(records.is_empty(), "{mode}: {stderr}");
+            continue;
+        }
+        if mode == "queue_full" {
+            assert!((16..=17).contains(&records.len()), "{mode}: {stderr}");
+        } else {
+            assert_eq!(records.len(), 1, "{mode}: {stderr}");
+        }
+        let record = &records[0];
+        assert_eq!(
+            record["level"],
+            if mode == "slow_warn" { "warn" } else { "error" }
+        );
+        assert_eq!(record["event"], event, "{stderr}");
+        assert_eq!(record["reason"], reason, "{stderr}");
+        assert_eq!(record["errno"], errno, "{stderr}");
+        assert_eq!(record["reply_sent"], replied);
+        assert!(record["request"].as_u64().unwrap() > 0);
+        assert!(record["phases"].is_object());
+        if mode == "listing" || mode == "listing_cancelled" {
+            assert_eq!(
+                record["phases"]["s3_list"]["failed"],
+                mode == "listing",
+                "{stderr}"
+            );
+            assert_eq!(
+                record["phases"]["s3_list"]["cancelled"],
+                mode == "listing_cancelled",
+                "{stderr}"
+            );
+        }
+        for (stage, scope) in record["phases"].as_object().unwrap() {
+            if stage.starts_with("namespace_") {
+                assert_eq!(
+                    scope["active"], 0,
+                    "completed namespace guard is not active: {stderr}"
+                );
+            }
+        }
+        assert!(!stderr.contains("private-request-path"));
+        assert!(!stderr.contains("disposable deterministic fixture"));
+        assert!(!stderr.contains("InjectedFailure"));
+        assert!(!stderr.contains("private-backend-text"));
+    }
+}
+
+/// Same executable on/off control. This includes fuser wire dispatch, the client,
+/// runtime and a gated-store implementation, not a kernel mount or real S3.
+#[test]
+#[ignore = "explicit observer-cost diagnostic; not mounted or Go-relative acceptance"]
+fn observer_cost_diagnostic() {
+    use std::{sync::atomic::Ordering, time::Instant};
+    let mode = std::env::var("GEESEFS_OBSERVER_MODE").unwrap_or_else(|_| "cached".into());
+    assert!(["cached", "cold", "metadata"].contains(&mode.as_str()));
+    let enabled = std::env::var("GEESEFS_OBSERVER_ENABLED").unwrap_or_else(|_| "1".into()) == "1";
+    let calls: usize = std::env::var("GEESEFS_OBSERVER_CALLS")
+        .unwrap_or_else(|_| "25000".into())
+        .parse()
+        .unwrap();
+    assert!((1000..=250000).contains(&calls));
+    let (runtime, store, fs) = configured_fixture(|config| {
+        config.request_timeout = Duration::from_secs(10);
+        config.max_requests = 128;
+        config.no_diagnostics = !enabled;
+        config.stat_cache_ttl = if mode == "metadata" {
+            Duration::ZERO
+        } else {
+            Duration::from_secs(3600)
+        };
+        config.read_ahead = 128;
+        config.read_ahead_small = 128;
+        config.read_ahead_large = 128;
+        config.read_ahead_parallel = 128;
+    });
+    const SIZE: u64 = 1 << 40;
+    store.seed("virtual", &[0; 16]);
+    store.virtual_size.store(SIZE, Ordering::Relaxed);
+    let ino = runtime.block_on(fs.lookup(1, "virtual")).unwrap().ino;
+    let mut session = Session::new(fs.clone(), &runtime);
+    let handle = open(&mut session, ino);
+    let mut buffer = [0u8; 8192];
+    let mut operation = |session: &mut Session, call: usize| {
+        let request = if mode == "metadata" {
+            session.send(3, ino, &[0; 16])
+        } else {
+            let offset = if mode == "cold" {
+                call as u64 * 128 * 1024
+            } else {
+                0
+            };
+            read_range(session, ino, handle, offset, 4096)
+        };
+        let size = session.peer.recv(&mut buffer).unwrap();
+        let reply = &buffer[..size];
+        assert_eq!((unique(reply), errno(reply)), (request, 0));
+        if mode == "metadata" {
+            assert_eq!(u64::from_ne_bytes(reply[40..48].try_into().unwrap()), SIZE);
+        } else {
+            assert_eq!(&reply[16..], &[0u8; 4096]);
+        }
+    };
+    for call in 0..200 {
+        operation(&mut session, call);
+    }
+    runtime.block_on(runtime.spawn(async {})).unwrap();
+    let before_heads = store.head_starts.load(Ordering::Relaxed);
+    let before_reads = store.read_calls.load(Ordering::Relaxed);
+    let cpu_ticks = || {
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+        let fields: Vec<_> = stat
+            .rsplit_once(')')
+            .unwrap()
+            .1
+            .split_whitespace()
+            .collect();
+        [
+            fields[11].parse::<u64>().unwrap(),
+            fields[12].parse::<u64>().unwrap(),
+        ]
+    };
+    let before_cpu = cpu_ticks();
+    let start = Instant::now();
+    let mut latencies = Vec::with_capacity(calls);
+    for call in 200..200 + calls {
+        let start = Instant::now();
+        operation(&mut session, call);
+        latencies.push(start.elapsed().as_nanos());
+    }
+    let wall = start.elapsed().as_nanos();
+    runtime.block_on(runtime.spawn(async {})).unwrap();
+    let after_cpu = cpu_ticks();
+    let reads = store.read_calls.load(Ordering::Relaxed) - before_reads;
+    let heads = store.head_starts.load(Ordering::Relaxed) - before_heads;
+    assert_eq!(reads, if mode == "cold" { calls } else { 0 });
+    assert_eq!(heads, if mode == "metadata" { calls } else { 0 });
+    let start = Instant::now();
+    let mut scrape_bytes = 0;
+    let mut series = 0;
+    for _ in 0..100 {
+        let text = geesefs_rs::metrics::render(&fs).unwrap();
+        scrape_bytes = text.len();
+        series = text.lines().filter(|line| !line.starts_with('#')).count();
+        assert!(!text.contains("virtual\""));
+    }
+    let scrape_ns = start.elapsed().as_nanos() / 100;
+    let mut sorted = latencies.clone();
+    sorted.sort_unstable();
+    let percentile = |percent: usize| sorted[(sorted.len() * percent).div_ceil(100) - 1];
+    println!(
+        "observer_cost_json={}",
+        serde_json::json!({
+            "mode": mode, "enabled": enabled, "calls": calls, "wall_ns": wall,
+            "cpu_user_ticks": after_cpu[0] - before_cpu[0], "cpu_system_ticks": after_cpu[1] - before_cpu[1],
+            "clock_ticks_per_second": rustix::param::clock_ticks_per_second(),
+            "latencies_ns": latencies, "p50_ns": percentile(50), "p95_ns": percentile(95), "p99_ns": percentile(99),
+            "backend_heads": heads, "backend_reads": reads, "scrape_mean_ns": scrape_ns,
+            "scrape_bytes": scrape_bytes, "series": series,
+            "allocator": if cfg!(feature = "system-allocator") { "system" } else { "jemalloc" },
+            "process_status": std::fs::read_to_string("/proc/self/status").unwrap().lines()
+                .filter(|line| line.starts_with("VmRSS:") || line.starts_with("VmHWM:")).collect::<Vec<_>>(),
+            "allocation": geesefs_rs::metrics::allocation_stats(),
+            "scope": "whole fixture process: client, fuser, runtime and memory store; no kernel FUSE or S3"
+        })
+    );
+    session.close();
 }

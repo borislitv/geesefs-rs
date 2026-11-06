@@ -28,6 +28,10 @@ fn reference_cli_defaults_and_prefix() {
     assert_eq!((c.dir_mode, c.file_mode), (0o755, 0o644));
     assert_eq!((c.memory_limit, c.entry_limit), (1000, 100000));
     assert_eq!(c.metrics_listen, None);
+    assert_eq!(
+        c.diagnostic_log_level,
+        geesefs_rs::config::DiagnosticLogLevel::Error
+    );
     assert_eq!(c.symlink_attr, "--symlink-target");
     assert_eq!(c.bucket_and_prefix(), ("bucket", "packages"));
     assert_eq!(c.effective_list_type(), ListType::Extended);
@@ -45,6 +49,30 @@ fn accepts_an_explicit_metrics_listener_without_contacting_backend() {
     .expect("an explicit metrics listener must be accepted");
     config.validate().unwrap();
     assert_eq!(config.metrics_listen.unwrap().to_string(), "127.0.0.1:9469");
+}
+
+#[test]
+fn diagnostic_log_levels_are_explicit_and_bounded() {
+    for level in ["off", "error", "warn"] {
+        Config::try_parse_from([
+            "geesefs-rs",
+            "--diagnostic-log-level",
+            level,
+            "bucket",
+            "/tmp/mount",
+        ])
+        .unwrap_or_else(|error| panic!("valid log level {level}: {error}"));
+    }
+    assert!(
+        Config::try_parse_from([
+            "geesefs-rs",
+            "--diagnostic-log-level",
+            "request-path",
+            "bucket",
+            "/tmp/mount",
+        ])
+        .is_err()
+    );
 }
 
 #[test]

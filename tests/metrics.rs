@@ -38,6 +38,7 @@ fn fixture() -> (Arc<MemoryStore>, Arc<Filesystem>) {
     config.read_ahead_small = 4;
     config.read_ahead_large = 4;
     config.read_ahead_parallel = 4;
+    config.metrics_listen = Some("127.0.0.1:0".parse().unwrap());
     let fs = Filesystem::new(config, store.clone()).unwrap();
     (store, fs)
 }
@@ -78,6 +79,30 @@ async fn cold_miss_warm_hit_and_scrapes_have_distinct_accounting() {
         "geesefs_jemalloc_allocated_bytes"
     };
     assert!(sample(&text, allocated) > 0.);
+    assert_eq!(sample(&text, "geesefs_diagnostics_enabled"), 1.);
+    assert_eq!(
+        sample(
+            &text,
+            "geesefs_stage_duration_seconds_count{stage=\"cache_read\"}"
+        ),
+        2.
+    );
+    assert_eq!(
+        sample(
+            &text,
+            "geesefs_stage_completions_total{stage=\"cache_read\",outcome=\"ok\"}"
+        ),
+        2.
+    );
+    assert_eq!(
+        sample(
+            &text,
+            "geesefs_stage_completions_total{stage=\"cache_read\",outcome=\"error\"}"
+        ),
+        0.
+    );
+    assert!(sample(&text, "geesefs_process_cpu_seconds_total{mode=\"user\"}") >= 0.);
+    assert!(sample(&text, "geesefs_process_cpu_seconds_total{mode=\"system\"}") >= 0.);
     render(&fs).unwrap();
     assert_eq!(store.read_calls.load(Ordering::Relaxed), 1);
     assert_eq!(store.head_starts.load(Ordering::Relaxed), 1);
@@ -274,10 +299,29 @@ async fn http_scrape_routes_contention_bind_errors_and_shutdown_are_observable()
         wait.recv_timeout(Duration::from_secs(5)).unwrap();
     });
     held.await.unwrap();
-    let busy = client.get(&url).send().await.unwrap().status();
+    let busy = client.get(&url).send().await.unwrap();
+    let busy_status = busy.status();
+    let busy_text = busy.text().await.unwrap();
     release.send(()).unwrap();
     owner.join().unwrap();
-    assert_eq!(busy, 503);
+    assert_eq!(
+        busy_status, 200,
+        "contention must not hide independent observations"
+    );
+    assert_eq!(
+        sample(
+            &busy_text,
+            "geesefs_metrics_snapshot_available{component=\"namespace\"}"
+        ),
+        0.
+    );
+    assert!(
+        !busy_text
+            .lines()
+            .any(|line| line.starts_with("geesefs_namespace_entries "))
+    );
+    assert_eq!(sample(&busy_text, "geesefs_read_cache_hits_total"), 0.);
+    assert!(sample(&busy_text, "process_resident_memory_bytes") > 0.);
     assert_eq!(client.get(&url).send().await.unwrap().status(), 200);
     assert_eq!(store.read_calls.load(Ordering::Relaxed), 0);
     assert_eq!(store.head_starts.load(Ordering::Relaxed), 0);
@@ -333,4 +377,144 @@ async fn incomplete_http_connection_has_a_deadline_and_does_not_block_another_sc
         closed.is_ok()
             || closed.is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionReset)
     );
+}
+
+#[tokio::test]
+async fn cancelling_a_fill_follower_is_not_success_and_does_not_leave_an_inflight_scope() {
+    let (store, fs) = fixture();
+    let ino = fs.lookup(1, "private-object-name").await.unwrap().ino;
+    *store.read_gate.lock().unwrap() = Some(Arc::new(tokio::sync::Semaphore::new(0)));
+    let mut leader = Box::pin(fs.read(ino, 0, 3));
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(leader.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    let mut follower = Box::pin(fs.read(ino, 1, 2));
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(follower.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    let text = render(&fs).unwrap();
+    assert_eq!(
+        sample(&text, "geesefs_stage_inflight{stage=\"fill_wait\"}"),
+        1.
+    );
+    drop(follower);
+    let text = render(&fs).unwrap();
+    assert_eq!(
+        sample(&text, "geesefs_stage_inflight{stage=\"fill_wait\"}"),
+        0.
+    );
+    assert_eq!(
+        sample(
+            &text,
+            "geesefs_stage_completions_total{stage=\"fill_wait\",outcome=\"cancelled\"}"
+        ),
+        1.
+    );
+    assert_eq!(
+        sample(
+            &text,
+            "geesefs_stage_completions_total{stage=\"fill_wait\",outcome=\"ok\"}"
+        ),
+        0.
+    );
+    drop(leader);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while fs.effective_budgets().data_used_bytes != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        store.read_calls.load(Ordering::Relaxed),
+        0,
+        "cancelled unpolled jobs must not start a GET"
+    );
+}
+
+#[tokio::test]
+async fn stale_absence_reports_its_epoch_reason_without_changing_eagain_semantics() {
+    let (store, fs) = fixture();
+    let (started, release) = store.pause_head();
+    let lookup = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.lookup(1, "missing").await }
+    });
+    tokio::time::timeout(Duration::from_secs(1), started)
+        .await
+        .unwrap()
+        .unwrap();
+    fs.create(1, "new-local-generation", libc::S_IFREG | 0o644, None, 0)
+        .await
+        .unwrap();
+    release.send(()).unwrap();
+    assert!(matches!(
+        lookup.await.unwrap(),
+        Err(geesefs_rs::error::Error::Fs(libc::EAGAIN))
+    ));
+    let text = render(&fs).unwrap();
+    assert_eq!(
+        sample(
+            &text,
+            "geesefs_diagnostic_events_total{reason=\"missing_epoch_changed\"}"
+        ),
+        1.
+    );
+    assert_eq!(sample(&text, "geesefs_read_fill_errors_total"), 0.);
+}
+
+#[tokio::test]
+async fn same_binary_can_disable_detailed_observers_while_retaining_basic_metrics() {
+    let store = MemoryStore::new();
+    store.seed("private-object-name", b"abcdefgh");
+    let mut config = MemoryStore::config(32);
+    config.metrics_listen = Some("127.0.0.1:0".parse().unwrap());
+    config.no_diagnostics = true;
+    let fs = Filesystem::new(config, store).unwrap();
+    let ino = fs.lookup(1, "private-object-name").await.unwrap().ino;
+    assert_eq!(fs.read(ino, 0, 3).await.unwrap().as_slice(), b"abc");
+    let text = render(&fs).unwrap();
+    assert_eq!(sample(&text, "geesefs_diagnostics_enabled"), 0.);
+    assert_eq!(sample(&text, "geesefs_read_cache_misses_total"), 1.);
+    assert!(!text.contains("geesefs_stage_duration_seconds"));
+}
+
+#[tokio::test]
+async fn namespace_samples_have_fixed_labels_and_follow_acquisitions_not_inode_count() {
+    let (_, fs) = fixture();
+    let ino = fs.lookup(1, "private-object-name").await.unwrap().ino;
+    let before = sample(
+        &render(&fs).unwrap(),
+        "geesefs_stage_duration_seconds_count{stage=\"namespace_hold_sampled\"}",
+    );
+    for _ in 0..3072 {
+        assert_eq!(fs.parent_ino(ino), 1);
+    }
+    let text = render(&fs).unwrap();
+    let holds = sample(
+        &text,
+        "geesefs_stage_duration_seconds_count{stage=\"namespace_hold_sampled\"}",
+    );
+    assert_eq!(holds - before, 3.);
+    assert_eq!(
+        sample(
+            &text,
+            "geesefs_stage_duration_seconds_count{stage=\"namespace_wait_sampled\"}"
+        ),
+        holds
+    );
+    assert_eq!(
+        sample(
+            &text,
+            "geesefs_stage_inflight{stage=\"namespace_hold_sampled\"}"
+        ),
+        0.
+    );
+    assert!(!text.contains("private-object-name"));
+    // Fixed prebound stages/opcodes, not per-inode/request series.
+    assert!(text.lines().filter(|line| !line.starts_with('#')).count() < 1000);
 }

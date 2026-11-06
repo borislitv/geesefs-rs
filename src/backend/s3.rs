@@ -15,6 +15,7 @@ use aws_sdk_s3::{
     primitives::ByteStream,
     types::{CommonPrefix, CompletedMultipartUpload, CompletedPart, Object},
 };
+use aws_smithy_runtime_api::client::interceptors::Intercept;
 use futures_util::TryStreamExt;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -25,6 +26,7 @@ use crate::{
     budget::{Block, Budget, Reservation},
     config::{Config, ListType, SignatureVersion},
     error::{Error, Result},
+    metrics::{self, Stage},
 };
 
 const READ_CHUNK_BYTES: usize = 128 * 1024;
@@ -32,6 +34,7 @@ const READ_CHUNK_BYTES: usize = 128 * 1024;
 /// One SDK client owns ordinary transport, TLS, credentials, signing and retries.
 #[derive(Clone)]
 pub struct S3 {
+    pub(crate) diagnostics: crate::metrics::Diagnostics,
     client: Client,
     bucket: String,
     prefix: String,
@@ -355,6 +358,7 @@ impl S3 {
             for (name, value) in signed.headers() {
                 request = request.header(name, value);
             }
+            self.diagnostics.attempt("write", "extension", false);
             let mut response = request
                 .body(bytes::Bytes::from_owner(body))
                 .send()
@@ -639,6 +643,7 @@ impl S3 {
             .retry_config()
             .map_or(3, |r| r.max_attempts());
         Ok(Self {
+            diagnostics: crate::metrics::Diagnostics::default(),
             client,
             bucket,
             prefix,
@@ -670,12 +675,15 @@ impl S3 {
     /// Also used with an explicit disposable SDK client by contract tests.
     pub fn with_options(mut self, config: &Config) -> Result<Self> {
         config.validate()?;
+        self.diagnostics = crate::metrics::Diagnostics::new(
+            config.metrics_listen.is_some() && !config.no_diagnostics,
+            config.diagnostic_log_level,
+        );
         let mut builder = self
             .client
             .config()
             .to_builder()
             .force_path_style(!config.subdomain)
-            .interceptor(super::options::RequestOptions::new(config)?)
             .retry_config(
                 aws_sdk_s3::config::retry::RetryConfig::standard()
                     .with_max_attempts(config.sdk_max_retries + 1),
@@ -686,6 +694,19 @@ impl S3 {
                     .operation_attempt_timeout(config.http_timeout)
                     .build(),
             );
+        // Reapplying options replaces our observer, retaining caller-provided
+        // interceptors. Otherwise both observers share the execution counter and
+        // a first attempt can be misclassified as a retry.
+        builder.set_interceptors(
+            self.client.config().interceptors().filter(|interceptor| {
+                interceptor.name() != super::observations::Observations::NAME
+            }),
+        );
+        builder = builder.interceptor(super::options::RequestOptions::new(config)?);
+        if self.diagnostics.enabled() {
+            builder =
+                builder.interceptor(super::observations::Observations(self.diagnostics.clone()));
+        }
         if config.no_verify_ssl {
             builder = builder.http_client(super::transport::InsecureTransport::new(
                 config.http_timeout,
@@ -778,6 +799,21 @@ impl S3 {
         token: Option<&str>,
         after: Option<&str>,
     ) -> Result<super::extended_list::ListPage> {
+        metrics::observe(
+            &self.diagnostics,
+            Stage::S3List,
+            self.list_after_inner(relative_prefix, delimiter, token, after),
+        )
+        .await
+    }
+
+    async fn list_after_inner(
+        &self,
+        relative_prefix: &str,
+        delimiter: Option<&str>,
+        token: Option<&str>,
+        after: Option<&str>,
+    ) -> Result<ListPage> {
         let prefix = self.key(relative_prefix)?;
         let after = after.map(|key| self.key(key)).transpose()?;
         if let Some(mut page) = self.extended_or_fallback(&prefix, delimiter, token).await? {
@@ -981,6 +1017,7 @@ impl S3 {
             for (name, value) in signed.headers() {
                 request = request.header(name, value);
             }
+            self.diagnostics.attempt("list", "extension", attempt != 0);
             let response = request.send().await;
             let mut response = match response {
                 Ok(response) => response,
@@ -1046,6 +1083,14 @@ impl S3 {
         Ok(self.head_details(key).await?.0)
     }
     async fn head_details(&self, key: &str) -> Result<(ObjectHead, Option<String>)> {
+        metrics::observe(
+            &self.diagnostics,
+            Stage::S3Head,
+            self.head_details_inner(key),
+        )
+        .await
+    }
+    async fn head_details_inner(&self, key: &str) -> Result<(ObjectHead, Option<String>)> {
         let response = self
             .client
             .head_object()
@@ -1115,7 +1160,10 @@ impl S3 {
             self.read_range_inner(key, offset, length, head, budget),
         )
         .await
-        .map_err(|_| Error::Timeout("GET admission/response/body"))?
+        .map_err(|_| {
+            self.diagnostics.event("s3_get_timeout");
+            Error::Timeout("GET admission/response/body")
+        })?
     }
 
     async fn read_range_inner(
@@ -1134,7 +1182,7 @@ impl S3 {
             return Ok(block);
         }
         let response = self.get_range(key, offset, length, head).await?;
-        Self::finish_range(response.body, &mut block).await?;
+        self.finish_range(response.body, &mut block).await?;
         Ok(block)
     }
 
@@ -1158,7 +1206,10 @@ impl S3 {
             self.read_range_chunks_inner(key, offset, length, head, budget, output),
         )
         .await
-        .map_err(|_| Error::Timeout("GET chunk admission/response/body/delivery"))?
+        .map_err(|_| {
+            self.diagnostics.event("s3_get_timeout");
+            Error::Timeout("GET chunk admission/response/body/delivery")
+        })?
     }
 
     async fn read_range_chunks_inner(
@@ -1178,13 +1229,32 @@ impl S3 {
             // expose bytes that could subsequently fail that integrity check.
             drop(first);
             let mut block = budget.reserve(length).await?.zeroed();
-            Self::finish_range(response.body, &mut block).await?;
+            self.finish_range(response.body, &mut block).await?;
             return output.send(offset, block).await;
         }
-        Self::deliver_range(response.body, offset, length, budget, first, output).await
+        self.deliver_range(response.body, offset, length, budget, first, output)
+            .await
     }
 
     async fn deliver_range(
+        &self,
+        body: ByteStream,
+        offset: u64,
+        length: usize,
+        budget: &Budget,
+        first: Reservation,
+        output: &super::RangeSink,
+    ) -> Result<()> {
+        metrics::observe(
+            &self.diagnostics,
+            Stage::S3Stream,
+            self.deliver_range_inner(body, offset, length, budget, first, output),
+        )
+        .await
+    }
+
+    async fn deliver_range_inner(
+        &self,
         body: ByteStream,
         offset: u64,
         length: usize,
@@ -1195,28 +1265,41 @@ impl S3 {
         // Unlike StreamReader<Bytes>, this library adapter drops a consumed
         // chunk before polling the next one, allowing the HTTP buffer to reuse
         // its backing allocation even with bytes 1.12.1's retaining advance().
-        let chunks = futures_util::stream::try_unfold(body, |mut body| async {
-            body.try_next()
-                .await
-                .map(|chunk| chunk.map(|chunk| (chunk, body)))
-                .map_err(std::io::Error::other)
-        });
+        let chunks = futures_util::stream::try_unfold(
+            (body, self.diagnostics.clone()),
+            |(mut body, diagnostics)| async move {
+                let chunk = body.try_next().await.map_err(std::io::Error::other)?;
+                if let Some(chunk) = &chunk {
+                    diagnostics.body_bytes(chunk.len());
+                }
+                Ok::<_, std::io::Error>(chunk.map(|chunk| (chunk, (body, diagnostics))))
+            },
+        );
         let mut body = std::pin::pin!(chunks.into_async_read().compat());
         let mut first = Some(first);
         let mut filled = 0;
+        let mut first_chunk = Some(self.diagnostics.stage(Stage::FirstChunk));
         while filled < length {
             let amount = READ_CHUNK_BYTES.min(length - filled);
             let reservation = match first.take() {
                 Some(reservation) => reservation,
                 None => budget.reserve(amount).await?,
             };
-            let block = reservation
-                .read_exact(&mut body)
-                .await
-                .map_err(|error| backend("GET body", None, error))?;
-            if filled + amount == length {
-                Self::require_eof(&mut body).await?;
+            let result = async {
+                let block = reservation
+                    .read_exact(&mut body)
+                    .await
+                    .map_err(|error| backend("GET body", None, error))?;
+                if filled + amount == length {
+                    Self::require_eof(&mut body).await?;
+                }
+                Ok(block)
             }
+            .await;
+            if let Some(timer) = first_chunk.take() {
+                timer.finish(&result);
+            }
+            let block = result?;
             output.send(offset + filled as u64, block).await?;
             filled += amount;
         }
@@ -1261,6 +1344,21 @@ impl S3 {
         length: u64,
         head: &ObjectHead,
     ) -> Result<GetObjectOutput> {
+        metrics::observe(
+            &self.diagnostics,
+            Stage::S3Headers,
+            self.get_range_inner(key, offset, length, head),
+        )
+        .await
+    }
+
+    async fn get_range_inner(
+        &self,
+        key: &str,
+        offset: u64,
+        length: u64,
+        head: &ObjectHead,
+    ) -> Result<GetObjectOutput> {
         if head.etag.is_empty() {
             return Err(Error::Config("conditional read requires ETag".into()));
         }
@@ -1288,7 +1386,19 @@ impl S3 {
         Ok(response)
     }
 
-    async fn finish_range(mut body: ByteStream, block: &mut Block) -> Result<()> {
+    async fn finish_range(&self, body: ByteStream, block: &mut Block) -> Result<()> {
+        metrics::observe(&self.diagnostics, Stage::S3Stream, async {
+            metrics::observe(
+                &self.diagnostics,
+                Stage::FirstChunk,
+                self.finish_range_inner(body, block),
+            )
+            .await
+        })
+        .await
+    }
+
+    async fn finish_range_inner(&self, mut body: ByteStream, block: &mut Block) -> Result<()> {
         let length = block.as_slice().len();
         let mut filled = 0;
         while let Some(chunk) = body
@@ -1296,6 +1406,7 @@ impl S3 {
             .await
             .map_err(|e| backend("GET body", None, e))?
         {
+            self.diagnostics.body_bytes(chunk.len());
             if chunk.len() > length - filled {
                 return Err(Error::InvalidResponse("GET body longer than Range".into()));
             }

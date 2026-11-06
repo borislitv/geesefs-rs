@@ -35,6 +35,12 @@ retry, cancellation, source attribution and log bounds. The [collection guide](m
 defines comparison limits and ignored overhead fixtures. This adds diagnosis;
 it does not explain old requests retrospectively or close mounted/performance gates.
 
+## 2026-11-06: release 0.1.3 preparation
+
+Advance package and lockfile together for the bounded diagnostic build. Release
+assets require successful merged-main CI and source/checksum provenance. The
+authorized single-reader update remains a scoped trial, not general acceptance.
+
 ## 2026-11-06: release 0.1.2 preparation
 
 Advance the package and lockfile version together for the namespace-progress and

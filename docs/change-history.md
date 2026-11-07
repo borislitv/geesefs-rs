@@ -5,6 +5,14 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-07: release 0.1.4 preparation
+
+Advance the package and lockfile together for the bounded READDIRPLUS metadata
+pipeline below. The operator requests a versioned release and a scoped Linux/S3
+check. Package the successful exact-source CI executable with checksum/build
+provenance and the complete locked dependency notices. Publication does not close
+filesystem, production or Go-relative performance acceptance.
+
 ## 2026-11-06: overlap READDIRPLUS directory attributes
 
 An extended delimiter LIST supplies common-prefix names, not authoritative

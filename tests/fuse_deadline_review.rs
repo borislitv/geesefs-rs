@@ -840,6 +840,296 @@ fn debug_saturation_preserves_a_severe_reply_without_blocking_fuse() {
 }
 
 #[test]
+fn severe_replies_retain_backend_status_without_debug_history() {
+    const CHILD: &str = "GEESEFS_BACKEND_FAILURE_CONTEXT_CHILD";
+    if let Ok(mode) = std::env::var(CHILD) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", server.server_addr());
+        let sdk = mode.starts_with("sdk_");
+        let repeat_head = mode == "sdk_repeat_head";
+        let body_failure = mode.starts_with("sdk_body");
+        let checksummed = mode == "sdk_body_checksummed";
+        let invalid = mode == "extension_invalid";
+        let recovered = mode.ends_with("recovered");
+        let forbidden = mode == "extension_forbidden";
+        let requests = if repeat_head {
+            4
+        } else if forbidden || invalid {
+            1
+        } else if body_failure || recovered {
+            2
+        } else {
+            3
+        };
+        let worker = std::thread::spawn(move || {
+            for index in 0..requests {
+                let request = server
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    request.method().as_str(),
+                    if sdk && !(body_failure && index == 1) {
+                        "HEAD"
+                    } else {
+                        "GET"
+                    }
+                );
+                if !sdk {
+                    assert!(request.url().contains("list-type=ext-v1"));
+                }
+                if repeat_head && index == 0 {
+                    request.respond(tiny_http::Response::empty(404)).unwrap();
+                    continue;
+                }
+                if body_failure || recovered && index == 1 {
+                    let body = if sdk {
+                        b"ab".to_vec()
+                    } else {
+                        b"<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>"
+                            .to_vec()
+                    };
+                    let length = if sdk { 4 } else { body.len() };
+                    let status = if body_failure && index == 1 { 206 } else { 200 };
+                    let mut headers: Vec<_> = [
+                        ("ETag", "\"private-etag\""),
+                        ("Content-Range", "bytes 0-3/4"),
+                        ("Connection", "close"),
+                    ]
+                    .into_iter()
+                    .map(|(name, value)| tiny_http::Header::from_bytes(name, value).unwrap())
+                    .collect();
+                    if checksummed && index == 1 {
+                        headers.push(
+                            tiny_http::Header::from_bytes("x-amz-checksum-crc32", "AAAAAA==")
+                                .unwrap(),
+                        );
+                    }
+                    let _ = request.respond(
+                        tiny_http::Response::new(
+                            tiny_http::StatusCode(status),
+                            headers,
+                            std::io::Cursor::new(body),
+                            Some(length),
+                            None,
+                        )
+                        .with_chunked_threshold(usize::MAX),
+                    );
+                    continue;
+                }
+                let response = if invalid {
+                    tiny_http::Response::from_string("private-invalid-xml").with_status_code(200)
+                } else if !sdk && !forbidden {
+                    tiny_http::Response::from_string("private-invalid-gzip-body")
+                        .with_status_code(503)
+                        .with_header(
+                            tiny_http::Header::from_bytes("Content-Encoding", "gzip").unwrap(),
+                        )
+                } else {
+                    tiny_http::Response::from_string(
+                        "<Error><Code>private-backend-code</Code><Message>https://private-host/private-key?secret=private-secret</Message></Error>",
+                    )
+                    .with_status_code(if forbidden { 403 } else { 503 })
+                };
+                request.respond(response).unwrap();
+            }
+        });
+        let fs = {
+            let _entered = runtime.enter();
+            let mut config = support::MemoryStore::config(32);
+            config.metrics_listen = Some("127.0.0.1:0".parse().unwrap());
+            config.diagnostic_log_level = geesefs_rs::config::DiagnosticLogLevel::Error;
+            config.sdk_max_retries = 2;
+            config.request_timeout = Duration::from_secs(15);
+            config.http_timeout = Duration::from_secs(10);
+            config.list_type = Some(geesefs_rs::config::ListType::Extended);
+            if sdk {
+                // Isolate the authoritative HEAD from optional parent preloading.
+                config.stat_cache_ttl = Duration::ZERO;
+            }
+            let sdk = aws_sdk_s3::Config::builder()
+                .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+                .region(aws_sdk_s3::config::Region::new("us-east-1"))
+                .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                    "private-access",
+                    "private-secret",
+                    None,
+                    None,
+                    "test-only",
+                ))
+                .endpoint_url(endpoint)
+                .force_path_style(true)
+                .build();
+            let store = geesefs_rs::backend::s3::S3::new(
+                aws_sdk_s3::Client::from_conf(sdk),
+                "private-bucket".into(),
+                "".into(),
+            )
+            .unwrap()
+            .with_options(&config)
+            .unwrap();
+            Filesystem::new(config, Arc::new(store)).unwrap()
+        };
+        let mut session = Session::new(fs, &runtime);
+        session
+            .peer
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .unwrap();
+        let request = if sdk {
+            let lookup = session.send(1, 1, b"private-key\0");
+            if body_failure {
+                let reply = session.receive();
+                assert_eq!((unique(&reply), errno(&reply)), (lookup, 0));
+                let ino = u64::from_ne_bytes(reply[16..24].try_into().unwrap());
+                let handle = open(&mut session, ino);
+                read_range(&mut session, ino, handle, 0, 4)
+            } else {
+                lookup
+            }
+        } else {
+            session.send(27, 1, &[0; 8]);
+            let reply = session.receive();
+            assert_eq!(errno(&reply), 0);
+            let mut body = reply[16..24].to_vec();
+            body.extend_from_slice(&0u64.to_ne_bytes());
+            body.extend_from_slice(&4096u32.to_ne_bytes());
+            body.extend_from_slice(&[0; 20]);
+            session.send(28, 1, &body)
+        };
+        let reply = session.receive();
+        assert_eq!(
+            (unique(&reply), errno(&reply)),
+            (request, if recovered { 0 } else { -libc::EIO })
+        );
+        session.close();
+        worker.join().unwrap();
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for (mode, operation, transport, status, kind, attempts) in [
+        (
+            "extension_gzip",
+            "list",
+            "extension",
+            Some(503),
+            "decode",
+            Some(3),
+        ),
+        (
+            "extension_forbidden",
+            "list",
+            "extension",
+            Some(403),
+            "service",
+            Some(1),
+        ),
+        (
+            "extension_invalid",
+            "list",
+            "extension",
+            Some(200),
+            "invalid_response",
+            Some(1),
+        ),
+        ("sdk_head", "head", "sdk", Some(503), "service", Some(3)),
+        (
+            "sdk_repeat_head",
+            "head",
+            "sdk",
+            Some(503),
+            "service",
+            Some(3),
+        ),
+        ("sdk_body", "get", "sdk_body", None, "body", None),
+        (
+            "sdk_body_checksummed",
+            "get",
+            "sdk_body",
+            None,
+            "body",
+            None,
+        ),
+        ("extension_recovered", "", "", None, "", None),
+        ("sdk_recovered", "", "", None, "", None),
+    ] {
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "severe_replies_retain_backend_status_without_debug_history",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env(CHILD, mode)
+            .kill_on_drop(true);
+        let output = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(25), child.output())
+                .await
+                .unwrap()
+                .unwrap()
+        });
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{mode}: {stderr}");
+        let records: Vec<serde_json::Value> = stderr
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        if mode.ends_with("recovered") {
+            assert!(
+                records.is_empty(),
+                "recovered retries must not emit failures: {mode}"
+            );
+            continue;
+        }
+        assert_eq!(
+            records.len(),
+            1,
+            "only the severe record is required: {mode}"
+        );
+        assert_eq!(records[0]["event"], "fuse_reply");
+        assert_eq!(records[0]["errno"], libc::EIO);
+        let failures = records[0]["backend_failures"]
+            .as_array()
+            .expect("the severe reply must carry backend context without debug history");
+        assert_eq!(failures.len(), 1, "{mode}");
+        assert_eq!(failures[0]["operation"], operation, "{mode}");
+        assert_eq!(failures[0]["transport"], transport, "{mode}");
+        assert_eq!(
+            failures[0]["http_status"],
+            serde_json::json!(status),
+            "{mode}"
+        );
+        assert_eq!(failures[0]["kind"], kind, "{mode}");
+        assert_eq!(
+            failures[0]["attempts"],
+            serde_json::json!(attempts),
+            "{mode}"
+        );
+        assert_eq!(
+            failures[0]["observations"],
+            if mode == "sdk_repeat_head" { 2 } else { 1 },
+            "{mode}"
+        );
+        assert!(failures[0]["observed_seconds"].as_f64().unwrap() >= 0.);
+        assert!(
+            failures[0]["observed_seconds"].as_f64().unwrap()
+                <= records[0]["elapsed_seconds"].as_f64().unwrap()
+        );
+        for forbidden in ["private-", "http://", "https://", "X-Amz-", "Authorization"] {
+            assert!(!stderr.contains(forbidden), "{mode}: leaked {forbidden}");
+        }
+    }
+}
+
+#[test]
 fn diagnostic_records_preserve_journal_priorities_only_on_the_matching_stream() {
     const CHILD: &str = "GEESEFS_JOURNAL_PRIORITY_CHILD";
     if let Ok(mode) = std::env::var(CHILD) {

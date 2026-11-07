@@ -255,6 +255,25 @@ codes or messages. A generic EIO alone cannot identify which dependency failed.
 Read-ahead records use the same classes; their source counters retain the
 `read_ahead_timeout`/`read_ahead_cancelled`/`read_ahead_error` grouping.
 
+Error/warning records additionally carry `backend_failures`: at most five slots
+for `list`, `head`, `get`, `write` and `other`. Each retains the latest failed
+execution's `transport`, numeric `http_status` (or null), closed `kind`, HTTP
+`attempts`, accumulated failed `observations` and monotonic `observed_seconds`
+since trace creation. Successful retries do not create a failed execution.
+SDK kinds distinguish `timeout`, `connector`, `response`, `service` and `other`;
+extension kinds distinguish `timeout`, `connect`, `decode`, `body`, `request`,
+`response_limit`, `invalid_response` and `service`. GET-body failures use
+`transport=sdk_body`, `body`/`invalid_response`, with null status and attempts:
+the SDK has already finalized, and its output does not retain those observations.
+No arbitrary service codes, request IDs, headers or body text are added.
+
+These are observations, not a claim that the latest backend failure caused the
+terminal errno: speculative metadata work can fail and be ignored, and parallel
+executions can overwrite a slot. Counts are failures, not retries; the summary is
+neither an HTTP history nor complete coverage of cancellation/timeouts outside
+the observed boundaries. It shares the severe record's existing sampling and
+lossy queue, without depending on debug history. Other levels carry null.
+
 Each scrape can also emit one candidate for the oldest trace aged at least 30s
 (`fuse_inflight`, level `info`); the info limiter applies. This is scrape-driven unfinished-work
 visibility, not a watchdog independent of the runtime. Phases show active scope

@@ -218,6 +218,39 @@ impl Inner {
 #[derive(Clone, Debug, Default)]
 pub struct Diagnostics(Option<Arc<Inner>>);
 
+/// Fixed-size, sanitized observation of a failed backend execution, not its
+/// remote error text. Concurrent executions retain only the latest per operation.
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct BackendFailure {
+    operation: &'static str,
+    transport: &'static str,
+    http_status: Option<u16>,
+    kind: &'static str,
+    attempts: Option<u64>,
+    observations: u64,
+    observed_seconds: f64,
+}
+
+impl BackendFailure {
+    pub(crate) fn new(
+        operation: &'static str,
+        transport: &'static str,
+        http_status: Option<u16>,
+        kind: &'static str,
+        attempts: Option<u64>,
+    ) -> Self {
+        Self {
+            operation,
+            transport,
+            http_status,
+            kind,
+            attempts,
+            observations: 1,
+            observed_seconds: 0.,
+        }
+    }
+}
+
 tokio::task_local! { static CURRENT: Option<Arc<Trace>>; }
 pub(crate) fn context() -> Option<Arc<Trace>> {
     CURRENT.try_with(Clone::clone).ok().flatten()
@@ -259,6 +292,30 @@ pub(crate) fn error_reason(error: &crate::error::Error) -> &'static str {
 }
 
 impl Diagnostics {
+    pub(crate) fn backend_failure(&self, mut failure: BackendFailure) {
+        if self
+            .0
+            .as_ref()
+            .is_none_or(|inner| inner.log_level == DiagnosticLogLevel::Off)
+        {
+            return;
+        }
+        if let Some(trace) = context() {
+            let index = match failure.operation {
+                "list" => 0,
+                "head" => 1,
+                "get" => 2,
+                "write" => 3,
+                _ => 4,
+            };
+            let mut failures = trace.backend_failures.lock().unwrap();
+            if let Some(previous) = &failures[index] {
+                failure.observations += previous.observations;
+            }
+            failure.observed_seconds = trace.age();
+            failures[index] = Some(failure);
+        }
+    }
     pub(crate) fn new(enabled: bool, log_level: DiagnosticLogLevel) -> Self {
         if !enabled {
             return Self::default();
@@ -431,6 +488,7 @@ impl Diagnostics {
             elapsed_ns: std::array::from_fn(|_| AtomicU64::new(0)),
             failed_stages: AtomicU64::new(0),
             cancelled_stages: AtomicU64::new(0),
+            backend_failures: Mutex::new(std::array::from_fn(|_| None)),
         });
         inner
             .active
@@ -648,6 +706,7 @@ pub(crate) struct Trace {
     elapsed_ns: [AtomicU64; STAGES],
     failed_stages: AtomicU64,
     cancelled_stages: AtomicU64,
+    backend_failures: Mutex<[Option<BackendFailure>; 5]>,
 }
 impl Trace {
     pub(crate) fn polled(&self, queued: Instant) {
@@ -752,11 +811,21 @@ impl Trace {
             (active != 0 || elapsed_ns != 0 || failed || cancelled).then_some((stage.label(), serde_json::json!({"active": active, "completed_seconds": elapsed_ns as f64 / 1e9, "failed": failed, "cancelled": cancelled})))
         }).collect();
         let prefix = self.inner.log_prefix(level);
+        let backend_failures =
+            matches!(level, DiagnosticLogLevel::Error | DiagnosticLogLevel::Warn).then(|| {
+                self.backend_failures
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .flatten()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            });
         let record = format!(
             "{prefix}{}\n",
             serde_json::json!({"level": level, "event": event, "trace_id": self.id, "process_id": std::process::id(),
                 "timestamp_unix_seconds": SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|duration| duration.as_secs_f64()),
-                "opcode": self.opcode.label(), "request": self.request, "ino": self.ino, "offset": self.offset, "size": self.size, "errno": errno, "reason": reason, "elapsed_seconds": self.age(), "reply_sent": self.replied(), "phases": phases, "details": details})
+                "opcode": self.opcode.label(), "request": self.request, "ino": self.ino, "offset": self.offset, "size": self.size, "errno": errno, "reason": reason, "elapsed_seconds": self.age(), "reply_sent": self.replied(), "phases": phases, "details": details, "backend_failures": backend_failures})
         );
         // Lossy mode queues this entire record once; stderr backpressure stays
         // on the library's worker, with bounded memory and observable drops.

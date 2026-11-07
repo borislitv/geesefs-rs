@@ -5,6 +5,32 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Severe backend context — 2026-11-07 (unreleased)
+
+`severe_replies_retain_backend_status_without_debug_history` drives real fuser
+wire requests against loopback HTTP at the `error` level. Before implementation,
+the terminal error lacks backend context; a second failing regression isolates
+the missing GET-body observation after successful SDK headers. Cases cover
+exhausted gzip/503 extension retries, non-retried 403, malformed successful XML,
+exhausted SDK HEAD retries, truncated streaming and checksummed GET bodies, plus
+successful retry recovery without false error records. An absent object followed
+by a failed directory-marker HEAD retains the latest failure and counts both
+observations in one slot. Assertions independently
+check status/class/attempts and exclude disposable keys, credentials, URLs and
+remote error text. The HEAD fixture disables optional parent LIST speculation;
+it does not change production lookup behavior. These fixtures do not identify
+historical EIO or establish mounted compatibility/performance acceptance.
+
+Default and all-feature/all-target suites, warning-denying Clippy, formatting,
+source audit and both Python suites pass. One additional full run reaches the
+unmodified performance-evidence wrapper's 30-second Python deadline; a subsequent
+`--no-fail-fast` run collects every target and passes. The separate Python bench
+suite takes about 28 seconds locally, so that timing-sensitive failure remains
+recorded rather than changing its deadline or assertions. Two selected SDK
+finalizer mutations report killed. Duplication screening at 0.8 finds no
+candidates; new helper complexity is at most 9, while coverage/CRAP remain unknown.
+These scoped checks do not establish observer cost or durable log delivery.
+
 ## Severe diagnostic output under debug pressure — 2026-11-07 (unreleased)
 
 A blocked-stderr fuser regression first loses a lone EIO reply record behind

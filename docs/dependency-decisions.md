@@ -35,6 +35,23 @@ snapshot. Sampling overhead remains part of the observed server cost.
 
 ## Narrow application state
 
+### Severe backend failure context — 2026-11-07
+
+Reuse the locked aws-smithy-runtime-api 1.19.1
+[finalizer context](https://docs.rs/aws-smithy-runtime-api/1.19.1/aws_smithy_runtime_api/client/interceptors/context/struct.FinalizerInterceptorContextRef.html)
+and [typed orchestrator predicates](https://docs.rs/aws-smithy-runtime-api/1.19.1/aws_smithy_runtime_api/client/orchestrator/struct.OrchestratorError.html)
+in the existing interceptor. Reuse reqwest 0.12.28 status and typed error
+predicates for extension requests, and the existing backend/body validation
+boundaries for streaming failures.
+These supported boundaries expose status, failure class and completed attempt
+count without formatting credentials, URLs, headers or remote error text.
+Keep only the last failed execution per closed operation plus its count in each
+request trace; serialize that bounded summary with severe records through the
+existing serde_json/tracing-appender path. No new subscriber, transport, queue,
+error-string parser, dependency or public Error variant is required.
+Body failures occur after SDK finalization; their status and attempt count remain
+explicitly unknown rather than borrowing another concurrent request's response.
+
 ### Debug trace output — 2026-11-07
 
 Keep the already locked tracing-appender 0.2.5 `NonBlockingBuilder` and its

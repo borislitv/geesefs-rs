@@ -5,6 +5,19 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-07: retain backend context in severe records
+
+Terminal EIO records retained only a coarse backend class, requiring debug
+history that can be dropped independently. Real fuser/HTTP regressions first
+reproduce missing status/class/attempt context and missing GET-body attribution.
+Capture final SDK and extension failures in five fixed request-local operation
+slots; serialize their latest sanitized observation, count and monotonic age
+directly with error/warning records. Recovered retries are not recorded as failed
+executions. GET stream/validation failures retain a body class with unknown HTTP
+status and attempt count. Preserve existing retries, errno, queues and filtering;
+do not expose paths, URLs, headers, credentials or arbitrary remote error text.
+This improves future attribution, not diagnosis of historical EIO or acceptance.
+
 ## 2026-11-07: release 0.1.6 preparation
 
 Advance the package and lockfile together for transient LIST error-body retries

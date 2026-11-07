@@ -5,6 +5,15 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-07: release 0.1.6 preparation
+
+Advance the package and lockfile together for transient LIST error-body retries
+and protected severe diagnostic output. Keep published v0.1.5 immutable. Package
+only the successful exact-source default-jemalloc CI executable with checksums,
+source provenance and complete locked dependency notices. Receiver priority and
+application reservation improve attribution, not durability; publication does
+not close compatibility, memory or comparative performance acceptance.
+
 ## 2026-11-07: preserve diagnostic severity on journal stderr streams
 
 Debug saturation also consumed the only application output queue, dropping a lone

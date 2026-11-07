@@ -5,6 +5,19 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-07: retain transient LIST status after error-body failure
+
+The extended LIST adapter read the response body before checking its HTTP status.
+A malformed gzip error response therefore returned a transport/protocol error
+immediately, skipping the configured retry for HTTP 429 and 5xx. A real loopback
+HTTP regression reproduces that failure before the correction. Preserve the
+transient status when its body cannot be read, discard incomplete XML and use the
+existing bounded retry loop. Successful and non-transient response-body failures
+remain errors; neither they nor transient failures select standard LIST fallback.
+Tests cover recovery, exhausted and disabled retries, access denial and malformed
+successful responses. This independently reproduced defect does not establish
+the cause of historical filesystem errors or close performance acceptance.
+
 ## 2026-11-07: release 0.1.5 preparation
 
 Advance the package and lockfile together for the explicit diagnostic levels and

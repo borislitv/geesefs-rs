@@ -366,3 +366,12 @@ metadata. Preserve the cached or HEAD observation time when merging selected
 entries; only actual authoritative LIST metadata has the new LIST observation
 time. Existing SDK responses, Moka and bounded futures suffice. Avoid another
 TTL extension or cache-policy change to hide required metadata refresh requests.
+
+For extended LIST error-body failures, retain the existing reqwest 0.12.28
+streaming [`Response::chunk`](https://docs.rs/reqwest/0.12.28/reqwest/struct.Response.html#method.chunk)
+and separate [`Response::status`](https://docs.rs/reqwest/0.12.28/reqwest/struct.Response.html#method.status)
+APIs. Automatic gzip decoding can fail after response headers have established a
+transient HTTP status. Classify that status in the existing bounded retry loop
+instead of replacing transport, disabling gzip or adding a second retry layer.
+Keep [`Error::without_url`](https://docs.rs/reqwest/0.12.28/reqwest/struct.Error.html#method.without_url)
+for terminal body failures so presigned URLs remain excluded from error text.

@@ -5,6 +5,23 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Extended LIST error-body retries — 2026-11-07 (unreleased)
+
+Real loopback HTTP tests send invalid gzip error bodies with HTTP 429, 500 and
+503, followed by an independently specified successful object listing. The
+original adapter fails before retry with `TransportOrProtocol`; the corrected
+adapter recovers the expected key and size. Additional cases verify zero/one
+configured retries, exhausted errors retaining their HTTP code, no retries for
+HTTP 403 or malformed HTTP 200, and no standard LIST fallback.
+
+Default and all-feature/all-target Rust suites, Clippy with `-D warnings`, format,
+public-source audit and Python fixture/benchmark suites pass. Three selected
+retry-predicate mutations report killed; this is not repository-wide coverage.
+Duplication screening of `src/backend/s3.rs` finds no candidates at 0.8. Complexity
+screening reports CC 23 for `list_extended_inner`; coverage and CRAP remain unknown.
+These checks prove the fixture correction, not the cause of historical errors or
+mounted compatibility/performance acceptance. The published v0.1.5 is unchanged.
+
 ## Diagnostic levels and debug request traces — 2026-11-07 (unreleased)
 
 Real fuser wire requests verify successful lookup/open/read lifecycle correlation,

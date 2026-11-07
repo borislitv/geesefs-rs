@@ -5,7 +5,16 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
-## 2026-11-07: explicit diagnostic levels and debug request traces (unreleased)
+## 2026-11-07: release 0.1.5 preparation
+
+Advance the package and lockfile together for the explicit diagnostic levels and
+bounded debug events below. Preserve the published v0.1.4 tag and assets. Package
+only the successful exact-source CI executable with checksums, build provenance
+and complete locked dependency notices. Debug logging is opt-in, has observer
+cost and may drop records; this release does not close compatibility or comparative
+performance acceptance.
+
+## 2026-11-07: explicit diagnostic levels and debug request traces
 
 The previous maximum `warn` mixed ordinary slow-work diagnostics with errors and
 could not reconstruct successful requests or parallel phase lifetimes. Make

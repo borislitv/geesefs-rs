@@ -1200,6 +1200,11 @@ impl Filesystem {
             timer.ok();
             cached
         };
+        self.diagnostics.debug("read_cache", || {
+            serde_json::json!({
+                "hit": cached.is_some(), "offset": offset, "bytes": length,
+            })
+        });
         if let Some(block) = cached {
             self.read_metrics.hits.inc();
             self.read_metrics.hit_bytes.inc_by(length as u64);
@@ -1249,8 +1254,20 @@ impl Filesystem {
                 return Ok(Some(block));
             }
             match admission {
-                read::FillAdmission::Leader(owner) => break owner,
+                read::FillAdmission::Leader(owner) => {
+                    self.diagnostics.debug("read_fill", || {
+                        serde_json::json!({
+                            "role": "leader", "offset": start, "bytes": prefetch,
+                        })
+                    });
+                    break owner;
+                }
                 read::FillAdmission::Wait(mut done) => {
+                    self.diagnostics.debug("read_fill", || {
+                        serde_json::json!({
+                            "role": "follower", "offset": start, "bytes": prefetch,
+                        })
+                    });
                     // Subscribe before the cache check so a completed chunk
                     // cannot be missed between lookup and waiting. Closing also
                     // wakes followers after error or cancellation; retry normally.

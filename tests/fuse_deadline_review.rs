@@ -749,13 +749,142 @@ fn full_admission_is_attributed_without_inventing_a_backend_failure() {
 }
 
 #[test]
+fn debug_records_correlate_successful_request_lifecycle_and_phase_scopes() {
+    const CHILD: &str = "GEESEFS_DEBUG_TRACE_CHILD";
+    if let Ok(level) = std::env::var(CHILD) {
+        use clap::Parser;
+        let parsed = geesefs_rs::config::Config::try_parse_from([
+            "geesefs-rs",
+            "--diagnostic-log-level",
+            &level,
+            "bucket",
+            "/unused",
+        ])
+        .expect("the requested diagnostic level must be accepted");
+        let (runtime, store, fs) = configured_fixture(|config| {
+            config.diagnostic_log_level = parsed.diagnostic_log_level;
+        });
+        store.seed("private-request-path", b"private-payload-never-log");
+        let mut session = Session::new(fs.clone(), &runtime);
+        let request = session.send(1, 1, b"private-request-path\0");
+        let reply = session.receive();
+        assert_eq!((unique(&reply), errno(&reply)), (request, 0));
+        let ino = u64::from_ne_bytes(reply[16..24].try_into().unwrap());
+        runtime.block_on(runtime.spawn(async {})).unwrap();
+        let handle = open(&mut session, ino);
+        for _ in 0..2 {
+            runtime.block_on(runtime.spawn(async {})).unwrap();
+            let request = read_range(&mut session, ino, handle, 0, 25);
+            let reply = session.receive();
+            assert_eq!((unique(&reply), errno(&reply)), (request, 0));
+            assert_eq!(&reply[16..], b"private-payload-never-log");
+        }
+        session.close();
+        assert_eq!(
+            metric(
+                &fs,
+                "geesefs_fuse_replies_total{opcode=\"lookup\",errno=\"OK\"}"
+            ),
+            1.
+        );
+        assert_eq!(metric(&fs, "geesefs_diagnostic_logs_dropped_total"), 0.);
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for level in ["debug", "info", "warn", "error", "off"] {
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "debug_records_correlate_successful_request_lifecycle_and_phase_scopes",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env(CHILD, level)
+            .kill_on_drop(true);
+        let output = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), child.output())
+                .await
+                .unwrap()
+                .unwrap()
+        });
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{level}: {stderr}");
+        let records: Vec<serde_json::Value> = stderr
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        if level != "debug" {
+            assert!(
+                records.is_empty(),
+                "a fast successful request is debug-only: {level}: {stderr}"
+            );
+            continue;
+        }
+        let lookup: Vec<_> = records
+            .iter()
+            .filter(|record| record["opcode"] == "lookup")
+            .collect();
+        for event in ["fuse_request", "fuse_polled", "fuse_reply", "fuse_complete"] {
+            let record = lookup
+                .iter()
+                .find(|record| record["event"] == event)
+                .unwrap_or_else(|| panic!("missing {event}: {stderr}"));
+            assert_eq!(record["level"], "debug");
+            assert_eq!(record["ino"], 1);
+            assert!(record["request"].as_u64().unwrap() > 0);
+            assert!(record["timestamp_unix_seconds"].as_f64().unwrap() > 0.);
+        }
+        let trace = &lookup[0]["trace_id"];
+        assert!(lookup.iter().all(|record| &record["trace_id"] == trace));
+        assert!(lookup.iter().any(|record| record["event"] == "phase_start"));
+        assert!(
+            lookup.iter().any(
+                |record| record["event"] == "phase_end" && record["details"]["outcome"] == "ok"
+            )
+        );
+        assert!(lookup.iter().any(|record| record["event"] == "fuse_reply"
+            && record["errno"] == 0
+            && record["reply_sent"] == true));
+        for hit in [false, true] {
+            assert!(
+                records.iter().any(|record| record["event"] == "read_cache"
+                    && record["details"]["hit"] == hit
+                    && record["details"]["bytes"] == 25),
+                "{stderr}"
+            );
+        }
+        assert!(
+            records
+                .iter()
+                .any(|record| record["event"] == "read_fill"
+                    && record["details"]["role"] == "leader"),
+            "{stderr}"
+        );
+        for forbidden in ["private-request-path", "private-payload-never-log"] {
+            assert!(
+                !stderr.contains(forbidden),
+                "debug must not disclose request names or bytes"
+            );
+        }
+    }
+}
+
+#[test]
 fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
     const CHILD: &str = "GEESEFS_DIAGNOSTIC_LOG_CHILD";
     if let Ok(mode) = std::env::var(CHILD) {
-        if mode == "blocked_stderr" || mode == "queue_full" {
+        if mode == "blocked_stderr" || mode == "queue_full" || mode == "debug_queue_full" {
             let queue_full = mode == "queue_full";
+            let debug_queue_full = mode == "debug_queue_full";
             let (runtime, store, fs) = configured_fixture(|config| {
                 config.request_timeout = Duration::from_secs(5);
+                if debug_queue_full {
+                    config.diagnostic_log_level = geesefs_rs::config::DiagnosticLogLevel::Debug;
+                }
             });
             store.seed("success", b"independent bytes");
             let (ready, held) = mpsc::channel();
@@ -768,7 +897,13 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
             held.recv_timeout(Duration::from_secs(1)).unwrap();
             let mut session = Session::new(fs.clone(), &runtime);
             let mut worker_free = true;
-            for index in 0..if queue_full { 18 } else { 1 } {
+            for index in 0..if debug_queue_full {
+                300
+            } else if queue_full {
+                18
+            } else {
+                1
+            } {
                 store
                     .fail_head_once
                     .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -822,6 +957,8 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
                     "18 records exceed 16 queued plus at most one being written: {dropped}"
                 );
                 assert_eq!(metric(&fs, "geesefs_diagnostic_logs_suppressed_total"), 0.);
+            } else if debug_queue_full {
+                assert!(dropped > 0., "debug bursts must expose bounded-output loss");
             }
             return;
         }
@@ -829,8 +966,15 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
             read_deadline_after_publication_preserves_bytes_without_a_second_reply();
             return;
         }
-        if mode == "listing" || mode == "listing_cancelled" {
-            let cancelled = mode == "listing_cancelled";
+        if [
+            "listing",
+            "listing_cancelled",
+            "listing_debug",
+            "listing_debug_cancelled",
+        ]
+        .contains(&mode.as_str())
+        {
+            let cancelled = mode.ends_with("cancelled");
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(1)
                 .enable_all()
@@ -857,6 +1001,9 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
                 let _entered = runtime.enter();
                 let mut config = support::MemoryStore::config(32);
                 config.metrics_listen = Some("127.0.0.1:0".parse().unwrap());
+                if mode.starts_with("listing_debug") {
+                    config.diagnostic_log_level = geesefs_rs::config::DiagnosticLogLevel::Debug;
+                }
                 config.sdk_max_retries = 0;
                 config.http_timeout = Duration::from_secs(2);
                 config.list_type = Some(geesefs_rs::config::ListType::Extended);
@@ -920,10 +1067,14 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
                 config.diagnostic_log_level = geesefs_rs::config::DiagnosticLogLevel::Off;
             } else if mode == "slow_warn" || mode == "backend_warn" {
                 config.diagnostic_log_level = geesefs_rs::config::DiagnosticLogLevel::Warn;
+            } else if mode == "slow_info" {
+                config.diagnostic_log_level = geesefs_rs::config::DiagnosticLogLevel::Info;
+            } else if mode == "slow_error" {
+                config.diagnostic_log_level = geesefs_rs::config::DiagnosticLogLevel::Error;
             }
         });
         let mut session = Session::new(fs.clone(), &runtime);
-        if mode == "slow_warn" || mode == "slow_error" {
+        if mode == "slow_warn" || mode == "slow_error" || mode == "slow_info" {
             store.seed("private-request-path", b"independent bytes");
             let gate = Arc::new(tokio::sync::Semaphore::new(0));
             *store.head_gate.lock().unwrap() = Some(gate.clone());
@@ -1041,6 +1192,28 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
         ),
         ("slow_error", "fuse_reply", "ok", 0, true),
         ("slow_warn", "fuse_reply", "ok", 0, true),
+        ("slow_info", "fuse_reply", "ok", 0, true),
+        (
+            "debug_queue_full",
+            "fuse_reply",
+            "backend_response",
+            libc::EIO,
+            true,
+        ),
+        (
+            "listing_debug",
+            "fuse_reply",
+            "invalid_response",
+            libc::EIO,
+            true,
+        ),
+        (
+            "listing_debug_cancelled",
+            "fuse_reply",
+            "deadline",
+            libc::ETIMEDOUT,
+            true,
+        ),
         (
             "admission",
             "fuse_reply",
@@ -1097,8 +1270,71 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        if mode == "backend_off" || mode == "slow_error" {
+        if mode == "backend_off" || mode == "slow_error" || mode == "slow_warn" {
             assert!(records.is_empty(), "{mode}: {stderr}");
+            continue;
+        }
+        if mode == "debug_queue_full" || mode.starts_with("listing_debug") {
+            assert!(
+                records
+                    .iter()
+                    .any(|record| record["level"] == "debug" && record["event"] == "phase_start"),
+                "{stderr}"
+            );
+            if mode == "debug_queue_full" {
+                assert!(
+                    records.len() >= 256,
+                    "debug queue preserves a bounded burst: {}",
+                    records.len()
+                );
+            } else {
+                let attempt = records
+                    .iter()
+                    .find(|record| record["event"] == "s3_attempt")
+                    .expect("actual extension HTTP attempt");
+                assert_eq!(attempt["details"]["operation"], "list");
+                assert_eq!(attempt["details"]["transport"], "extension");
+                assert_eq!(attempt["details"]["retry"], false);
+                let phase = records
+                    .iter()
+                    .find(|record| {
+                        record["event"] == "phase_end" && record["details"]["stage"] == "s3_list"
+                    })
+                    .expect("real LIST parse failure");
+                assert_eq!(
+                    phase["details"]["outcome"],
+                    if mode.ends_with("cancelled") {
+                        "cancelled"
+                    } else {
+                        "error"
+                    }
+                );
+                assert_eq!(
+                    phase["details"]["reason"],
+                    if mode.ends_with("cancelled") {
+                        "cancelled"
+                    } else {
+                        "invalid_response"
+                    }
+                );
+                assert_eq!(phase["trace_id"], attempt["trace_id"]);
+                assert!(records.iter().any(|record| record["event"] == "phase_start"
+                    && record["details"]["scope_id"] == phase["details"]["scope_id"]));
+            }
+            for forbidden in [
+                "private-request-path",
+                "private-backend-text",
+                "disposable-access",
+                "disposable-secret",
+                "Authorization",
+                "http://",
+                "bucket",
+            ] {
+                assert!(
+                    !stderr.contains(forbidden),
+                    "debug leaked {forbidden}: {stderr}"
+                );
+            }
             continue;
         }
         if mode == "queue_full" {
@@ -1109,7 +1345,13 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
         let record = &records[0];
         assert_eq!(
             record["level"],
-            if mode == "slow_warn" { "warn" } else { "error" }
+            if mode == "slow_info" {
+                "info"
+            } else if mode == "admission" || mode == "generation" {
+                "warn"
+            } else {
+                "error"
+            }
         );
         assert_eq!(record["event"], event, "{stderr}");
         assert_eq!(record["reason"], reason, "{stderr}");

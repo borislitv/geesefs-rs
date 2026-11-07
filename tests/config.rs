@@ -30,7 +30,7 @@ fn reference_cli_defaults_and_prefix() {
     assert_eq!(c.metrics_listen, None);
     assert_eq!(
         c.diagnostic_log_level,
-        geesefs_rs::config::DiagnosticLogLevel::Error
+        geesefs_rs::config::DiagnosticLogLevel::Warn
     );
     assert_eq!(c.symlink_attr, "--symlink-target");
     assert_eq!(c.bucket_and_prefix(), ("bucket", "packages"));
@@ -53,7 +53,7 @@ fn accepts_an_explicit_metrics_listener_without_contacting_backend() {
 
 #[test]
 fn diagnostic_log_levels_are_explicit_and_bounded() {
-    for level in ["off", "error", "warn"] {
+    for level in ["off", "error", "warn", "info", "debug"] {
         Config::try_parse_from([
             "geesefs-rs",
             "--diagnostic-log-level",

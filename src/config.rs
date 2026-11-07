@@ -26,6 +26,8 @@ pub enum DiagnosticLogLevel {
     Off,
     Error,
     Warn,
+    Info,
+    Debug,
 }
 
 /// Only options with implemented configuration semantics are parsed.
@@ -191,8 +193,8 @@ pub struct Config {
     /// Keep only basic cache/memory observations; allows same-binary overhead controls.
     #[arg(long)]
     pub no_diagnostics: bool,
-    /// Diagnostic records: error, or also slow/inflight at warn; off retains metrics.
-    #[arg(long, value_enum, default_value = "error")]
+    /// Diagnostic JSON: warn normally, info for slow work, debug for request/phase traces.
+    #[arg(long, value_enum, default_value = "warn")]
     pub diagnostic_log_level: DiagnosticLogLevel,
 }
 

@@ -1,5 +1,5 @@
 //! Opt-in phase observations. Labels are closed application vocabularies; only
-//! slow/error records carry request/inode identities, never paths or S3 errors.
+//! diagnostic records carry request/inode identities, never paths or S3 errors.
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -8,7 +8,7 @@ use std::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::config::DiagnosticLogLevel;
@@ -109,12 +109,47 @@ struct Inner {
     retries: Family<Labels, Counter>,
     body_bytes: Counter,
     active: Mutex<BTreeMap<u64, Weak<Trace>>>,
-    next_log_ns: AtomicU64,
+    next_log_ns: [AtomicU64; 3],
     suppressed_logs: Counter,
     lock_samples: AtomicU64,
     log_level: DiagnosticLogLevel,
     log_writer: Option<NonBlocking>,
     _log_guard: Option<WorkerGuard>,
+}
+
+impl Inner {
+    fn admit_log(&self, level: DiagnosticLogLevel) -> bool {
+        // Debug bypasses rate sampling, but not the bounded lossy writer.
+        if level == DiagnosticLogLevel::Debug {
+            return true;
+        }
+        let next_log_ns = &self.next_log_ns[match level {
+            DiagnosticLogLevel::Error => 0,
+            DiagnosticLogLevel::Warn => 1,
+            DiagnosticLogLevel::Info => 2,
+            DiagnosticLogLevel::Off | DiagnosticLogLevel::Debug => unreachable!(),
+        }];
+        let now = self
+            .origin
+            .elapsed()
+            .as_nanos()
+            .min(u64::MAX as u128 - 1_000_000_000) as u64;
+        let next = next_log_ns.load(Ordering::Relaxed);
+        if now < next
+            || next_log_ns
+                .compare_exchange(
+                    next,
+                    now + 1_000_000_000,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+        {
+            self.suppressed_logs.inc();
+            return false;
+        }
+        true
+    }
 }
 
 /// Cloneable shared observations for a filesystem and its real storage backend.
@@ -171,7 +206,11 @@ impl Diagnostics {
             (None, None)
         } else {
             let (writer, guard) = NonBlockingBuilder::default()
-                .buffered_lines_limit(16)
+                .buffered_lines_limit(if log_level == DiagnosticLogLevel::Debug {
+                    256
+                } else {
+                    16
+                })
                 .lossy(true)
                 .thread_name("geesefs-log")
                 .finish(std::io::stderr());
@@ -222,7 +261,7 @@ impl Diagnostics {
             retries: Family::default(),
             body_bytes: Counter::default(),
             active: Mutex::new(BTreeMap::new()),
-            next_log_ns: AtomicU64::new(0),
+            next_log_ns: std::array::from_fn(|_| AtomicU64::new(0)),
             suppressed_logs: Counter::default(),
             lock_samples: AtomicU64::new(0),
             log_level,
@@ -233,9 +272,20 @@ impl Diagnostics {
     pub(crate) fn enabled(&self) -> bool {
         self.0.is_some()
     }
+    pub(crate) fn debug(&self, event: &'static str, details: impl FnOnce() -> serde_json::Value) {
+        if self
+            .0
+            .as_ref()
+            .is_some_and(|inner| inner.log_level == DiagnosticLogLevel::Debug)
+            && let Some(trace) = context()
+        {
+            trace.debug(event, details);
+        }
+    }
     pub(crate) fn event(&self, reason: &'static str) {
         if let Some(inner) = &self.0 {
             inner.events.get_or_create(&vec![("reason", reason)]).inc();
+            self.debug("diagnostic_event", || serde_json::json!({"reason": reason}));
         }
     }
     pub(crate) fn background_error(&self, error: &crate::error::Error) {
@@ -261,27 +311,38 @@ impl Diagnostics {
             if retry {
                 inner.retries.get_or_create(&labels).inc();
             }
+            self.debug("s3_attempt", || serde_json::json!({"operation": operation, "transport": transport, "retry": retry}));
         }
     }
     pub(crate) fn body_bytes(&self, bytes: usize) {
         if let Some(inner) = &self.0 {
             inner.body_bytes.inc_by(bytes as u64);
+            self.debug("s3_body_chunk", || serde_json::json!({"bytes": bytes}));
         }
     }
     pub(crate) fn stage(&self, stage: Stage) -> Timer<'_> {
         let active = self.0.as_ref().map(|inner| {
             inner.stages[stage as usize].inflight.inc();
             let context = context();
+            let scope_id = context
+                .as_ref()
+                .filter(|_| inner.log_level == DiagnosticLogLevel::Debug)
+                .map(|_| inner.sequence.fetch_add(1, Ordering::Relaxed));
             if let Some(trace) = &context {
                 trace.phases[stage as usize].fetch_add(1, Ordering::Relaxed);
+                trace.debug(
+                    "phase_start",
+                    || serde_json::json!({"stage": stage.label(), "scope_id": scope_id}),
+                );
             }
-            (Instant::now(), context)
+            (Instant::now(), context, scope_id)
         });
         Timer {
             diagnostics: self,
             stage,
             active,
             outcome: 2,
+            reason: "cancelled",
         }
     }
     pub(crate) fn request(
@@ -316,6 +377,7 @@ impl Diagnostics {
             .lock()
             .unwrap()
             .insert(id, Arc::downgrade(&trace));
+        trace.log(DiagnosticLogLevel::Debug, "fuse_request", 0, "started");
         Some(trace)
     }
     pub(crate) fn sampled_lock(&self) -> bool {
@@ -382,7 +444,7 @@ impl Diagnostics {
         registry.register("geesefs_s3_body_bytes", "GET body bytes yielded by the SDK, including subsequently rejected or unused fragments; not TCP wire bytes", inner.body_bytes.clone());
         registry.register(
             "geesefs_diagnostic_logs_suppressed",
-            "Slow/error records suppressed by the shared one-per-second limiter",
+            "Error/warn/info records suppressed by their per-level one-per-second limiters; debug is unsampled",
             inner.suppressed_logs.clone(),
         );
         super::counter(
@@ -436,7 +498,7 @@ impl Diagnostics {
             }
         }
         if let Some(trace) = slowest {
-            trace.log(DiagnosticLogLevel::Warn, "fuse_inflight", 0, "unfinished");
+            trace.log(DiagnosticLogLevel::Info, "fuse_inflight", 0, "unfinished");
         }
         registry.register(
             "geesefs_fuse_inflight",
@@ -454,20 +516,23 @@ impl Diagnostics {
 pub(crate) struct Timer<'a> {
     diagnostics: &'a Diagnostics,
     stage: Stage,
-    active: Option<(Instant, Option<Arc<Trace>>)>,
+    active: Option<(Instant, Option<Arc<Trace>>, Option<u64>)>,
     outcome: usize,
+    reason: &'static str,
 }
 impl Timer<'_> {
     pub(crate) fn finish<T>(mut self, result: &crate::error::Result<T>) {
         self.outcome = usize::from(result.is_err());
+        self.reason = result.as_ref().err().map_or("ok", error_reason);
     }
     pub(crate) fn ok(mut self) {
         self.outcome = 0;
+        self.reason = "ok";
     }
 }
 impl Drop for Timer<'_> {
     fn drop(&mut self) {
-        let Some((started, trace)) = self.active.take() else {
+        let Some((started, trace, scope_id)) = self.active.take() else {
             return;
         };
         let elapsed = started.elapsed();
@@ -489,6 +554,8 @@ impl Drop for Timer<'_> {
                 Ordering::Relaxed,
             );
             trace.phases[self.stage as usize].fetch_sub(1, Ordering::Relaxed);
+            trace.debug("phase_end", || serde_json::json!({"stage": self.stage.label(), "scope_id": scope_id,
+                "duration_seconds": elapsed.as_secs_f64(), "outcome": (["ok", "error", "cancelled"][self.outcome]), "reason": self.reason}));
         }
     }
 }
@@ -513,7 +580,12 @@ pub(crate) struct Trace {
 }
 impl Trace {
     pub(crate) fn polled(&self, queued: Instant) {
-        self.inner.executor.observe(queued.elapsed().as_secs_f64());
+        let seconds = queued.elapsed().as_secs_f64();
+        self.inner.executor.observe(seconds);
+        self.debug(
+            "fuse_polled",
+            || serde_json::json!({"executor_queue_seconds": seconds}),
+        );
     }
     pub(crate) fn replied(&self) -> bool {
         self.replied.load(Ordering::Relaxed)
@@ -543,23 +615,23 @@ impl Trace {
         operation.duration.observe(elapsed.as_secs_f64());
         operation.replies[errno_index(errno)].inc();
         let error = errno != 0 && errno != libc::ENOENT && errno != libc::ENODATA;
-        if elapsed >= Duration::from_secs(1) || error {
-            let reason = if errno == libc::EAGAIN && reason == "filesystem" {
-                self.again_reason.lock().unwrap().unwrap_or(reason)
+        let reason = if errno == libc::EAGAIN && reason == "filesystem" {
+            self.again_reason.lock().unwrap().unwrap_or(reason)
+        } else {
+            reason
+        };
+        let level = if error {
+            if matches!(errno, libc::EAGAIN | libc::EINTR | libc::ESTALE) {
+                DiagnosticLogLevel::Warn
             } else {
-                reason
-            };
-            self.log(
-                if error {
-                    DiagnosticLogLevel::Error
-                } else {
-                    DiagnosticLogLevel::Warn
-                },
-                "fuse_reply",
-                errno,
-                reason,
-            );
-        }
+                DiagnosticLogLevel::Error
+            }
+        } else if elapsed >= Duration::from_secs(1) {
+            DiagnosticLogLevel::Info
+        } else {
+            DiagnosticLogLevel::Debug
+        };
+        self.log(level, "fuse_reply", errno, reason);
     }
     fn age(&self) -> f64 {
         self.started.elapsed().as_secs_f64()
@@ -571,32 +643,34 @@ impl Trace {
         errno: i32,
         reason: &'static str,
     ) {
+        self.record(level, event, errno, reason, None);
+    }
+    fn debug(&self, event: &'static str, details: impl FnOnce() -> serde_json::Value) {
+        if self.inner.log_level == DiagnosticLogLevel::Debug {
+            self.record(
+                DiagnosticLogLevel::Debug,
+                event,
+                0,
+                "trace",
+                Some(details()),
+            );
+        }
+    }
+    fn record(
+        &self,
+        level: DiagnosticLogLevel,
+        event: &'static str,
+        errno: i32,
+        reason: &'static str,
+        details: Option<serde_json::Value>,
+    ) {
         if self.inner.log_level < level {
             return;
         }
         let Some(writer) = &self.inner.log_writer else {
             return;
         };
-        let now = self
-            .inner
-            .origin
-            .elapsed()
-            .as_nanos()
-            .min(u64::MAX as u128 - 1_000_000_000) as u64;
-        let next = self.inner.next_log_ns.load(Ordering::Relaxed);
-        if now < next
-            || self
-                .inner
-                .next_log_ns
-                .compare_exchange(
-                    next,
-                    now + 1_000_000_000,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                )
-                .is_err()
-        {
-            self.inner.suppressed_logs.inc();
+        if !self.inner.admit_log(level) {
             return;
         }
         let phases: BTreeMap<_, _> = Stage::ALL.into_iter().filter_map(|stage| {
@@ -608,7 +682,9 @@ impl Trace {
         }).collect();
         let record = format!(
             "{}\n",
-            serde_json::json!({"level": level, "event": event, "opcode": self.opcode.label(), "request": self.request, "ino": self.ino, "offset": self.offset, "size": self.size, "errno": errno, "reason": reason, "elapsed_seconds": self.age(), "reply_sent": self.replied(), "phases": phases})
+            serde_json::json!({"level": level, "event": event, "trace_id": self.id, "process_id": std::process::id(),
+                "timestamp_unix_seconds": SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|duration| duration.as_secs_f64()),
+                "opcode": self.opcode.label(), "request": self.request, "ino": self.ino, "offset": self.offset, "size": self.size, "errno": errno, "reason": reason, "elapsed_seconds": self.age(), "reply_sent": self.replied(), "phases": phases, "details": details})
         );
         // Lossy mode queues this entire record once; stderr backpressure stays
         // on the library's worker, with bounded memory and observable drops.
@@ -617,6 +693,7 @@ impl Trace {
 }
 impl Drop for Trace {
     fn drop(&mut self) {
+        self.log(DiagnosticLogLevel::Debug, "fuse_complete", 0, "completed");
         if matches!(self.opcode, Opcode::Read) && self.replied() {
             self.inner.post_reply.observe(
                 (self.started.elapsed().as_secs_f64()

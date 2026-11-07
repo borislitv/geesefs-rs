@@ -5,6 +5,25 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-07: explicit diagnostic levels and debug request traces (unreleased)
+
+The previous maximum `warn` mixed ordinary slow-work diagnostics with errors and
+could not reconstruct successful requests or parallel phase lifetimes. Make
+`warn` the normal default, move slow/inflight detail to `info`, and provide
+explicit `debug` request/executor/reply/completion, cache/fill, phase and S3-attempt
+events. Preserve request/phase IDs, bounded error classes and cancellation versus
+success, without paths, payloads or backend messages.
+
+Reuse tracing-appender's bounded lossy worker. Debug bypasses normal rate sampling
+with a 256-record queue; error/warn/info retain separate one-record-per-second
+slots and the normal 16-record queue. Filtering and lazy detail construction keep
+debug formatting out of ordinary operation. A real fuser-wire regression first
+fails because successful requests produce no trace; loopback HTTP and blocked
+stderr fixtures cover remote attribution, cancellation, bounded drops and progress.
+Verbose logging has explicit observer cost and can lose records under pressure;
+this is not an exhaustive audit, kernel trace or performance improvement.
+The published v0.1.4 release is unchanged; its old level meanings remain historical.
+
 ## 2026-11-07: release 0.1.4 preparation
 
 Advance the package and lockfile together for the bounded READDIRPLUS metadata

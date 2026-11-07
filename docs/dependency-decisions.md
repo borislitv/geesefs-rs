@@ -35,6 +35,15 @@ snapshot. Sampling overhead remains part of the observed server cost.
 
 ## Narrow application state
 
+### Debug trace output — 2026-11-07
+
+Keep the already locked tracing-appender 0.2.5 `NonBlockingBuilder` and its
+supported `buffered_lines_limit`, `lossy(true)` and enqueue-drop observations.
+Use 256 queued records only for explicit debug; retain 16 normally. Request/phase
+identities and closed-vocabulary fields are application state serialized through
+existing serde_json. No custom queue, subscriber, OpenTelemetry runtime or new
+dependency is needed to expose these existing observation boundaries.
+
 ### READDIRPLUS metadata pipeline — 2026-11-06
 
 Reuse [futures-util 0.3.34 FuturesOrdered](https://docs.rs/futures-util/0.3.34/futures_util/stream/struct.FuturesOrdered.html)

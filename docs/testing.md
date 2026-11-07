@@ -5,6 +5,34 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Diagnostic levels and debug request traces — 2026-11-07 (unreleased)
+
+Real fuser wire requests verify successful lookup/open/read lifecycle correlation,
+executor entry, paired phase scope IDs, cache hit/miss, fill ownership and exact
+payload bytes. CLI tests first reject the new levels; the wire regression then
+fails for missing request records before implementation. Existing loopback SDK
+fixtures verify error/cancellation phases and bounded reasons. Blocked stderr and
+full-queue tests retain FUSE progress, dropped-record visibility and privacy.
+Normal levels exclude fast successful traces; info includes slow/inflight work,
+warn includes transient failures and error retains unexpected failures. Distinct
+rate slots prevent warning/info candidates from suppressing an error slot.
+
+Both Rust configurations, all-target/all-feature warning-denying Clippy, format,
+public-source audit and Python fixture/benchmark suites pass. Python-dependent
+Cargo fixtures require the fixture environment on `PATH`; the system Python alone
+does not provide boto3. The first fixture run also exposed a test length mismatch
+(24 requested bytes versus a 25-byte expected payload), corrected in the test.
+
+Six selected mutator sites report killed: debug rate bypass, separate warning and
+error slots, debug filtering and equal-level admission. This is not a full mutation
+or coverage result, and per-site compiler-versus-assertion classification is not
+provided by this screen. Complexity screening separates log rate admission from
+record formatting; LLVM coverage/CRAP remain unavailable. Duplication screening
+of the three changed source modules finds no candidates at 0.8. Existing larger
+filesystem functions and closed errno/error-class mappings are not refactored by
+this diagnostic change. Debug observer overhead and kernel-mounted acceptance
+remain unmeasured; the published v0.1.4 executable is unchanged.
+
 ## READDIRPLUS directory attributes — 2026-11-06
 
 Five non-mounted fuser `Session::from_fd` regressions use real protocol parsing

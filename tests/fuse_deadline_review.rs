@@ -749,6 +749,242 @@ fn full_admission_is_attributed_without_inventing_a_backend_failure() {
 }
 
 #[test]
+fn debug_saturation_preserves_a_severe_reply_without_blocking_fuse() {
+    const CHILD: &str = "GEESEFS_DEBUG_RESERVED_ERROR_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let (runtime, store, fs) = configured_fixture(|config| {
+            config.diagnostic_log_level = geesefs_rs::config::DiagnosticLogLevel::Debug;
+            config.request_timeout = Duration::from_secs(5);
+        });
+        store.seed("private-flood-success", b"private-flood-payload");
+        let (ready, held) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let blocker = std::thread::spawn(move || {
+            let _stderr = std::io::stderr().lock();
+            ready.send(()).unwrap();
+            wait.recv_timeout(Duration::from_secs(15)).unwrap();
+        });
+        held.recv_timeout(Duration::from_secs(1)).unwrap();
+        let mut session = Session::new(fs.clone(), &runtime);
+        for _ in 0..150 {
+            let request = session.send(1, 1, b"private-flood-success\0");
+            let reply = session.receive();
+            assert_eq!((unique(&reply), errno(&reply)), (request, 0));
+            runtime.block_on(runtime.spawn(async {})).unwrap();
+        }
+        assert!(metric(&fs, "geesefs_diagnostic_logs_dropped_total") > 0.);
+        store
+            .fail_head_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let failed = session.send(1, 1, b"private-flood-error\0");
+        let reply = session.receive();
+        assert_eq!((unique(&reply), errno(&reply)), (failed, -libc::EIO));
+        runtime.block_on(runtime.spawn(async {})).unwrap();
+        let success = session.send(1, 1, b"private-flood-success\0");
+        let reply = session.receive();
+        assert_eq!((unique(&reply), errno(&reply)), (success, 0));
+        session.close();
+        assert_eq!(
+            metric(&fs, "geesefs_diagnostic_severe_queue_dropped_total"),
+            0.
+        );
+        release.send(()).unwrap();
+        blocker.join().unwrap();
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+    child
+        .args([
+            "--exact",
+            "debug_saturation_preserves_a_severe_reply_without_blocking_fuse",
+            "--nocapture",
+        ])
+        .env_clear()
+        .env(CHILD, "1")
+        .kill_on_drop(true);
+    let output = runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(20), child.output())
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(output.status.success(), "{stderr}");
+    let records: Vec<serde_json::Value> = stderr
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let errors: Vec<_> = records
+        .iter()
+        .filter(|record| record["event"] == "fuse_reply" && record["errno"] == libc::EIO)
+        .collect();
+    assert_eq!(
+        errors.len(),
+        1,
+        "debug saturation must not consume the severe record's queue slot"
+    );
+    assert_eq!(errors[0]["level"], "error");
+    assert_eq!(errors[0]["reply_sent"], true);
+    assert_eq!(errors[0]["reason"], "backend_response");
+    for forbidden in [
+        "private-flood-success",
+        "private-flood-payload",
+        "private-flood-error",
+    ] {
+        assert!(!stderr.contains(forbidden));
+    }
+}
+
+#[test]
+fn diagnostic_records_preserve_journal_priorities_only_on_the_matching_stream() {
+    const CHILD: &str = "GEESEFS_JOURNAL_PRIORITY_CHILD";
+    if let Ok(mode) = std::env::var(CHILD) {
+        let (runtime, store, fs) = configured_fixture(|config| {
+            config.diagnostic_log_level = geesefs_rs::config::DiagnosticLogLevel::Debug;
+            config.request_timeout = Duration::from_secs(5);
+        });
+        store.seed("private-priority-success", b"private-priority-payload");
+        if mode == "matching" {
+            *store.head_delay.lock().unwrap() = Duration::from_millis(1100);
+        }
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        *store.head_gate.lock().unwrap() = Some(gate.clone());
+        let mut session = Session::new(fs.clone(), &runtime);
+        let first = session.send(1, 1, b"private-priority-success\0");
+        runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(1), store.head_started.notified())
+                .await
+                .unwrap();
+        });
+        let rejected = session.send(1, 1, b"private-priority-rejected\0");
+        let reply = session.receive();
+        assert_eq!((unique(&reply), errno(&reply)), (rejected, -libc::EAGAIN));
+        gate.add_permits(1);
+        let reply = session.receive();
+        assert_eq!((unique(&reply), errno(&reply)), (first, 0));
+        runtime.block_on(runtime.spawn(async {})).unwrap();
+        *store.head_gate.lock().unwrap() = None;
+        *store.head_delay.lock().unwrap() = Duration::ZERO;
+        store
+            .fail_head_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let failed = session.send(1, 1, b"private-priority-error\0");
+        let reply = session.receive();
+        assert_eq!((unique(&reply), errno(&reply)), (failed, -libc::EIO));
+        session.close();
+        assert_eq!(metric(&fs, "geesefs_diagnostic_logs_dropped_total"), 0.);
+        return;
+    }
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+    use tokio::io::AsyncReadExt;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for mode in [
+        "matching",
+        "wrong_device",
+        "wrong_inode",
+        "malformed",
+        "missing_separator",
+        "absent",
+    ] {
+        let (reader, writer) = UnixStream::pair().unwrap();
+        let stat = rustix::fs::fstat(&writer).unwrap();
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "diagnostic_records_preserve_journal_priorities_only_on_the_matching_stream",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env(CHILD, mode)
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::from(OwnedFd::from(writer)));
+        let identity = match mode {
+            "matching" => Some(format!("{}:{}", stat.st_dev, stat.st_ino)),
+            "wrong_device" => Some(format!("{}:{}", stat.st_dev + 1, stat.st_ino)),
+            "wrong_inode" => Some(format!("{}:{}", stat.st_dev, stat.st_ino + 1)),
+            "malformed" => Some("not-a-device:inode".into()),
+            "missing_separator" => Some("123".into()),
+            "absent" => None,
+            _ => unreachable!(),
+        };
+        if let Some(identity) = identity {
+            child.env("JOURNAL_STREAM", identity);
+        }
+        reader.set_nonblocking(true).unwrap();
+        let (status, bytes) = runtime.block_on(async {
+            let mut process = child.spawn().unwrap();
+            drop(child);
+            let mut reader = tokio::net::UnixStream::from_std(reader).unwrap();
+            let mut bytes = Vec::new();
+            let (status, _) = tokio::time::timeout(Duration::from_secs(10), async {
+                tokio::try_join!(process.wait(), reader.read_to_end(&mut bytes))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            (status, bytes)
+        });
+        let stderr = String::from_utf8(bytes).unwrap();
+        assert!(status.success(), "{mode}: {stderr}");
+        let mut levels = std::collections::BTreeSet::new();
+        for line in stderr.lines() {
+            let (prefix, json) = if mode == "matching" {
+                assert!(
+                    line.len() >= 3 && line.starts_with('<') && line.as_bytes()[2] == b'>',
+                    "journal stream must carry a severity prefix: {line}"
+                );
+                line.split_at(3)
+            } else {
+                ("", line)
+            };
+            let record: serde_json::Value = serde_json::from_str(json).unwrap();
+            let level = record["level"].as_str().unwrap();
+            if mode == "matching" {
+                assert_eq!(
+                    prefix,
+                    match level {
+                        "error" => "<3>",
+                        "warn" => "<4>",
+                        "info" => "<6>",
+                        "debug" => "<7>",
+                        _ => panic!("unknown level: {level}"),
+                    }
+                );
+            }
+            levels.insert(level.to_owned());
+        }
+        assert!(
+            levels.contains("error") && levels.contains("warn") && levels.contains("debug"),
+            "{mode}: {stderr}"
+        );
+        if mode == "matching" {
+            assert!(
+                levels.contains("info"),
+                "slow reply must exercise journal info priority: {stderr}"
+            );
+        }
+        for forbidden in [
+            "private-priority-success",
+            "private-priority-payload",
+            "private-priority-rejected",
+            "private-priority-error",
+        ] {
+            assert!(!stderr.contains(forbidden));
+        }
+    }
+}
+
+#[test]
 fn debug_records_correlate_successful_request_lifecycle_and_phase_scopes() {
     const CHILD: &str = "GEESEFS_DEBUG_TRACE_CHILD";
     if let Ok(level) = std::env::var(CHILD) {
@@ -959,6 +1195,10 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
                 assert_eq!(metric(&fs, "geesefs_diagnostic_logs_suppressed_total"), 0.);
             } else if debug_queue_full {
                 assert!(dropped > 0., "debug bursts must expose bounded-output loss");
+                assert!(
+                    metric(&fs, "geesefs_diagnostic_severe_queue_dropped_total") > 0.,
+                    "a severe burst must also expose exhaustion of its reserved queue"
+                );
                 assert_eq!(
                     metric(&fs, "geesefs_diagnostic_logs_suppressed_total"),
                     0.,

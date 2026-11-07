@@ -375,3 +375,22 @@ transient HTTP status. Classify that status in the existing bounded retry loop
 instead of replacing transport, disabling gzip or adding a second retry layer.
 Keep [`Error::without_url`](https://docs.rs/reqwest/0.12.28/reqwest/struct.Error.html#method.without_url)
 for terminal body failures so presigned URLs remain excluded from error text.
+
+For stderr journal severity, reuse the existing rustix 1.1.5 safe
+[`fstat`](https://docs.rs/rustix/1.1.5/rustix/fs/fn.fstat.html) and standard-library
+environment/formatting APIs with systemd's documented `JOURNAL_STREAM` device/inode
+identity and `SyslogLevelPrefix` line framing. The sender only needs to preserve
+the severity of its existing JSON records on a verified journal stream. Evaluated
+[tracing-journald 0.3.2](https://docs.rs/tracing-journald/0.3.2/tracing_journald/)
+(MIT, maintained Tokio tracing project) supplies native structured logging through
+a subscriber layer, rather than this bounded JSON stderr worker.
+[sd-notify 0.5.0](https://docs.rs/sd-notify/0.5.0/sd_notify/) (MIT/Apache-2.0)
+provides service notifications, not journal logging. Neither is needed for a
+small framing adapter; retain tracing-appender's bounded non-blocking ownership.
+The public systemd 255 rate limiter has separate severity pools; no rate-limit
+change or native journal protocol implementation is required.
+For application-side saturation, reuse a second tracing-appender 0.2.5
+`NonBlockingBuilder` worker with a fixed 16-record reservation for debug-mode
+error/warning output. Its supported lossy queue and `ErrorCounter` avoid a custom
+priority channel, async-runtime backpressure or an unbounded log buffer. Keep the
+existing ordinary-mode worker and independent drop visibility.

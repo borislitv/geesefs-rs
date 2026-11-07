@@ -5,6 +5,29 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Severe diagnostic output under debug pressure — 2026-11-07 (unreleased)
+
+A blocked-stderr fuser regression first loses a lone EIO reply record behind
+successful debug traffic, while verifying independent FUSE replies still finish.
+The reserved 16-record error/warning worker preserves that record under ordinary
+lane saturation; an error burst separately verifies observable reservation drops.
+The aggregate counter still includes losses from both bounded queues.
+
+A separate fuser/socket child regression first fails for missing journal priority
+framing. It verifies error/warn/info/debug priorities on matching device/inode
+identity, and plain JSON for wrong device, wrong inode, malformed numeric input,
+missing separator and absent `JOURNAL_STREAM`. Slow HEAD timing exercises info;
+admission rejection and injected HEAD failure exercise warn/error. Both fixtures
+check path/payload privacy. They test sender framing and ownership, not a running
+journald receiver, its retention policy or lossless delivery.
+
+Full default/all-feature/all-target Rust suites, warning-denying Clippy, format,
+public-source audit and Python fixture/benchmark suites pass. Five selected
+stream-identity/reservation mutations report killed; this is a scoped screen,
+not repository-wide coverage or per-site compiler/assertion classification.
+Coverage/CRAP remain unknown. The bounded worker adds one thread only in debug
+mode; its performance and mounted compatibility acceptance remain separate.
+
 ## Extended LIST error-body retries — 2026-11-07 (unreleased)
 
 Real loopback HTTP tests send invalid gzip error bodies with HTTP 429, 500 and

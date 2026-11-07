@@ -5,6 +5,27 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-07: preserve diagnostic severity on journal stderr streams
+
+Debug saturation also consumed the only application output queue, dropping a lone
+error behind otherwise successful traffic. A blocked-stderr fuser regression
+first observes that missing severe reply while FUSE continues. In debug mode,
+reserve a separate 16-record tracing-appender worker for error/warning records;
+retain the 256-record ordinary lane. Aggregate drops across both queues and expose
+reserved-severe drops separately. Each lane is FIFO, but cross-lane output can
+reorder; correlate timestamps and IDs rather than output position. Both lanes
+remain bounded/lossy, and error bursts can still exhaust the reservation.
+
+JSON severity alone does not set a journal stream record's `PRIORITY`. Without a
+line prefix, errors and verbose debug consume the receiver's default severity
+pool together. A real fuser/socket regression first fails for absent severity
+framing. Match `JOURNAL_STREAM` against stderr's actual device/inode once, using
+the existing safe rustix API, then prefix whole records with systemd's supported
+error/warning/info/debug priority. Ordinary stderr, absent/malformed identities
+and redirected descriptors retain plain JSON. Bounded lossy workers and drop
+metrics remain; severity framing does not guarantee delivery or disable the
+receiver's rate limits. No service restart or additional log volume is implied.
+
 ## 2026-11-07: retain transient LIST status after error-body failure
 
 The extended LIST adapter read the response body before checking its HTTP status.

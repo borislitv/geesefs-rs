@@ -215,13 +215,28 @@ own one-per-second limiter, so an info event cannot consume an error's rate slot
 `geesefs_diagnostic_logs_suppressed_total` counts rate-suppressed candidates.
 Counters/histograms record all observations independently of these filters.
 
-One dedicated library worker drains a bounded lossy queue of 16 whole records
-(256 when `debug` is selected).
+Normal levels use one library worker with a bounded lossy queue of 16 whole
+records. Debug uses a 256-record ordinary lane plus a separate 16-record worker
+reserved for error/warning records, so debug saturation cannot consume severe
+queue slots. A severe burst can still exhaust its own reservation.
 Slow stderr/journald does not wait on a FUSE worker or retain its request admission;
 `geesefs_diagnostic_logs_dropped_total` counts full/disconnected-queue drops. It does
 not count stderr I/O failures or records lost on abrupt exit. The retained worker
-guard attempts a shutdown flush; delivery is not guaranteed. At `off` no diagnostic
+guards attempt a shutdown flush; delivery is not guaranteed. The total drop counter
+aggregates both queues; `geesefs_diagnostic_severe_queue_dropped_total` separately
+counts losses from the reserved debug-mode queue (zero when that queue is disabled).
+At `off` no diagnostic
 writer thread is created. This avoids output backpressure, not all observation cost.
+
+When stderr's device/inode matches the documented `JOURNAL_STREAM` identity at
+initialization, each whole record carries a systemd priority prefix: error 3,
+warning 4, info 6 and debug 7. With the receiver's `SyslogLevelPrefix=yes` (the
+systemd default), journald strips that prefix, preserves the JSON `MESSAGE` and
+uses the corresponding severity/rate-limit pool. Absent, malformed or redirected
+stream identities retain ordinary JSON stderr. Receiver filtering, rate suppression
+and retention remain independent loss sources and are not included in the
+application's dropped-record counter. Priority framing does not make either queue
+durable or increase the configured receiver limits.
 
 Records contain level, event, opcode, FUSE request/inode IDs, range, errno, bounded reason,
 callback age, reply state and active/completed phase scopes. A wall-clock
@@ -277,8 +292,9 @@ missing severe records. This is not a durable audit log.
 No raw paths, object names, payloads, URLs, authorization headers, arbitrary error
 messages or stack-memory dumps are added at debug. Coverage is the instrumented
 callbacks/stages above, not every syscall, SDK-internal span or kernel/page-cache
-read. Events within one trace can be concurrent; output order is enqueue order,
-not a total order across threads. No OpenTelemetry exporter or new global tracing
+read. Events within one trace can be concurrent; output order is FIFO within each
+lane, not across the ordinary/severe lanes or a total order across threads. Use
+timestamps and IDs for correlation. No OpenTelemetry exporter or new global tracing
 subscriber is installed.
 
 ## Attributing Go-relative regressions

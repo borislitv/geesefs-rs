@@ -91,6 +91,30 @@ struct Operation {
     duration: Histogram,
     replies: [Counter; 11],
 }
+
+#[derive(Debug)]
+struct LogWorker {
+    writer: NonBlocking,
+    _guard: WorkerGuard,
+}
+impl LogWorker {
+    fn new(capacity: usize, name: &str) -> Self {
+        let (writer, guard) = NonBlockingBuilder::default()
+            .buffered_lines_limit(capacity)
+            .lossy(true)
+            .thread_name(name)
+            .finish(std::io::stderr());
+        Self {
+            writer,
+            _guard: guard,
+        }
+    }
+
+    fn dropped(&self) -> u64 {
+        self.writer.error_counter().dropped_lines() as u64
+    }
+}
+
 #[derive(Debug)]
 struct Inner {
     origin: Instant,
@@ -113,11 +137,47 @@ struct Inner {
     suppressed_logs: Counter,
     lock_samples: AtomicU64,
     log_level: DiagnosticLogLevel,
-    log_writer: Option<NonBlocking>,
-    _log_guard: Option<WorkerGuard>,
+    journal_prefix: bool,
+    log_worker: Option<LogWorker>,
+    severe_log_worker: Option<LogWorker>,
+}
+
+fn stderr_is_journal_stream() -> bool {
+    let Ok(identity) = std::env::var("JOURNAL_STREAM") else {
+        return false;
+    };
+    let Some((device, inode)) = identity.split_once(':') else {
+        return false;
+    };
+    let Ok(stat) = rustix::fs::fstat(std::io::stderr()) else {
+        return false;
+    };
+    device.parse::<u64>() == Ok(stat.st_dev) && inode.parse::<u64>() == Ok(stat.st_ino)
 }
 
 impl Inner {
+    fn log_writer(&self, level: DiagnosticLogLevel) -> Option<&NonBlocking> {
+        let worker = if matches!(level, DiagnosticLogLevel::Error | DiagnosticLogLevel::Warn) {
+            self.severe_log_worker.as_ref().or(self.log_worker.as_ref())
+        } else {
+            self.log_worker.as_ref()
+        };
+        worker.map(|worker| &worker.writer)
+    }
+
+    fn log_prefix(&self, level: DiagnosticLogLevel) -> &'static str {
+        if !self.journal_prefix {
+            return "";
+        }
+        match level {
+            DiagnosticLogLevel::Error => "<3>",
+            DiagnosticLogLevel::Warn => "<4>",
+            DiagnosticLogLevel::Info => "<6>",
+            DiagnosticLogLevel::Debug => "<7>",
+            DiagnosticLogLevel::Off => unreachable!(),
+        }
+    }
+
     fn admit_log(&self, level: DiagnosticLogLevel) -> bool {
         // Debug preserves severe replies too, not only debug-level events.
         // The bounded lossy writer still limits output without backpressure.
@@ -203,20 +263,18 @@ impl Diagnostics {
         if !enabled {
             return Self::default();
         }
-        let (log_writer, log_guard) = if log_level == DiagnosticLogLevel::Off {
-            (None, None)
-        } else {
-            let (writer, guard) = NonBlockingBuilder::default()
-                .buffered_lines_limit(if log_level == DiagnosticLogLevel::Debug {
+        let log_worker = (log_level != DiagnosticLogLevel::Off).then(|| {
+            LogWorker::new(
+                if log_level == DiagnosticLogLevel::Debug {
                     256
                 } else {
                     16
-                })
-                .lossy(true)
-                .thread_name("geesefs-log")
-                .finish(std::io::stderr());
-            (Some(writer), Some(guard))
-        };
+                },
+                "geesefs-log",
+            )
+        });
+        let severe_log_worker = (log_level == DiagnosticLogLevel::Debug)
+            .then(|| LogWorker::new(16, "geesefs-severe-log"));
         let phase_histograms = Histograms::new_with_constructor(histogram as fn() -> Histogram);
         let phase_inflight = Family::<Labels, Gauge>::default();
         let phase_outcomes = Family::<Labels, Counter>::default();
@@ -266,8 +324,9 @@ impl Diagnostics {
             suppressed_logs: Counter::default(),
             lock_samples: AtomicU64::new(0),
             log_level,
-            log_writer,
-            _log_guard: log_guard,
+            journal_prefix: log_worker.is_some() && stderr_is_journal_stream(),
+            log_worker,
+            severe_log_worker,
         })))
     }
     pub(crate) fn enabled(&self) -> bool {
@@ -451,11 +510,22 @@ impl Diagnostics {
         super::counter(
             registry,
             "geesefs_diagnostic_logs_dropped",
-            "Records dropped by a full/disconnected output queue; excludes stderr I/O errors and abrupt exits",
+            "Records dropped across full/disconnected output queues; excludes stderr I/O errors and abrupt exits",
             inner
-                .log_writer
+                .log_worker
+                .iter()
+                .chain(inner.severe_log_worker.iter())
+                .map(LogWorker::dropped)
+                .sum(),
+        );
+        super::counter(
+            registry,
+            "geesefs_diagnostic_severe_queue_dropped",
+            "Error/warning records dropped by the reserved debug-mode queue; zero when that queue is disabled",
+            inner
+                .severe_log_worker
                 .as_ref()
-                .map_or(0, |writer| writer.error_counter().dropped_lines() as u64),
+                .map_or(0, LogWorker::dropped),
         );
         let inflight = Family::<Labels, Gauge>::default();
         let oldest = Family::<Labels, super::Observation>::default();
@@ -668,7 +738,7 @@ impl Trace {
         if self.inner.log_level < level {
             return;
         }
-        let Some(writer) = &self.inner.log_writer else {
+        let Some(writer) = self.inner.log_writer(level) else {
             return;
         };
         if !self.inner.admit_log(level) {
@@ -681,8 +751,9 @@ impl Trace {
             let cancelled = self.cancelled_stages.load(Ordering::Relaxed) & (1 << stage as usize) != 0;
             (active != 0 || elapsed_ns != 0 || failed || cancelled).then_some((stage.label(), serde_json::json!({"active": active, "completed_seconds": elapsed_ns as f64 / 1e9, "failed": failed, "cancelled": cancelled})))
         }).collect();
+        let prefix = self.inner.log_prefix(level);
         let record = format!(
-            "{}\n",
+            "{prefix}{}\n",
             serde_json::json!({"level": level, "event": event, "trace_id": self.id, "process_id": std::process::id(),
                 "timestamp_unix_seconds": SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|duration| duration.as_secs_f64()),
                 "opcode": self.opcode.label(), "request": self.request, "ino": self.ino, "offset": self.offset, "size": self.size, "errno": errno, "reason": reason, "elapsed_seconds": self.age(), "reply_sent": self.replied(), "phases": phases, "details": details})

@@ -252,8 +252,9 @@ or HTTP-to-FUSE correlation.
 #### Debug request traces
 
 Select `--diagnostic-log-level debug` for a bounded diagnostic window. Debug
-events bypass the one-per-second limiters; they retain the bounded lossy output
-queue. This is deliberately more expensive: formatting and enqueue attempts occur
+mode bypasses the one-per-second limiters for every record, including error/warn/info
+replies; it retains the bounded lossy output queue. This is deliberately more
+expensive: formatting and enqueue attempts occur
 on instrumented request threads. It is not the normal operating mode or a
 performance-acceptance configuration. Watch the dropped-record counter; full
 queues, output failures and abrupt exit can leave incomplete traces, including

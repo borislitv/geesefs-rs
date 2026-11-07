@@ -119,8 +119,9 @@ struct Inner {
 
 impl Inner {
     fn admit_log(&self, level: DiagnosticLogLevel) -> bool {
-        // Debug bypasses rate sampling, but not the bounded lossy writer.
-        if level == DiagnosticLogLevel::Debug {
+        // Debug preserves severe replies too, not only debug-level events.
+        // The bounded lossy writer still limits output without backpressure.
+        if self.log_level == DiagnosticLogLevel::Debug {
             return true;
         }
         let next_log_ns = &self.next_log_ns[match level {

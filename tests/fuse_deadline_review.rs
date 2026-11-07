@@ -959,6 +959,11 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
                 assert_eq!(metric(&fs, "geesefs_diagnostic_logs_suppressed_total"), 0.);
             } else if debug_queue_full {
                 assert!(dropped > 0., "debug bursts must expose bounded-output loss");
+                assert_eq!(
+                    metric(&fs, "geesefs_diagnostic_logs_suppressed_total"),
+                    0.,
+                    "debug must preserve severe reply candidates without rate sampling"
+                );
             }
             return;
         }
@@ -1118,7 +1123,6 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
                 let reply = session.receive();
                 assert_eq!((unique(&reply), errno(&reply)), (rejected, -libc::EAGAIN));
             }
-            assert_eq!(metric(&fs, "geesefs_diagnostic_logs_suppressed_total"), 19.);
             gate.add_permits(1);
             assert_eq!(unique(&session.receive()), first);
         } else if mode == "generation" {
@@ -1144,6 +1148,11 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
             assert_eq!(errno(&session.receive()), -libc::EIO);
         }
         session.close();
+        if mode == "admission" {
+            // Socket delivery precedes diagnostic accounting; joined session
+            // shutdown establishes completion of every synchronous rejection.
+            assert_eq!(metric(&fs, "geesefs_diagnostic_logs_suppressed_total"), 19.);
+        }
         if mode == "backend_off" {
             assert_eq!(metric(&fs, "geesefs_diagnostics_enabled"), 1.);
             assert_eq!(

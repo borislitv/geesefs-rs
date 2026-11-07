@@ -17,6 +17,16 @@ Normal levels exclude fast successful traces; info includes slow/inflight work,
 warn includes transient failures and error retains unexpected failures. Distinct
 rate slots prevent warning/info candidates from suppressing an error slot.
 
+Final review exposes a separate debug-mode sampling gap: severe replies still
+consume their normal one-per-second slots even while debug is enabled. The real
+wire burst regression first observes 299 rate-suppressed errors from 300 requests.
+Select bypass by configured debug mode, not by each event's severity. After the
+correction the same burst has zero rate suppression while still exposing bounded
+queue drops and permitting independent successful FUSE work.
+The admission fixture also waits for joined session shutdown before reading
+counters: receiving socket bytes can precede the synchronous callback's subsequent
+diagnostic accounting. The exact expected suppression count is unchanged.
+
 Both Rust configurations, all-target/all-feature warning-denying Clippy, format,
 public-source audit and Python fixture/benchmark suites pass. Python-dependent
 Cargo fixtures require the fixture environment on `PATH`; the system Python alone

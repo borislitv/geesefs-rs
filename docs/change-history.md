@@ -14,14 +14,18 @@ explicit `debug` request/executor/reply/completion, cache/fill, phase and S3-att
 events. Preserve request/phase IDs, bounded error classes and cancellation versus
 success, without paths, payloads or backend messages.
 
-Reuse tracing-appender's bounded lossy worker. Debug bypasses normal rate sampling
-with a 256-record queue; error/warn/info retain separate one-record-per-second
-slots and the normal 16-record queue. Filtering and lazy detail construction keep
+Reuse tracing-appender's bounded lossy worker. Debug mode bypasses rate sampling
+for every severity with a 256-record queue; ordinary error/warn/info modes retain
+separate one-record-per-second slots and the normal 16-record queue. Filtering and lazy detail construction keep
 debug formatting out of ordinary operation. A real fuser-wire regression first
 fails because successful requests produce no trace; loopback HTTP and blocked
 stderr fixtures cover remote attribution, cancellation, bounded drops and progress.
 Verbose logging has explicit observer cost and can lose records under pressure;
 this is not an exhaustive audit, kernel trace or performance improvement.
+Final review reproduces 299 suppressed severe replies in a 300-request debug
+burst; mode-based rate bypass corrects that gap. The same test retains bounded
+queue drops and independent FUSE progress. Session-joined counter assertions also
+remove a fixture race after socket delivery without weakening the expected count.
 The published v0.1.4 release is unchanged; its old level meanings remain historical.
 
 ## 2026-11-07: release 0.1.4 preparation

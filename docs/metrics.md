@@ -18,10 +18,17 @@ request traces, phase timers or the SDK observer. Use the **same executable** wi
 this switch for observer-cost controls. With no listener, detailed diagnostics
 are disabled; existing non-diagnostic error messages are unchanged.
 
-`--diagnostic-log-level error` is the default: unexpected errors and background
-failures. Use `warn` to also record slow replies and scrape-driven unfinished work,
-or `off` to disable these records while retaining detailed metrics. This setting
-controls diagnostic JSON, not existing startup/shutdown and other legacy messages.
+`--diagnostic-log-level warn` is the normal default. Levels include more severe
+events: `error` reports unexpected failures; `warn` also reports retry/admission
+warnings; `info` adds slow replies and scrape-driven unfinished work; `debug`
+adds detailed request/phase traces. `off` disables these records while retaining
+detailed metrics. This setting controls diagnostic JSON, not existing
+startup/shutdown and other legacy messages. Detailed diagnostics still require
+the listener and must not be disabled with `--no-diagnostics`.
+
+The published v0.1.4 executable predates these levels: its default is `error`,
+and its `warn` includes slow/inflight records. Use `info` for that detail in a
+build containing the new level contract; `debug` is not a v0.1.4 option.
 
 The endpoint has no authentication or TLS. Use loopback, or an explicitly protected
 management listener/reverse proxy when collecting remotely. It exports no object
@@ -199,21 +206,42 @@ boundaries. Neither counts TLS framing, retransmissions or direct nginx S3 work.
 ### Bounded diagnostic records
 
 At `error`, detailed diagnostics write JSON to stderr for unexpected errors,
-excluding ENOENT/ENODATA. At `warn`, replies taking at least one second also qualify.
-Background errors and READ deadlines after reply have separate error events.
-Filtering happens before formatting and rate admission. One shared limiter permits at most
-one record per second per filesystem; `geesefs_diagnostic_logs_suppressed_total`
-counts suppressed candidates. Counters/histograms still record all observations.
+excluding ENOENT/ENODATA and transient EAGAIN/EINTR/ESTALE. The latter are `warn`;
+namespace/admission source reasons remain attached. `info` adds replies taking
+at least one second and the oldest unfinished trace aged at least 30 seconds.
+Background errors and READ deadlines after reply retain separate error events.
+Filtering precedes formatting. Error, warning and info records each have their
+own one-per-second limiter, so an info event cannot consume an error's rate slot.
+`geesefs_diagnostic_logs_suppressed_total` counts rate-suppressed candidates.
+Counters/histograms record all observations independently of these filters.
 
-One dedicated library worker drains a bounded lossy queue of 16 whole records.
+Normal levels use one library worker with a bounded lossy queue of 16 whole
+records. Debug uses a 256-record ordinary lane plus a separate 16-record worker
+reserved for error/warning records, so debug saturation cannot consume severe
+queue slots. A severe burst can still exhaust its own reservation.
 Slow stderr/journald does not wait on a FUSE worker or retain its request admission;
 `geesefs_diagnostic_logs_dropped_total` counts full/disconnected-queue drops. It does
 not count stderr I/O failures or records lost on abrupt exit. The retained worker
-guard attempts a shutdown flush; delivery is not guaranteed. At `off` no diagnostic
+guards attempt a shutdown flush; delivery is not guaranteed. The total drop counter
+aggregates both queues; `geesefs_diagnostic_severe_queue_dropped_total` separately
+counts losses from the reserved debug-mode queue (zero when that queue is disabled).
+At `off` no diagnostic
 writer thread is created. This avoids output backpressure, not all observation cost.
 
+When stderr's device/inode matches the documented `JOURNAL_STREAM` identity at
+initialization, each whole record carries a systemd priority prefix: error 3,
+warning 4, info 6 and debug 7. With the receiver's `SyslogLevelPrefix=yes` (the
+systemd default), journald strips that prefix, preserves the JSON `MESSAGE` and
+uses the corresponding severity/rate-limit pool. Absent, malformed or redirected
+stream identities retain ordinary JSON stderr. Receiver filtering, rate suppression
+and retention remain independent loss sources and are not included in the
+application's dropped-record counter. Priority framing does not make either queue
+durable or increase the configured receiver limits.
+
 Records contain level, event, opcode, FUSE request/inode IDs, range, errno, bounded reason,
-callback age, reply state and active/completed phase scopes. Paths, credentials,
+callback age, reply state and active/completed phase scopes. A wall-clock
+`timestamp_unix_seconds`, `process_id` and daemon-local `trace_id` support ordering
+and correlation; use monotonic elapsed/duration fields for timing. Paths, credentials,
 URLs and arbitrary backend error text are excluded. Namespace EAGAIN carries its
 source reason into the terminal record. A `fuse_background_deadline` record with
 `reply_sent=true` reports a tail timeout, not a failed foreground reply.
@@ -228,13 +256,46 @@ Read-ahead records use the same classes; their source counters retain the
 `read_ahead_timeout`/`read_ahead_cancelled`/`read_ahead_error` grouping.
 
 Each scrape can also emit one candidate for the oldest trace aged at least 30s
-(`fuse_inflight`); the same limiter applies. This is scrape-driven unfinished-work
+(`fuse_inflight`, level `info`); the info limiter applies. This is scrape-driven unfinished-work
 visibility, not a watchdog independent of the runtime. Phases show active scope
 counts, accumulated completed seconds and whether any scope of that stage failed
 or was dropped (`failed`, `cancelled`). These flags identify outcomes, not counts
 or chronology; one stage can include both across parallel jobs. Concurrent scopes
-can overlap. Logs are sampled evidence, not an exhaustive request journal or
-HTTP-to-FUSE correlation.
+can overlap. Normal logs are sampled evidence, not an exhaustive request journal
+or HTTP-to-FUSE correlation.
+
+#### Debug request traces
+
+Select `--diagnostic-log-level debug` for a bounded diagnostic window. Debug
+mode bypasses the one-per-second limiters for every record, including error/warn/info
+replies; it retains the bounded lossy output queue. This is deliberately more
+expensive: formatting and enqueue attempts occur
+on instrumented request threads. It is not the normal operating mode or a
+performance-acceptance configuration. Watch the dropped-record counter; full
+queues, output failures and abrupt exit can leave incomplete traces, including
+missing severe records. This is not a durable audit log.
+
+- `fuse_request`, `fuse_polled`, `fuse_reply`, `fuse_complete` distinguish callback
+  entry, executor queue delay, terminal reply and the end of owned background work.
+  Fast successful replies and ordinary ENOENT/ENODATA are debug-only.
+- `phase_start` / `phase_end` have `details.stage` and a unique daemon-local
+  `details.scope_id`, so parallel scopes of the same stage can be paired.
+  Completion includes duration, `ok`/`error`/`cancelled`, and a bounded error class.
+  Existing namespace-lock sampling remains one in 1,024 acquisitions.
+- `read_cache` reports the initial cache hit/miss and EOF-clipped range;
+  `read_fill` reports leader/follower ownership and the read-ahead window.
+- `s3_attempt` records operation, transport and retry status; `s3_body_chunk`
+  records yielded byte counts. `diagnostic_event` retains bounded source reasons.
+  These events inherit an instrumented FUSE context; standalone/background backend
+  calls without that context still contribute metrics, not fabricated request IDs.
+
+No raw paths, object names, payloads, URLs, authorization headers, arbitrary error
+messages or stack-memory dumps are added at debug. Coverage is the instrumented
+callbacks/stages above, not every syscall, SDK-internal span or kernel/page-cache
+read. Events within one trace can be concurrent; output order is FIFO within each
+lane, not across the ordinary/severe lanes or a total order across threads. Use
+timestamps and IDs for correlation. No OpenTelemetry exporter or new global tracing
+subscriber is installed.
 
 ## Attributing Go-relative regressions
 

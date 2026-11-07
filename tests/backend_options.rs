@@ -1006,6 +1006,77 @@ async fn extension_retry_count_is_configured_and_access_errors_are_never_retried
     );
     assert_eq!(task.join().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn extension_retries_transient_status_even_when_its_gzip_error_body_is_invalid() {
+    for status in [429, 500, 503] {
+        let (endpoint, task) = server(vec![
+            Reply {
+                status,
+                headers: vec![("Content-Encoding", "gzip")],
+                body: "invalid-gzip-error-body".into(),
+            },
+            xml(
+                "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>prefix/recovered</Key><Size>7</Size></Contents></ListBucketResult>",
+            ),
+        ]);
+        let mut c = config(&endpoint, &["--list-type=ext-v1"]);
+        c.sdk_max_retries = 1;
+        let page = store(&endpoint, &c)
+            .list("", None, None)
+            .await
+            .expect("transient HTTP status must remain retryable after error-body decoding fails");
+        assert_eq!(page.objects.len(), 1);
+        assert_eq!(page.objects[0].key, "recovered");
+        assert_eq!(page.objects[0].size, 7);
+        let requests = task.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.url.contains("list-type=ext-v1"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn extension_invalid_gzip_preserves_retry_limits_and_does_not_trigger_fallback() {
+    for status in [200, 403, 429, 500, 503] {
+        for retries in [0, 1] {
+            let retryable = matches!(status, 429 | 500 | 503);
+            let attempts = if retryable { retries + 1 } else { 1 };
+            let replies = (0..attempts)
+                .map(|_| Reply {
+                    status,
+                    headers: vec![("Content-Encoding", "gzip")],
+                    body: "invalid-gzip-error-body".into(),
+                })
+                .collect();
+            let (endpoint, task) = server(replies);
+            let mut c = config(&endpoint, &["--list-type=ext-v1"]);
+            c.sdk_max_retries = retries;
+            let error = store(&endpoint, &c).list("", None, None).await.unwrap_err();
+            let Error::Backend { code, .. } = error else {
+                panic!("expected terminal backend error for HTTP {status}");
+            };
+            let expected_code = match status {
+                429 => "HTTP429",
+                500 => "HTTP500",
+                503 => "HTTP503",
+                _ => "TransportOrProtocol",
+            };
+            assert_eq!(code, expected_code);
+            let requests = task.join().unwrap();
+            assert_eq!(requests.len(), attempts as usize);
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| request.url.contains("list-type=ext-v1"))
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn cancelled_backend_copy_aborts_the_known_upload_before_cleanup_drain_returns() {
     let server = Server::http("127.0.0.1:0").unwrap();

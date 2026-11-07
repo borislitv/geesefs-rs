@@ -70,6 +70,7 @@ pub struct MemoryStore {
     pub read_started: tokio::sync::Notify,
     pub head_keys: Mutex<Vec<String>>,
     pub head_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    pub head_delay: Mutex<std::time::Duration>,
     pub head_started: tokio::sync::Notify,
     pub head_starts: AtomicUsize,
     pub active_heads: AtomicUsize,
@@ -283,6 +284,10 @@ impl Store for MemoryStore {
         let gate = self.head_gate.lock().unwrap().clone();
         if let Some(gate) = gate {
             gate.acquire().await.map_err(|_| Error::Cancelled)?.forget();
+        }
+        let delay = *self.head_delay.lock().unwrap();
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
         }
         if self.fail_head_once.swap(false, Ordering::Relaxed) {
             return Err(Self::failure("HEAD"));

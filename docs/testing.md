@@ -5,6 +5,130 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Severe diagnostic output under debug pressure — 2026-11-07 (unreleased)
+
+A blocked-stderr fuser regression first loses a lone EIO reply record behind
+successful debug traffic, while verifying independent FUSE replies still finish.
+The reserved 16-record error/warning worker preserves that record under ordinary
+lane saturation; an error burst separately verifies observable reservation drops.
+The aggregate counter still includes losses from both bounded queues.
+
+A separate fuser/socket child regression first fails for missing journal priority
+framing. It verifies error/warn/info/debug priorities on matching device/inode
+identity, and plain JSON for wrong device, wrong inode, malformed numeric input,
+missing separator and absent `JOURNAL_STREAM`. Slow HEAD timing exercises info;
+admission rejection and injected HEAD failure exercise warn/error. Both fixtures
+check path/payload privacy. They test sender framing and ownership, not a running
+journald receiver, its retention policy or lossless delivery.
+
+Full default/all-feature/all-target Rust suites, warning-denying Clippy, format,
+public-source audit and Python fixture/benchmark suites pass. Five selected
+stream-identity/reservation mutations report killed; this is a scoped screen,
+not repository-wide coverage or per-site compiler/assertion classification.
+Coverage/CRAP remain unknown. The bounded worker adds one thread only in debug
+mode; its performance and mounted compatibility acceptance remain separate.
+
+## Extended LIST error-body retries — 2026-11-07 (unreleased)
+
+Real loopback HTTP tests send invalid gzip error bodies with HTTP 429, 500 and
+503, followed by an independently specified successful object listing. The
+original adapter fails before retry with `TransportOrProtocol`; the corrected
+adapter recovers the expected key and size. Additional cases verify zero/one
+configured retries, exhausted errors retaining their HTTP code, no retries for
+HTTP 403 or malformed HTTP 200, and no standard LIST fallback.
+
+Default and all-feature/all-target Rust suites, Clippy with `-D warnings`, format,
+public-source audit and Python fixture/benchmark suites pass. Three selected
+retry-predicate mutations report killed; this is not repository-wide coverage.
+Duplication screening of `src/backend/s3.rs` finds no candidates at 0.8. Complexity
+screening reports CC 23 for `list_extended_inner`; coverage and CRAP remain unknown.
+These checks prove the fixture correction, not the cause of historical errors or
+mounted compatibility/performance acceptance. The published v0.1.5 is unchanged.
+
+## Diagnostic levels and debug request traces — 2026-11-07 (unreleased)
+
+Real fuser wire requests verify successful lookup/open/read lifecycle correlation,
+executor entry, paired phase scope IDs, cache hit/miss, fill ownership and exact
+payload bytes. CLI tests first reject the new levels; the wire regression then
+fails for missing request records before implementation. Existing loopback SDK
+fixtures verify error/cancellation phases and bounded reasons. Blocked stderr and
+full-queue tests retain FUSE progress, dropped-record visibility and privacy.
+Normal levels exclude fast successful traces; info includes slow/inflight work,
+warn includes transient failures and error retains unexpected failures. Distinct
+rate slots prevent warning/info candidates from suppressing an error slot.
+
+Final review exposes a separate debug-mode sampling gap: severe replies still
+consume their normal one-per-second slots even while debug is enabled. The real
+wire burst regression first observes 299 rate-suppressed errors from 300 requests.
+Select bypass by configured debug mode, not by each event's severity. After the
+correction the same burst has zero rate suppression while still exposing bounded
+queue drops and permitting independent successful FUSE work.
+The admission fixture also waits for joined session shutdown before reading
+counters: receiving socket bytes can precede the synchronous callback's subsequent
+diagnostic accounting. The exact expected suppression count is unchanged.
+
+Both Rust configurations, all-target/all-feature warning-denying Clippy, format,
+public-source audit and Python fixture/benchmark suites pass. Python-dependent
+Cargo fixtures require the fixture environment on `PATH`; the system Python alone
+does not provide boto3. The first fixture run also exposed a test length mismatch
+(24 requested bytes versus a 25-byte expected payload), corrected in the test.
+
+Six selected mutator sites report killed: debug rate bypass, separate warning and
+error slots, debug filtering and equal-level admission. This is not a full mutation
+or coverage result, and per-site compiler-versus-assertion classification is not
+provided by this screen. Complexity screening separates log rate admission from
+record formatting; LLVM coverage/CRAP remain unavailable. Duplication screening
+of the three changed source modules finds no candidates at 0.8. Existing larger
+filesystem functions and closed errno/error-class mappings are not refactored by
+this diagnostic change. Debug observer overhead and kernel-mounted acceptance
+remain unmeasured; the published v0.1.4 executable is unchanged.
+
+## READDIRPLUS directory attributes — 2026-11-06
+
+Five non-mounted fuser `Session::from_fd` regressions use real protocol parsing
+and replies with a faithful gated store. They verify overlapping marker HEADs,
+authoritative permissions/owner, shared admission across two directory handles,
+deadline cancellation, warm-cache progress under a busy metadata lane, basic
+READDIR without extra HEADs, full-frame continuation and unsent lookup ownership
+on errors. The serial implementation first fails the overlap assertion. Three
+manual faults produce four assertion failures: premature permit release exceeds
+the global bound; removing the fresh fast path yields ETIMEDOUT; premature lookup
+ownership breaks full-frame and failed-frame counts. All faults are restored.
+Eight selected mutator sites additionally report killed with no reported survivors;
+this is a selected screen, not repository-wide coverage or a classified per-site
+compiler-versus-assertion accounting. Complexity-only CRAP remains unavailable
+without coverage; duplication screening of the two changed modules finds no
+candidates at 0.8.
+
+```bash
+cargo +1.96.0 test --locked --test fuse_deadline_review readdirplus_
+cargo +1.96.0 test --locked --test fuse_deadline_review readdirplus_directory_latency_diagnostic -- --exact --ignored --nocapture
+cargo +1.96.0 fmt --all -- --check
+cargo +1.96.0 clippy --locked --all-targets --all-features -- -D warnings
+cargo +1.96.0 test --locked
+cargo +1.96.0 test --locked --all-features
+```
+
+The explicit diagnostic checks names and unchanged work: 110 implicit directories,
+110 HEADs, 112 LISTs, fixed 2-ms simulated HEAD delay, eight metadata slots and one
+runtime worker. Two same-executable waves per revision each use eight fresh
+filesystem/session instances. Warm-wave request medians are approximately
+381 ms serial and 65 ms pipelined, with peak concurrent HEADs 1 and 8. These are
+unoptimized fuser-protocol fixtures, not kernel mounts, real S3 latency, independent
+mount pairs or a Go comparison. The historical production wait remains unattributed.
+
+For the corresponding warmed eight-session harness jobs, `/usr/bin/time -v`
+records user/system CPU 0.66/0.13 s and peak RSS 97,508 KiB before, versus
+0.52/0.13 s and 97,520 KiB after. These include Cargo/harness work, not isolated
+daemon CPU or steady RSS; heap, cgroup and kernel memory are unmeasured. They do
+not establish a memory reduction or production CPU improvement.
+
+Default and all-feature suites pass 316 cases with 18 explicit ignores, including
+the new diagnostic. Formatting and warning-denying all-target/all-feature Clippy
+pass, along with the public-source audit and Python fixture/benchmark suites.
+The existing local native-mount limitations below remain; served readers
+are not test fixtures.
+
 ## Bounded phase and failure diagnostics — 2026-11-06
 
 Real SDK/loopback HTTP and fuser wire fixtures verify attempt/retry accounting,

@@ -7,6 +7,7 @@ use crate::{
     write::MAX_IO,
 };
 use fuser::*;
+use futures_util::{StreamExt, stream::FuturesOrdered};
 use std::{
     collections::BTreeMap,
     ffi::OsStr,
@@ -152,7 +153,11 @@ impl Directory {
         reply: &mut DirectoryReply,
     ) -> crate::error::Result<bool> {
         if self.cookie == 0 {
-            if offset == 0 && reply.add(fs, ino, 1, FileType::Directory, ".").await? {
+            if offset == 0
+                && reply
+                    .add(fs, ino, 1, FileType::Directory, ".", None)
+                    .await?
+            {
                 return Ok(true);
             }
             self.cookie = 1;
@@ -166,6 +171,7 @@ impl Directory {
                         2,
                         FileType::Directory,
                         "..",
+                        None,
                     )
                     .await?
             {
@@ -191,11 +197,48 @@ impl Directory {
         let Some(next_after) = page.next_after else {
             return Ok(false);
         };
-        for entry in page.entries {
+        if let DirectoryReply::Basic(reply) = reply {
+            for entry in page.entries {
+                let next = self.cookie + 1;
+                if self.cookie >= offset
+                    && reply.add(INodeNo(entry.ino), next, entry.kind, &entry.name)
+                {
+                    return Ok(false);
+                }
+                self.cookie = next;
+                self.last = entry.name;
+            }
+            self.page_after = next_after;
+            return Ok(true);
+        }
+        let mut pending = page.entries.into_iter();
+        let mut next = pending.next();
+        let mut jobs = FuturesOrdered::new();
+        while next.is_some() || !jobs.is_empty() {
+            let ready = tokio::select! {
+                ready = jobs.next(), if !jobs.is_empty() => ready,
+                prepared = async {
+                    fs.prepare_inode_refresh(next.as_ref().expect("pending entry").ino).await
+                }, if next.is_some() && jobs.len() < fs.config.max_requests => {
+                    let prepared = prepared?;
+                    let entry = next.take().expect("admitted entry");
+                    jobs.push_back(async move { Ok::<_, Error>((entry, prepared.await?)) });
+                    next = pending.next();
+                    continue;
+                }
+            };
+            let (entry, prepared) = ready.expect("admitted metadata job")?;
             let next = self.cookie + 1;
             if self.cookie >= offset
                 && reply
-                    .add(fs, INodeNo(entry.ino), next, entry.kind, &entry.name)
+                    .add(
+                        fs,
+                        INodeNo(entry.ino),
+                        next,
+                        entry.kind,
+                        &entry.name,
+                        Some(prepared),
+                    )
                     .await?
             {
                 return Ok(false);
@@ -223,11 +266,15 @@ impl DirectoryReply {
         offset: u64,
         kind: FileType,
         name: &str,
+        prepared: Option<Arc<crate::inode::Inode>>,
     ) -> crate::error::Result<bool> {
         match self {
             Self::Basic(reply) => Ok(reply.add(ino, offset, kind, name)),
             Self::Plus(reply, entries) => {
-                let node = fs.refresh_inode_if_expired(ino.0).await?;
+                let node = match prepared {
+                    Some(node) => node,
+                    None => fs.refresh_inode_if_expired(ino.0).await?,
+                };
                 let (attr, ttl) = node.cached_attr(fs.config.stat_cache_ttl);
                 let full = reply.add(ino, offset, name, &ttl, &attr, Generation(0));
                 // Linux does not acquire lookup references for dot entries.

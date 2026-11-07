@@ -1031,12 +1031,22 @@ impl S3 {
                 Err(error) => return Err(backend("ext-v1", None, error.without_url())),
             };
             let status = response.status();
+            let retryable_status = status.is_server_error() || status.as_u16() == 429;
             let mut xml = Vec::new();
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(|e| backend("ext-v1 body", None, e.without_url()))?
-            {
+            loop {
+                let chunk = match response.chunk().await {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => break,
+                    Err(_) if retryable_status => {
+                        // An unreadable error body must not discard a transient
+                        // HTTP status or supply a partial XML fallback code.
+                        xml.clear();
+                        break;
+                    }
+                    Err(error) => {
+                        return Err(backend("ext-v1 body", None, error.without_url()));
+                    }
+                };
                 if xml.len() + chunk.len() > super::extended_list::MAX_PAGE_BYTES {
                     return Err(Error::InvalidResponse(
                         "extension page exceeds byte limit".into(),
@@ -1051,7 +1061,7 @@ impl S3 {
                 .map(|e| e.code)
                 .unwrap_or_else(|_| format!("HTTP{}", status.as_u16()));
             if attempt + 1 < self.extension_attempts
-                && (status.is_server_error() || status.as_u16() == 429)
+                && retryable_status
                 && !super::extended_list::permits_standard_fallback(&code)
             {
                 tokio::time::sleep(Duration::from_millis(30 * (1 << attempt.min(8)))).await;

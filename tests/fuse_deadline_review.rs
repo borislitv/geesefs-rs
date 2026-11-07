@@ -26,6 +26,14 @@ struct Session {
 
 impl Session {
     fn new(fs: Arc<Filesystem>, runtime: &tokio::runtime::Runtime) -> Self {
+        Self::with_capabilities(fs, runtime, 0)
+    }
+
+    fn with_capabilities(
+        fs: Arc<Filesystem>,
+        runtime: &tokio::runtime::Runtime,
+        flags: u32,
+    ) -> Self {
         let adapter = Fuse::new(fs, runtime.handle().clone());
         let shutdown_error = adapter.shutdown_error.clone();
         let (peer, device) = UnixDatagram::pair().unwrap();
@@ -40,7 +48,7 @@ impl Session {
             shutdown_error,
             sequence: 1,
         };
-        let init = [7u32, 31, 131072, 0]
+        let init = [7u32, 31, 131072, flags]
             .into_iter()
             .flat_map(u32::to_ne_bytes)
             .collect::<Vec<_>>();
@@ -124,6 +132,356 @@ fn errno(reply: &[u8]) -> i32 {
 }
 fn unique(reply: &[u8]) -> u64 {
     u64::from_ne_bytes(reply[8..16].try_into().unwrap())
+}
+
+fn open_directory(session: &mut Session, ino: u64) -> u64 {
+    session.send(27, ino, &[0; 8]);
+    let reply = session.receive();
+    assert_eq!(errno(&reply), 0);
+    u64::from_ne_bytes(reply[16..24].try_into().unwrap())
+}
+
+fn read_directory(
+    session: &mut Session,
+    ino: u64,
+    handle: u64,
+    offset: u64,
+    size: u32,
+    plus: bool,
+) -> u64 {
+    let mut body = handle.to_ne_bytes().to_vec();
+    body.extend_from_slice(&offset.to_ne_bytes());
+    body.extend_from_slice(&size.to_ne_bytes());
+    body.extend_from_slice(&[0; 20]);
+    session.send(if plus { 44 } else { 28 }, ino, &body)
+}
+
+fn plus_names(reply: &[u8]) -> Vec<String> {
+    assert_eq!(errno(reply), 0);
+    let mut entries = &reply[16..];
+    let mut names = Vec::new();
+    while !entries.is_empty() {
+        // Linux fuse_direntplus: 128-byte entry_out, 24-byte dirent, aligned name.
+        let length = u32::from_ne_bytes(entries[144..148].try_into().unwrap()) as usize;
+        names.push(
+            std::str::from_utf8(&entries[152..152 + length])
+                .unwrap()
+                .to_owned(),
+        );
+        entries = &entries[(152 + length).next_multiple_of(8)..];
+    }
+    names
+}
+
+fn plus_session(fs: Arc<Filesystem>, runtime: &tokio::runtime::Runtime) -> Session {
+    Session::with_capabilities(
+        fs,
+        runtime,
+        fuser::InitFlags::FUSE_DO_READDIRPLUS
+            .bits()
+            .try_into()
+            .unwrap(),
+    )
+}
+
+#[test]
+fn readdirplus_overlaps_directory_metadata_and_preserves_marker_attributes_and_references() {
+    use std::sync::atomic::Ordering;
+    let (runtime, store, fs) = configured_fixture(|config| {
+        config.max_requests = 2;
+        config.request_timeout = Duration::from_secs(5);
+    });
+    for name in ["a", "b", "c", "d"] {
+        store.seed(&format!("{name}/"), b"");
+        store
+            .objects
+            .lock()
+            .unwrap()
+            .get_mut(&format!("{name}/"))
+            .unwrap()
+            .metadata
+            .extend([
+                ("mode".into(), (libc::S_IFDIR | 0o750).to_string()),
+                ("uid".into(), "1234".into()),
+            ]);
+    }
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *store.head_gate.lock().unwrap() = Some(gate.clone());
+    let mut session = plus_session(fs.clone(), &runtime);
+    let handle = open_directory(&mut session, 1);
+    let request = read_directory(&mut session, 1, handle, 0, 4096, true);
+    let overlapped = runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while store.head_starts.load(Ordering::SeqCst) < 2 {
+                store.head_started.notified().await;
+            }
+        })
+        .await
+        .is_ok()
+    });
+    gate.add_permits(4);
+    let reply = session.receive();
+    assert_eq!(unique(&reply), request);
+    assert_eq!(plus_names(&reply), [".", "..", "a", "b", "c", "d"]);
+    runtime.block_on(runtime.spawn(async {})).unwrap();
+    let namespace = fs.namespace.lock().unwrap();
+    for name in ["a", "b", "c", "d"] {
+        let node = namespace.named(name).unwrap();
+        assert_eq!(node.attr().perm, 0o750);
+        assert_eq!(node.attr().uid, 1234);
+        assert_eq!(node.state.lock().unwrap().lookups, 1);
+    }
+    drop(namespace);
+    assert_eq!(store.head_starts.load(Ordering::SeqCst), 4);
+    assert_eq!(
+        fs.node(1).unwrap().state.lock().unwrap().lookups,
+        1,
+        "dot entries do not transfer lookup ownership"
+    );
+    assert_eq!(store.active_heads.load(Ordering::SeqCst), 0);
+    assert_eq!(fs.effective_budgets().metadata_resolution_jobs_in_use, 0);
+    session.close();
+    assert!(
+        overlapped,
+        "independent directory marker HEADs are serialized before the first reply"
+    );
+    assert_eq!(store.peak_heads.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn readdirplus_metadata_is_globally_bounded_and_deadlines_cancel_all_work() {
+    use std::sync::atomic::Ordering;
+    let (runtime, store, fs) = configured_fixture(|config| {
+        config.max_requests = 2;
+        config.request_timeout = Duration::from_millis(250);
+    });
+    let mut parents = Vec::new();
+    for parent in ["left", "right"] {
+        store.seed(&format!("{parent}/"), b"");
+        for name in ["a", "b", "c", "d"] {
+            store.seed(&format!("{parent}/{name}/"), b"");
+        }
+        parents.push(runtime.block_on(fs.lookup(1, parent)).unwrap().ino);
+    }
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *store.head_gate.lock().unwrap() = Some(gate);
+    store.head_starts.store(0, Ordering::SeqCst);
+    store.peak_heads.store(0, Ordering::SeqCst);
+    let mut session = plus_session(fs.clone(), &runtime);
+    let first = open_directory(&mut session, parents[0]);
+    let second = open_directory(&mut session, parents[1]);
+    let ids = [
+        read_directory(&mut session, parents[0], first, 0, 4096, true),
+        read_directory(&mut session, parents[1], second, 0, 4096, true),
+    ];
+    let mut replies = Vec::new();
+    for _ in 0..2 {
+        let reply = session.receive();
+        assert_eq!(errno(&reply), -libc::ETIMEDOUT);
+        replies.push(unique(&reply));
+    }
+    replies.sort_unstable();
+    assert_eq!(replies, ids);
+    runtime.block_on(runtime.spawn(async {})).unwrap();
+    assert_eq!(store.peak_heads.load(Ordering::SeqCst), 2);
+    assert_eq!(store.active_heads.load(Ordering::SeqCst), 0);
+    assert_eq!(fs.effective_budgets().metadata_resolution_jobs_in_use, 0);
+    assert!(
+        fs.namespace
+            .lock()
+            .unwrap()
+            .nodes
+            .values()
+            .all(|node| { node.ino == 1 || node.state.lock().unwrap().lookups == 0 })
+    );
+    session.close();
+}
+
+#[test]
+fn readdirplus_fresh_attributes_do_not_wait_for_a_busy_metadata_lane() {
+    use std::sync::atomic::Ordering;
+    let (runtime, store, fs) = configured_fixture(|config| {
+        config.max_requests = 1;
+        config.request_timeout = Duration::from_secs(1);
+    });
+    store.seed("warm/", b"");
+    store.seed("warm/child/", b"");
+    store.seed("cold", b"cold payload");
+    let parent = runtime.block_on(fs.lookup(1, "warm")).unwrap();
+    let page = runtime
+        .block_on(fs.directory_chunk(parent.ino, "", 8))
+        .unwrap();
+    runtime
+        .block_on(fs.refresh_inode_if_expired(page[0].ino))
+        .unwrap();
+    let cold = runtime.block_on(fs.lookup(1, "cold")).unwrap();
+    cold.state.lock().unwrap().fetched = std::time::Instant::now() - 2 * fs.config.stat_cache_ttl;
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *store.head_gate.lock().unwrap() = Some(gate.clone());
+    let heads = store.head_starts.load(Ordering::SeqCst);
+    let refresh = runtime.spawn({
+        let fs = fs.clone();
+        async move { fs.refresh_inode_if_expired(cold.ino).await }
+    });
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while store.head_starts.load(Ordering::SeqCst) == heads {
+                store.head_started.notified().await;
+            }
+        })
+        .await
+        .unwrap();
+    });
+    let mut session = plus_session(fs.clone(), &runtime);
+    let handle = open_directory(&mut session, parent.ino);
+    read_directory(&mut session, parent.ino, handle, 0, 4096, true);
+    let reply = session.receive();
+    gate.add_permits(1);
+    runtime.block_on(refresh).unwrap().unwrap();
+    assert_eq!(plus_names(&reply), [".", "..", "child"]);
+    assert_eq!(store.head_starts.load(Ordering::SeqCst), heads + 1);
+    session.close();
+}
+
+#[test]
+fn readdirplus_full_frames_keep_order_and_only_transfer_emitted_references() {
+    use std::sync::atomic::Ordering;
+    let (runtime, store, fs) = configured_fixture(|config| {
+        config.max_requests = 2;
+        config.request_timeout = Duration::from_secs(5);
+    });
+    for name in ["a", "b", "c", "d"] {
+        store.seed(&format!("{name}/"), b"");
+    }
+    let mut session = plus_session(fs.clone(), &runtime);
+    let handle = open_directory(&mut session, 1);
+    read_directory(&mut session, 1, handle, 0, 4096, false);
+    assert_eq!(errno(&session.receive()), 0);
+    assert_eq!(
+        store.head_starts.load(Ordering::SeqCst),
+        0,
+        "basic READDIR needs no marker metadata"
+    );
+    read_directory(&mut session, 1, handle, 0, 512, true);
+    assert_eq!(plus_names(&session.receive()), [".", "..", "a"]);
+    runtime.block_on(runtime.spawn(async {})).unwrap();
+    {
+        let ns = fs.namespace.lock().unwrap();
+        for name in ["a", "b", "c", "d"] {
+            assert_eq!(
+                ns.named(name).unwrap().state.lock().unwrap().lookups,
+                u64::from(name == "a")
+            );
+        }
+    }
+    assert_eq!(store.active_heads.load(Ordering::SeqCst), 0);
+    assert_eq!(fs.effective_budgets().metadata_resolution_jobs_in_use, 0);
+    read_directory(&mut session, 1, handle, 3, 4096, true);
+    assert_eq!(plus_names(&session.receive()), ["b", "c", "d"]);
+    runtime.block_on(runtime.spawn(async {})).unwrap();
+    for name in ["a", "b", "c", "d"] {
+        assert_eq!(
+            fs.namespace
+                .lock()
+                .unwrap()
+                .named(name)
+                .unwrap()
+                .state
+                .lock()
+                .unwrap()
+                .lookups,
+            1
+        );
+    }
+    session.close();
+}
+
+#[test]
+fn readdirplus_metadata_error_cancels_siblings_without_lookup_references() {
+    use std::sync::atomic::Ordering;
+    let (runtime, store, fs) = configured_fixture(|config| {
+        config.max_requests = 2;
+        config.request_timeout = Duration::from_secs(5);
+    });
+    store.seed("a/", b"");
+    store.seed("b/", b"");
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *store.head_gate.lock().unwrap() = Some(gate.clone());
+    let mut session = plus_session(fs.clone(), &runtime);
+    let handle = open_directory(&mut session, 1);
+    read_directory(&mut session, 1, handle, 0, 4096, true);
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while store.head_starts.load(Ordering::SeqCst) < 2 {
+                store.head_started.notified().await;
+            }
+        })
+        .await
+        .unwrap();
+    });
+    store.fail_head_once.store(true, Ordering::SeqCst);
+    gate.add_permits(1);
+    assert_eq!(errno(&session.receive()), -libc::EIO);
+    runtime.block_on(runtime.spawn(async {})).unwrap();
+    assert_eq!(store.active_heads.load(Ordering::SeqCst), 0);
+    assert_eq!(fs.effective_budgets().metadata_resolution_jobs_in_use, 0);
+    for name in ["a", "b"] {
+        assert_eq!(
+            fs.namespace
+                .lock()
+                .unwrap()
+                .named(name)
+                .unwrap()
+                .state
+                .lock()
+                .unwrap()
+                .lookups,
+            0
+        );
+    }
+    session.close();
+}
+
+#[test]
+#[ignore = "explicit delayed-backend FUSE protocol diagnostic, not mounted acceptance"]
+fn readdirplus_directory_latency_diagnostic() {
+    use std::{sync::atomic::Ordering, time::Instant};
+    let mut samples = Vec::new();
+    for _ in 0..8 {
+        let (runtime, store, fs) = configured_fixture(|config| {
+            config.max_requests = 8;
+            config.request_timeout = Duration::from_secs(5);
+        });
+        let expected: Vec<_> = [".".into(), "..".into()]
+            .into_iter()
+            .chain((0..110).map(|i| format!("dir-{i:03}")))
+            .collect();
+        for name in &expected[2..] {
+            store.seed(&format!("{name}/child"), b"independent fixture bytes");
+        }
+        *store.head_delay.lock().unwrap() = Duration::from_millis(2);
+        let mut session = plus_session(fs.clone(), &runtime);
+        let handle = open_directory(&mut session, 1);
+        let started = Instant::now();
+        read_directory(&mut session, 1, handle, 0, 32768, true);
+        let reply = session.receive();
+        let elapsed = started.elapsed().as_nanos();
+        assert_eq!(plus_names(&reply), expected);
+        assert_eq!(store.head_starts.load(Ordering::SeqCst), 110);
+        assert_eq!(store.list_calls.load(Ordering::SeqCst), 112);
+        runtime.block_on(runtime.spawn(async {})).unwrap();
+        assert_eq!(store.active_heads.load(Ordering::SeqCst), 0);
+        samples.push(serde_json::json!({"wall_ns":elapsed,
+            "peak_heads":store.peak_heads.load(Ordering::SeqCst)}));
+        session.close();
+    }
+    println!(
+        "readdirplus_latency_json={}",
+        serde_json::json!({"samples":samples,
+        "directories":110,"head_delay_ms":2,"metadata_slots":8,
+        "heads_per_sample":110,"lists_per_sample":112,
+        "scope":"fuser protocol, faithful delayed store, unoptimized test binary; not kernel/production/Go acceptance"})
+    );
 }
 
 fn fixture() -> (
@@ -391,13 +749,378 @@ fn full_admission_is_attributed_without_inventing_a_backend_failure() {
 }
 
 #[test]
+fn debug_saturation_preserves_a_severe_reply_without_blocking_fuse() {
+    const CHILD: &str = "GEESEFS_DEBUG_RESERVED_ERROR_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let (runtime, store, fs) = configured_fixture(|config| {
+            config.diagnostic_log_level = geesefs_rs::config::DiagnosticLogLevel::Debug;
+            config.request_timeout = Duration::from_secs(5);
+        });
+        store.seed("private-flood-success", b"private-flood-payload");
+        let (ready, held) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let blocker = std::thread::spawn(move || {
+            let _stderr = std::io::stderr().lock();
+            ready.send(()).unwrap();
+            wait.recv_timeout(Duration::from_secs(15)).unwrap();
+        });
+        held.recv_timeout(Duration::from_secs(1)).unwrap();
+        let mut session = Session::new(fs.clone(), &runtime);
+        for _ in 0..150 {
+            let request = session.send(1, 1, b"private-flood-success\0");
+            let reply = session.receive();
+            assert_eq!((unique(&reply), errno(&reply)), (request, 0));
+            runtime.block_on(runtime.spawn(async {})).unwrap();
+        }
+        assert!(metric(&fs, "geesefs_diagnostic_logs_dropped_total") > 0.);
+        store
+            .fail_head_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let failed = session.send(1, 1, b"private-flood-error\0");
+        let reply = session.receive();
+        assert_eq!((unique(&reply), errno(&reply)), (failed, -libc::EIO));
+        runtime.block_on(runtime.spawn(async {})).unwrap();
+        let success = session.send(1, 1, b"private-flood-success\0");
+        let reply = session.receive();
+        assert_eq!((unique(&reply), errno(&reply)), (success, 0));
+        session.close();
+        assert_eq!(
+            metric(&fs, "geesefs_diagnostic_severe_queue_dropped_total"),
+            0.
+        );
+        release.send(()).unwrap();
+        blocker.join().unwrap();
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+    child
+        .args([
+            "--exact",
+            "debug_saturation_preserves_a_severe_reply_without_blocking_fuse",
+            "--nocapture",
+        ])
+        .env_clear()
+        .env(CHILD, "1")
+        .kill_on_drop(true);
+    let output = runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(20), child.output())
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(output.status.success(), "{stderr}");
+    let records: Vec<serde_json::Value> = stderr
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let errors: Vec<_> = records
+        .iter()
+        .filter(|record| record["event"] == "fuse_reply" && record["errno"] == libc::EIO)
+        .collect();
+    assert_eq!(
+        errors.len(),
+        1,
+        "debug saturation must not consume the severe record's queue slot"
+    );
+    assert_eq!(errors[0]["level"], "error");
+    assert_eq!(errors[0]["reply_sent"], true);
+    assert_eq!(errors[0]["reason"], "backend_response");
+    for forbidden in [
+        "private-flood-success",
+        "private-flood-payload",
+        "private-flood-error",
+    ] {
+        assert!(!stderr.contains(forbidden));
+    }
+}
+
+#[test]
+fn diagnostic_records_preserve_journal_priorities_only_on_the_matching_stream() {
+    const CHILD: &str = "GEESEFS_JOURNAL_PRIORITY_CHILD";
+    if let Ok(mode) = std::env::var(CHILD) {
+        let (runtime, store, fs) = configured_fixture(|config| {
+            config.diagnostic_log_level = geesefs_rs::config::DiagnosticLogLevel::Debug;
+            config.request_timeout = Duration::from_secs(5);
+        });
+        store.seed("private-priority-success", b"private-priority-payload");
+        if mode == "matching" {
+            *store.head_delay.lock().unwrap() = Duration::from_millis(1100);
+        }
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        *store.head_gate.lock().unwrap() = Some(gate.clone());
+        let mut session = Session::new(fs.clone(), &runtime);
+        let first = session.send(1, 1, b"private-priority-success\0");
+        runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(1), store.head_started.notified())
+                .await
+                .unwrap();
+        });
+        let rejected = session.send(1, 1, b"private-priority-rejected\0");
+        let reply = session.receive();
+        assert_eq!((unique(&reply), errno(&reply)), (rejected, -libc::EAGAIN));
+        gate.add_permits(1);
+        let reply = session.receive();
+        assert_eq!((unique(&reply), errno(&reply)), (first, 0));
+        runtime.block_on(runtime.spawn(async {})).unwrap();
+        *store.head_gate.lock().unwrap() = None;
+        *store.head_delay.lock().unwrap() = Duration::ZERO;
+        store
+            .fail_head_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let failed = session.send(1, 1, b"private-priority-error\0");
+        let reply = session.receive();
+        assert_eq!((unique(&reply), errno(&reply)), (failed, -libc::EIO));
+        session.close();
+        assert_eq!(metric(&fs, "geesefs_diagnostic_logs_dropped_total"), 0.);
+        return;
+    }
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+    use tokio::io::AsyncReadExt;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for mode in [
+        "matching",
+        "wrong_device",
+        "wrong_inode",
+        "malformed",
+        "missing_separator",
+        "absent",
+    ] {
+        let (reader, writer) = UnixStream::pair().unwrap();
+        let stat = rustix::fs::fstat(&writer).unwrap();
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "diagnostic_records_preserve_journal_priorities_only_on_the_matching_stream",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env(CHILD, mode)
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::from(OwnedFd::from(writer)));
+        let identity = match mode {
+            "matching" => Some(format!("{}:{}", stat.st_dev, stat.st_ino)),
+            "wrong_device" => Some(format!("{}:{}", stat.st_dev + 1, stat.st_ino)),
+            "wrong_inode" => Some(format!("{}:{}", stat.st_dev, stat.st_ino + 1)),
+            "malformed" => Some("not-a-device:inode".into()),
+            "missing_separator" => Some("123".into()),
+            "absent" => None,
+            _ => unreachable!(),
+        };
+        if let Some(identity) = identity {
+            child.env("JOURNAL_STREAM", identity);
+        }
+        reader.set_nonblocking(true).unwrap();
+        let (status, bytes) = runtime.block_on(async {
+            let mut process = child.spawn().unwrap();
+            drop(child);
+            let mut reader = tokio::net::UnixStream::from_std(reader).unwrap();
+            let mut bytes = Vec::new();
+            let (status, _) = tokio::time::timeout(Duration::from_secs(10), async {
+                tokio::try_join!(process.wait(), reader.read_to_end(&mut bytes))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            (status, bytes)
+        });
+        let stderr = String::from_utf8(bytes).unwrap();
+        assert!(status.success(), "{mode}: {stderr}");
+        let mut levels = std::collections::BTreeSet::new();
+        for line in stderr.lines() {
+            let (prefix, json) = if mode == "matching" {
+                assert!(
+                    line.len() >= 3 && line.starts_with('<') && line.as_bytes()[2] == b'>',
+                    "journal stream must carry a severity prefix: {line}"
+                );
+                line.split_at(3)
+            } else {
+                ("", line)
+            };
+            let record: serde_json::Value = serde_json::from_str(json).unwrap();
+            let level = record["level"].as_str().unwrap();
+            if mode == "matching" {
+                assert_eq!(
+                    prefix,
+                    match level {
+                        "error" => "<3>",
+                        "warn" => "<4>",
+                        "info" => "<6>",
+                        "debug" => "<7>",
+                        _ => panic!("unknown level: {level}"),
+                    }
+                );
+            }
+            levels.insert(level.to_owned());
+        }
+        assert!(
+            levels.contains("error") && levels.contains("warn") && levels.contains("debug"),
+            "{mode}: {stderr}"
+        );
+        if mode == "matching" {
+            assert!(
+                levels.contains("info"),
+                "slow reply must exercise journal info priority: {stderr}"
+            );
+        }
+        for forbidden in [
+            "private-priority-success",
+            "private-priority-payload",
+            "private-priority-rejected",
+            "private-priority-error",
+        ] {
+            assert!(!stderr.contains(forbidden));
+        }
+    }
+}
+
+#[test]
+fn debug_records_correlate_successful_request_lifecycle_and_phase_scopes() {
+    const CHILD: &str = "GEESEFS_DEBUG_TRACE_CHILD";
+    if let Ok(level) = std::env::var(CHILD) {
+        use clap::Parser;
+        let parsed = geesefs_rs::config::Config::try_parse_from([
+            "geesefs-rs",
+            "--diagnostic-log-level",
+            &level,
+            "bucket",
+            "/unused",
+        ])
+        .expect("the requested diagnostic level must be accepted");
+        let (runtime, store, fs) = configured_fixture(|config| {
+            config.diagnostic_log_level = parsed.diagnostic_log_level;
+        });
+        store.seed("private-request-path", b"private-payload-never-log");
+        let mut session = Session::new(fs.clone(), &runtime);
+        let request = session.send(1, 1, b"private-request-path\0");
+        let reply = session.receive();
+        assert_eq!((unique(&reply), errno(&reply)), (request, 0));
+        let ino = u64::from_ne_bytes(reply[16..24].try_into().unwrap());
+        runtime.block_on(runtime.spawn(async {})).unwrap();
+        let handle = open(&mut session, ino);
+        for _ in 0..2 {
+            runtime.block_on(runtime.spawn(async {})).unwrap();
+            let request = read_range(&mut session, ino, handle, 0, 25);
+            let reply = session.receive();
+            assert_eq!((unique(&reply), errno(&reply)), (request, 0));
+            assert_eq!(&reply[16..], b"private-payload-never-log");
+        }
+        session.close();
+        assert_eq!(
+            metric(
+                &fs,
+                "geesefs_fuse_replies_total{opcode=\"lookup\",errno=\"OK\"}"
+            ),
+            1.
+        );
+        assert_eq!(metric(&fs, "geesefs_diagnostic_logs_dropped_total"), 0.);
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for level in ["debug", "info", "warn", "error", "off"] {
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "debug_records_correlate_successful_request_lifecycle_and_phase_scopes",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env(CHILD, level)
+            .kill_on_drop(true);
+        let output = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), child.output())
+                .await
+                .unwrap()
+                .unwrap()
+        });
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{level}: {stderr}");
+        let records: Vec<serde_json::Value> = stderr
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        if level != "debug" {
+            assert!(
+                records.is_empty(),
+                "a fast successful request is debug-only: {level}: {stderr}"
+            );
+            continue;
+        }
+        let lookup: Vec<_> = records
+            .iter()
+            .filter(|record| record["opcode"] == "lookup")
+            .collect();
+        for event in ["fuse_request", "fuse_polled", "fuse_reply", "fuse_complete"] {
+            let record = lookup
+                .iter()
+                .find(|record| record["event"] == event)
+                .unwrap_or_else(|| panic!("missing {event}: {stderr}"));
+            assert_eq!(record["level"], "debug");
+            assert_eq!(record["ino"], 1);
+            assert!(record["request"].as_u64().unwrap() > 0);
+            assert!(record["timestamp_unix_seconds"].as_f64().unwrap() > 0.);
+        }
+        let trace = &lookup[0]["trace_id"];
+        assert!(lookup.iter().all(|record| &record["trace_id"] == trace));
+        assert!(lookup.iter().any(|record| record["event"] == "phase_start"));
+        assert!(
+            lookup.iter().any(
+                |record| record["event"] == "phase_end" && record["details"]["outcome"] == "ok"
+            )
+        );
+        assert!(lookup.iter().any(|record| record["event"] == "fuse_reply"
+            && record["errno"] == 0
+            && record["reply_sent"] == true));
+        for hit in [false, true] {
+            assert!(
+                records.iter().any(|record| record["event"] == "read_cache"
+                    && record["details"]["hit"] == hit
+                    && record["details"]["bytes"] == 25),
+                "{stderr}"
+            );
+        }
+        assert!(
+            records
+                .iter()
+                .any(|record| record["event"] == "read_fill"
+                    && record["details"]["role"] == "leader"),
+            "{stderr}"
+        );
+        for forbidden in ["private-request-path", "private-payload-never-log"] {
+            assert!(
+                !stderr.contains(forbidden),
+                "debug must not disclose request names or bytes"
+            );
+        }
+    }
+}
+
+#[test]
 fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
     const CHILD: &str = "GEESEFS_DIAGNOSTIC_LOG_CHILD";
     if let Ok(mode) = std::env::var(CHILD) {
-        if mode == "blocked_stderr" || mode == "queue_full" {
+        if mode == "blocked_stderr" || mode == "queue_full" || mode == "debug_queue_full" {
             let queue_full = mode == "queue_full";
+            let debug_queue_full = mode == "debug_queue_full";
             let (runtime, store, fs) = configured_fixture(|config| {
                 config.request_timeout = Duration::from_secs(5);
+                if debug_queue_full {
+                    config.diagnostic_log_level = geesefs_rs::config::DiagnosticLogLevel::Debug;
+                }
             });
             store.seed("success", b"independent bytes");
             let (ready, held) = mpsc::channel();
@@ -410,7 +1133,13 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
             held.recv_timeout(Duration::from_secs(1)).unwrap();
             let mut session = Session::new(fs.clone(), &runtime);
             let mut worker_free = true;
-            for index in 0..if queue_full { 18 } else { 1 } {
+            for index in 0..if debug_queue_full {
+                300
+            } else if queue_full {
+                18
+            } else {
+                1
+            } {
                 store
                     .fail_head_once
                     .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -464,6 +1193,17 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
                     "18 records exceed 16 queued plus at most one being written: {dropped}"
                 );
                 assert_eq!(metric(&fs, "geesefs_diagnostic_logs_suppressed_total"), 0.);
+            } else if debug_queue_full {
+                assert!(dropped > 0., "debug bursts must expose bounded-output loss");
+                assert!(
+                    metric(&fs, "geesefs_diagnostic_severe_queue_dropped_total") > 0.,
+                    "a severe burst must also expose exhaustion of its reserved queue"
+                );
+                assert_eq!(
+                    metric(&fs, "geesefs_diagnostic_logs_suppressed_total"),
+                    0.,
+                    "debug must preserve severe reply candidates without rate sampling"
+                );
             }
             return;
         }
@@ -471,8 +1211,15 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
             read_deadline_after_publication_preserves_bytes_without_a_second_reply();
             return;
         }
-        if mode == "listing" || mode == "listing_cancelled" {
-            let cancelled = mode == "listing_cancelled";
+        if [
+            "listing",
+            "listing_cancelled",
+            "listing_debug",
+            "listing_debug_cancelled",
+        ]
+        .contains(&mode.as_str())
+        {
+            let cancelled = mode.ends_with("cancelled");
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(1)
                 .enable_all()
@@ -499,6 +1246,9 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
                 let _entered = runtime.enter();
                 let mut config = support::MemoryStore::config(32);
                 config.metrics_listen = Some("127.0.0.1:0".parse().unwrap());
+                if mode.starts_with("listing_debug") {
+                    config.diagnostic_log_level = geesefs_rs::config::DiagnosticLogLevel::Debug;
+                }
                 config.sdk_max_retries = 0;
                 config.http_timeout = Duration::from_secs(2);
                 config.list_type = Some(geesefs_rs::config::ListType::Extended);
@@ -562,10 +1312,14 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
                 config.diagnostic_log_level = geesefs_rs::config::DiagnosticLogLevel::Off;
             } else if mode == "slow_warn" || mode == "backend_warn" {
                 config.diagnostic_log_level = geesefs_rs::config::DiagnosticLogLevel::Warn;
+            } else if mode == "slow_info" {
+                config.diagnostic_log_level = geesefs_rs::config::DiagnosticLogLevel::Info;
+            } else if mode == "slow_error" {
+                config.diagnostic_log_level = geesefs_rs::config::DiagnosticLogLevel::Error;
             }
         });
         let mut session = Session::new(fs.clone(), &runtime);
-        if mode == "slow_warn" || mode == "slow_error" {
+        if mode == "slow_warn" || mode == "slow_error" || mode == "slow_info" {
             store.seed("private-request-path", b"independent bytes");
             let gate = Arc::new(tokio::sync::Semaphore::new(0));
             *store.head_gate.lock().unwrap() = Some(gate.clone());
@@ -609,7 +1363,6 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
                 let reply = session.receive();
                 assert_eq!((unique(&reply), errno(&reply)), (rejected, -libc::EAGAIN));
             }
-            assert_eq!(metric(&fs, "geesefs_diagnostic_logs_suppressed_total"), 19.);
             gate.add_permits(1);
             assert_eq!(unique(&session.receive()), first);
         } else if mode == "generation" {
@@ -635,6 +1388,11 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
             assert_eq!(errno(&session.receive()), -libc::EIO);
         }
         session.close();
+        if mode == "admission" {
+            // Socket delivery precedes diagnostic accounting; joined session
+            // shutdown establishes completion of every synchronous rejection.
+            assert_eq!(metric(&fs, "geesefs_diagnostic_logs_suppressed_total"), 19.);
+        }
         if mode == "backend_off" {
             assert_eq!(metric(&fs, "geesefs_diagnostics_enabled"), 1.);
             assert_eq!(
@@ -683,6 +1441,28 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
         ),
         ("slow_error", "fuse_reply", "ok", 0, true),
         ("slow_warn", "fuse_reply", "ok", 0, true),
+        ("slow_info", "fuse_reply", "ok", 0, true),
+        (
+            "debug_queue_full",
+            "fuse_reply",
+            "backend_response",
+            libc::EIO,
+            true,
+        ),
+        (
+            "listing_debug",
+            "fuse_reply",
+            "invalid_response",
+            libc::EIO,
+            true,
+        ),
+        (
+            "listing_debug_cancelled",
+            "fuse_reply",
+            "deadline",
+            libc::ETIMEDOUT,
+            true,
+        ),
         (
             "admission",
             "fuse_reply",
@@ -739,8 +1519,71 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        if mode == "backend_off" || mode == "slow_error" {
+        if mode == "backend_off" || mode == "slow_error" || mode == "slow_warn" {
             assert!(records.is_empty(), "{mode}: {stderr}");
+            continue;
+        }
+        if mode == "debug_queue_full" || mode.starts_with("listing_debug") {
+            assert!(
+                records
+                    .iter()
+                    .any(|record| record["level"] == "debug" && record["event"] == "phase_start"),
+                "{stderr}"
+            );
+            if mode == "debug_queue_full" {
+                assert!(
+                    records.len() >= 256,
+                    "debug queue preserves a bounded burst: {}",
+                    records.len()
+                );
+            } else {
+                let attempt = records
+                    .iter()
+                    .find(|record| record["event"] == "s3_attempt")
+                    .expect("actual extension HTTP attempt");
+                assert_eq!(attempt["details"]["operation"], "list");
+                assert_eq!(attempt["details"]["transport"], "extension");
+                assert_eq!(attempt["details"]["retry"], false);
+                let phase = records
+                    .iter()
+                    .find(|record| {
+                        record["event"] == "phase_end" && record["details"]["stage"] == "s3_list"
+                    })
+                    .expect("real LIST parse failure");
+                assert_eq!(
+                    phase["details"]["outcome"],
+                    if mode.ends_with("cancelled") {
+                        "cancelled"
+                    } else {
+                        "error"
+                    }
+                );
+                assert_eq!(
+                    phase["details"]["reason"],
+                    if mode.ends_with("cancelled") {
+                        "cancelled"
+                    } else {
+                        "invalid_response"
+                    }
+                );
+                assert_eq!(phase["trace_id"], attempt["trace_id"]);
+                assert!(records.iter().any(|record| record["event"] == "phase_start"
+                    && record["details"]["scope_id"] == phase["details"]["scope_id"]));
+            }
+            for forbidden in [
+                "private-request-path",
+                "private-backend-text",
+                "disposable-access",
+                "disposable-secret",
+                "Authorization",
+                "http://",
+                "bucket",
+            ] {
+                assert!(
+                    !stderr.contains(forbidden),
+                    "debug leaked {forbidden}: {stderr}"
+                );
+            }
             continue;
         }
         if mode == "queue_full" {
@@ -751,7 +1594,13 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
         let record = &records[0];
         assert_eq!(
             record["level"],
-            if mode == "slow_warn" { "warn" } else { "error" }
+            if mode == "slow_info" {
+                "info"
+            } else if mode == "admission" || mode == "generation" {
+                "warn"
+            } else {
+                "error"
+            }
         );
         assert_eq!(record["event"], event, "{stderr}");
         assert_eq!(record["reason"], reason, "{stderr}");

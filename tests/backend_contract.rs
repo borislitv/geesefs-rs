@@ -553,9 +553,9 @@ async fn sdk_observer_cost_diagnostic() {
 }
 
 #[tokio::test]
-async fn standard_listing_resumes_from_an_exclusive_confined_name_on_the_wire() {
+async fn listing_resumes_from_an_exclusive_confined_name_on_the_wire() {
     use geesefs_rs::config::ListType;
-    for mode in [ListType::V1, ListType::V2] {
+    for mode in [ListType::V1, ListType::V2, ListType::Extended] {
         let xml = b"<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>prefix/dir/z</Key><Size>7</Size></Contents></ListBucketResult>";
         let (store, task) = server(200, &[], xml, None);
         let result = store

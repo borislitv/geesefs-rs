@@ -5,6 +5,20 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-08: preserve exclusive resume bounds in extended listings
+
+The ext-v1 adapter discarded the exclusive key bound supplied by bounded directory
+reads. A later chunk could restart from the beginning and repeatedly fetch already
+visited pages. Pass the confined, percent-encoded `start-after` through the existing
+SDK signing path. An opaque continuation token still takes precedence. Standard
+fallback, metadata, cache freshness and backend error handling remain unchanged.
+
+The loopback wire regression first failed for the missing extended-list bound;
+it covers mounted-prefix confinement and special characters alongside v1/v2.
+Existing token-precedence and directory-page contracts remain applicable. This
+corrects redundant listing work; it does not establish comparative performance
+or explain every slow traversal.
+
 ## 2026-11-08: keep tag checks separate from snapshot publication
 
 A version-tag push rebuilt an already published source commit and attempted to

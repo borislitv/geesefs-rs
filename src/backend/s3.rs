@@ -875,7 +875,10 @@ impl S3 {
     ) -> Result<ListPage> {
         let prefix = self.key(relative_prefix)?;
         let after = after.map(|key| self.key(key)).transpose()?;
-        if let Some(mut page) = self.extended_or_fallback(&prefix, delimiter, token).await? {
+        if let Some(mut page) = self
+            .extended_or_fallback(&prefix, delimiter, token, after.as_deref())
+            .await?
+        {
             self.relativize_page(&mut page)?;
             return Ok(page);
         }
@@ -908,11 +911,12 @@ impl S3 {
         prefix: &str,
         delimiter: Option<&str>,
         token: Option<&str>,
+        after: Option<&str>,
     ) -> Result<Option<ListPage>> {
         if self.list_mode.load(Ordering::Relaxed) != 3 {
             return Ok(None);
         }
-        match self.list_extended(prefix, delimiter, token).await {
+        match self.list_extended(prefix, delimiter, token, after).await {
             Ok(page) => Ok(Some(page)),
             Err(Error::Backend { ref code, .. })
                 if super::extended_list::permits_standard_fallback(code) && token.is_none() =>
@@ -1008,10 +1012,11 @@ impl S3 {
         prefix: &str,
         delimiter: Option<&str>,
         token: Option<&str>,
+        after: Option<&str>,
     ) -> Result<super::extended_list::ListPage> {
         tokio::time::timeout(
             self.read_timeout,
-            self.list_extended_inner(prefix, delimiter, token),
+            self.list_extended_inner(prefix, delimiter, token, after),
         )
         .await
         .map_err(|_| Error::Timeout("ext-v1 presign/retries/body"))?
@@ -1021,6 +1026,7 @@ impl S3 {
         prefix: &str,
         delimiter: Option<&str>,
         token: Option<&str>,
+        after: Option<&str>,
     ) -> Result<super::extended_list::ListPage> {
         #[derive(serde::Deserialize)]
         #[serde(rename_all = "PascalCase")]
@@ -1030,6 +1036,7 @@ impl S3 {
         let prefix_owned = prefix.to_owned();
         let delimiter_owned = delimiter.map(str::to_owned);
         let token_owned = token.map(str::to_owned);
+        let after_owned = after.filter(|_| token.is_none()).map(str::to_owned);
         // The SDK does not expose LIST presigning. Reuse its supported GET
         // endpoint resolution/auth/signing pipeline, customizing only the URI
         // before signing. No request is made for the placeholder key.
@@ -1059,6 +1066,8 @@ impl S3 {
                     }
                     if let Some(token) = &token_owned {
                         query.append_pair("continuation-token", token);
+                    } else if let Some(after) = &after_owned {
+                        query.append_pair("start-after", after);
                     }
                 }
                 r.set_uri(uri.as_str())

@@ -6,7 +6,8 @@ mod server;
 pub use allocator::allocation_stats;
 pub use diagnostics::Diagnostics;
 pub(crate) use diagnostics::{
-    NamespaceGuard, Opcode, Stage, Trace, context, error_reason, namespace_lock, observe, scope,
+    BackendFailure, NamespaceGuard, Opcode, Stage, Trace, context, error_reason, namespace_lock,
+    observe, scope,
 };
 pub use server::MetricsServer;
 

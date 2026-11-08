@@ -6,6 +6,22 @@ translated, vendored or linked. This package forbids unsafe code in every target
 License declarations are checked; the complete binary-distribution notice audit
 remains outstanding. See LICENSE and NOTICE for source attribution.
 
+## Throttling in the existing extension adapter — 2026-11-08
+
+The supported aws-smithy-types 1.9.0 RetryConfig API already provides exponential
+backoff with jitter for SDK requests; retain that implementation. Extended LIST
+uses the existing reqwest adapter because the S3 SDK does not expose ext-v1.
+Adjust its existing retry loop with getrandom 0.4.3 (already locked) and Tokio
+sleep/timeout, without a second retry framework or new dependency. The policy
+follows the public Apache-2.0 Go GeeseFS 0.43.9 AWS SDK configuration: throttling
+starts at 500 ms with jitter and doubles between retries. Numeric Retry-After
+cannot extend the aggregate deadline. This is an independently implemented
+policy adapter, not a replacement HTTP/signing/retry framework.
+
+Sources: [Go SDK retryer](https://github.com/aws/aws-sdk-go/blob/v1.55.8/aws/client/default_retryer.go),
+[Go configuration](https://github.com/yandex-cloud/geesefs/blob/80c214ef14f620d93407454fc76ca01dd71fa25f/core/cfg/conf_s3.go),
+[Rust RetryConfig API](https://docs.rs/aws-smithy-types/1.9.0/aws_smithy_types/retry/struct.RetryConfig.html).
+
 ## Selected mechanisms
 
 | Concern | Selection and reason |
@@ -34,6 +50,46 @@ sets it. Repeated bounded observations replace the former final `go tool pprof`
 snapshot. Sampling overhead remains part of the observed server cost.
 
 ## Narrow application state
+
+### Severe backend failure context — 2026-11-07
+
+Reuse the locked aws-smithy-runtime-api 1.19.1
+[finalizer context](https://docs.rs/aws-smithy-runtime-api/1.19.1/aws_smithy_runtime_api/client/interceptors/context/struct.FinalizerInterceptorContextRef.html)
+and [typed orchestrator predicates](https://docs.rs/aws-smithy-runtime-api/1.19.1/aws_smithy_runtime_api/client/orchestrator/struct.OrchestratorError.html)
+in the existing interceptor. Reuse reqwest 0.12.28 status and typed error
+predicates for extension requests, and the existing backend/body validation
+boundaries for streaming failures.
+These supported boundaries expose status, failure class and completed attempt
+count without formatting credentials, URLs, headers or remote error text.
+Keep only the last failed execution per closed operation plus its count in each
+request trace; serialize that bounded summary with severe records through the
+existing serde_json/tracing-appender path. No new subscriber, transport, queue,
+error-string parser, dependency or public Error variant is required.
+Body failures occur after SDK finalization; their status and attempt count remain
+explicitly unknown rather than borrowing another concurrent request's response.
+
+### Debug trace output — 2026-11-07
+
+Keep the already locked tracing-appender 0.2.5 `NonBlockingBuilder` and its
+supported `buffered_lines_limit`, `lossy(true)` and enqueue-drop observations.
+Use 256 queued records only for explicit debug; retain 16 normally. Request/phase
+identities and closed-vocabulary fields are application state serialized through
+existing serde_json. No custom queue, subscriber, OpenTelemetry runtime or new
+dependency is needed to expose these existing observation boundaries.
+
+### READDIRPLUS metadata pipeline — 2026-11-06
+
+Reuse [futures-util 0.3.34 FuturesOrdered](https://docs.rs/futures-util/0.3.34/futures_util/stream/struct.FuturesOrdered.html)
+for concurrent borrowed futures with ordered output, and the existing Tokio
+metadata semaphore for a global bound. Create a network future only after its
+permit; cached attributes return a ready future. Cancellation drops the queue
+in the request, without detached tasks or a new executor/cache/dependency.
+
+Reviewed the pinned [fuser 0.18.0 release](https://github.com/cberner/fuser/releases/tag/v0.18.0)
+and [entry/attribute TTL issue 756](https://github.com/cberner/fuser/issues/756).
+The latter concerns separate reply TTLs, not our sequential S3 attribute refresh;
+keep the current supported reply/TTL API. fuser retains parsing, frame capacity
+and exactly-once wire replies. The application changes only request scheduling.
 
 ### Namespace progress — 2026-11-06
 
@@ -343,3 +399,31 @@ metadata. Preserve the cached or HEAD observation time when merging selected
 entries; only actual authoritative LIST metadata has the new LIST observation
 time. Existing SDK responses, Moka and bounded futures suffice. Avoid another
 TTL extension or cache-policy change to hide required metadata refresh requests.
+
+For extended LIST error-body failures, retain the existing reqwest 0.12.28
+streaming [`Response::chunk`](https://docs.rs/reqwest/0.12.28/reqwest/struct.Response.html#method.chunk)
+and separate [`Response::status`](https://docs.rs/reqwest/0.12.28/reqwest/struct.Response.html#method.status)
+APIs. Automatic gzip decoding can fail after response headers have established a
+transient HTTP status. Classify that status in the existing bounded retry loop
+instead of replacing transport, disabling gzip or adding a second retry layer.
+Keep [`Error::without_url`](https://docs.rs/reqwest/0.12.28/reqwest/struct.Error.html#method.without_url)
+for terminal body failures so presigned URLs remain excluded from error text.
+
+For stderr journal severity, reuse the existing rustix 1.1.5 safe
+[`fstat`](https://docs.rs/rustix/1.1.5/rustix/fs/fn.fstat.html) and standard-library
+environment/formatting APIs with systemd's documented `JOURNAL_STREAM` device/inode
+identity and `SyslogLevelPrefix` line framing. The sender only needs to preserve
+the severity of its existing JSON records on a verified journal stream. Evaluated
+[tracing-journald 0.3.2](https://docs.rs/tracing-journald/0.3.2/tracing_journald/)
+(MIT, maintained Tokio tracing project) supplies native structured logging through
+a subscriber layer, rather than this bounded JSON stderr worker.
+[sd-notify 0.5.0](https://docs.rs/sd-notify/0.5.0/sd_notify/) (MIT/Apache-2.0)
+provides service notifications, not journal logging. Neither is needed for a
+small framing adapter; retain tracing-appender's bounded non-blocking ownership.
+The public systemd 255 rate limiter has separate severity pools; no rate-limit
+change or native journal protocol implementation is required.
+For application-side saturation, reuse a second tracing-appender 0.2.5
+`NonBlockingBuilder` worker with a fixed 16-record reservation for debug-mode
+error/warning output. Its supported lossy queue and `ErrorCounter` avoid a custom
+priority channel, async-runtime backpressure or an unbounded log buffer. Keep the
+existing ordinary-mode worker and independent drop visibility.

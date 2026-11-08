@@ -7,6 +7,7 @@ use aws_smithy_runtime_api::{
             Intercept,
             context::{
                 BeforeSerializationInterceptorContextRef, BeforeTransmitInterceptorContextRef,
+                FinalizerInterceptorContextRef,
             },
         },
         orchestrator::Metadata,
@@ -19,6 +20,25 @@ use aws_smithy_types::config_bag::{ConfigBag, Storable, StoreReplace};
 pub(super) struct Observations(pub(crate) crate::metrics::Diagnostics);
 impl Observations {
     pub(super) const NAME: &'static str = "GeeseFSObservations";
+}
+
+fn operation(cfg: &ConfigBag) -> &'static str {
+    match cfg.load::<Metadata>().map(|metadata| metadata.name()) {
+        Some("GetObject") => "get",
+        Some("HeadObject" | "HeadBucket") => "head",
+        Some("ListObjects" | "ListObjectsV2") => "list",
+        Some(
+            "PutObject"
+            | "CopyObject"
+            | "CreateMultipartUpload"
+            | "UploadPart"
+            | "UploadPartCopy"
+            | "CompleteMultipartUpload"
+            | "AbortMultipartUpload"
+            | "DeleteObject",
+        ) => "write",
+        _ => "other",
+    }
 }
 #[derive(Debug)]
 struct Transmits(u64);
@@ -56,28 +76,48 @@ impl Intercept for Observations {
         {
             return Ok(());
         }
-        let operation = match cfg.load::<Metadata>().map(|metadata| metadata.name()) {
-            Some("GetObject") => "get",
-            Some("HeadObject" | "HeadBucket") => "head",
-            Some("ListObjects" | "ListObjectsV2") => "list",
-            Some(
-                "PutObject"
-                | "CopyObject"
-                | "CreateMultipartUpload"
-                | "UploadPart"
-                | "UploadPartCopy"
-                | "CompleteMultipartUpload"
-                | "AbortMultipartUpload"
-                | "DeleteObject",
-            ) => "write",
-            _ => "other",
-        };
         let previous = cfg
             .load::<Transmits>()
             .expect("before-execution observer initializes attempts")
             .0;
-        self.0.attempt(operation, "sdk", previous != 0);
+        self.0.attempt(operation(cfg), "sdk", previous != 0);
         cfg.interceptor_state().store_put(Transmits(previous + 1));
+        Ok(())
+    }
+
+    fn read_after_execution(
+        &self,
+        context: &FinalizerInterceptorContextRef<'_>,
+        _: &RuntimeComponents,
+        cfg: &mut ConfigBag,
+    ) -> Result<(), BoxError> {
+        let Some(Err(error)) = context.output_or_error() else {
+            return Ok(());
+        };
+        let attempts = cfg.load::<Transmits>().map_or(0, |count| count.0);
+        if attempts == 0 {
+            return Ok(()); // Presigning is not an HTTP execution.
+        }
+        let kind = if error.is_timeout_error() {
+            "timeout"
+        } else if error.is_connector_error() {
+            "connector"
+        } else if error.is_response_error() {
+            "response"
+        } else if error.is_operation_error() {
+            "service"
+        } else {
+            "other"
+        };
+        self.0.backend_failure(crate::metrics::BackendFailure::new(
+            operation(cfg),
+            "sdk",
+            context
+                .response()
+                .map(|response| response.status().as_u16()),
+            kind,
+            Some(attempts),
+        ));
         Ok(())
     }
 }

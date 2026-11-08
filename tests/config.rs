@@ -30,11 +30,12 @@ fn reference_cli_defaults_and_prefix() {
     assert_eq!(c.metrics_listen, None);
     assert_eq!(
         c.diagnostic_log_level,
-        geesefs_rs::config::DiagnosticLogLevel::Error
+        geesefs_rs::config::DiagnosticLogLevel::Warn
     );
     assert_eq!(c.symlink_attr, "--symlink-target");
     assert_eq!(c.bucket_and_prefix(), ("bucket", "packages"));
     assert_eq!(c.effective_list_type(), ListType::Extended);
+    assert_eq!(c.sdk_max_retries, 2, "three total attempts by default");
 }
 
 #[test]
@@ -53,7 +54,7 @@ fn accepts_an_explicit_metrics_listener_without_contacting_backend() {
 
 #[test]
 fn diagnostic_log_levels_are_explicit_and_bounded() {
-    for level in ["off", "error", "warn"] {
+    for level in ["off", "error", "warn", "info", "debug"] {
         Config::try_parse_from([
             "geesefs-rs",
             "--diagnostic-log-level",
@@ -281,7 +282,7 @@ fn backend_flags_have_reference_defaults_and_reject_invalid_combinations() {
     assert_eq!(c.http_timeout, Duration::from_secs(30));
     assert_eq!(c.multipart_age, Duration::from_secs(48 * 3600));
     assert_eq!(c.multipart_copy_threshold, 128);
-    assert_eq!(c.sdk_max_retries, 3);
+    assert_eq!(c.sdk_max_retries, 2);
     assert_eq!(c.storage_class, "STANDARD");
     assert_eq!(c.iam_header, "X-YaCloud-SubjectToken");
     for flags in [

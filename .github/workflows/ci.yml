@@ -71,7 +71,7 @@ jobs:
 
   publish:
     needs: build
-    if: github.event_name == 'push' && github.repository == 'borislitv/geesefs-rs'
+    if: github.event_name == 'push' && github.ref_type == 'branch' && github.repository == 'borislitv/geesefs-rs'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

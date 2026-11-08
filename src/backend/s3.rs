@@ -31,6 +31,18 @@ use crate::{
 
 const READ_CHUNK_BYTES: usize = 128 * 1024;
 
+// The extension uses reqwest because the SDK cannot execute ext-v1. Keep this
+// narrow adapter Go-like: throttling gets seconds of jittered backoff, not the
+// ordinary transport-error millisecond delay. SDK operations own their retries.
+fn extension_delay(attempt: u32, throttled: bool, retry_after: Duration) -> Result<Duration> {
+    let mut random = [0; 8];
+    getrandom::fill(&mut random)
+        .map_err(|_| Error::Config("retry jitter random source unavailable".into()))?;
+    let base = if throttled { 500 } else { 30 };
+    let millis = (base + u64::from_le_bytes(random) % base) * (1 << attempt.min(8));
+    Ok(Duration::from_millis(millis).max(retry_after))
+}
+
 /// One SDK client owns ordinary transport, TLS, credentials, signing and retries.
 #[derive(Clone)]
 pub struct S3 {
@@ -182,7 +194,51 @@ fn backend(operation: &'static str, code: Option<&str>, error: impl std::fmt::Di
     }
 }
 
+fn request_failure_kind(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_decode() {
+        "decode"
+    } else if error.is_body() {
+        "body"
+    } else {
+        "request"
+    }
+}
+
 impl S3 {
+    // LIST includes response bodies and extension fallback. GET stops this
+    // budget at headers: the existing payload/admission timeout stays separate.
+    fn metadata_timeout(&self) -> Duration {
+        self.read_timeout.min(Duration::from_secs(5))
+    }
+    fn list_failure(&self, attempt: u32, status: Option<reqwest::StatusCode>, kind: &'static str) {
+        self.diagnostics
+            .backend_failure(metrics::BackendFailure::new(
+                "list",
+                "extension",
+                status.map(|status| status.as_u16()),
+                kind,
+                Some(u64::from(attempt) + 1),
+            ));
+    }
+
+    fn get_body_failure(&self, error: &Error) {
+        let kind = match error {
+            Error::Backend {
+                operation: "GET body",
+                ..
+            } => "body",
+            Error::InvalidResponse(_) => "invalid_response",
+            _ => return, // Admission, cancellation and sink failures are not S3 body failures.
+        };
+        self.diagnostics
+            .backend_failure(metrics::BackendFailure::new(
+                "get", "sdk_body", None, kind, None,
+            ));
+    }
     /// Bounded, read-only reference-style startup discovery. Explicit auth modes
     /// and --no-detect skip it; no failure silently downgrades a mounted client.
     pub async fn initialize(self) -> Result<Self> {
@@ -799,11 +855,14 @@ impl S3 {
         token: Option<&str>,
         after: Option<&str>,
     ) -> Result<super::extended_list::ListPage> {
-        metrics::observe(
-            &self.diagnostics,
-            Stage::S3List,
-            self.list_after_inner(relative_prefix, delimiter, token, after),
-        )
+        metrics::observe(&self.diagnostics, Stage::S3List, async {
+            tokio::time::timeout(
+                self.metadata_timeout(),
+                self.list_after_inner(relative_prefix, delimiter, token, after),
+            )
+            .await
+            .map_err(|_| Error::Timeout("LIST presign/retries/response/fallback"))?
+        })
         .await
     }
 
@@ -1025,19 +1084,43 @@ impl S3 {
                     if attempt + 1 < self.extension_attempts
                         && (error.is_connect() || error.is_timeout()) =>
                 {
-                    tokio::time::sleep(Duration::from_millis(30 * (1 << attempt.min(8)))).await;
+                    tokio::time::sleep(extension_delay(attempt, false, Duration::ZERO)?).await;
                     continue;
                 }
-                Err(error) => return Err(backend("ext-v1", None, error.without_url())),
+                Err(error) => {
+                    self.list_failure(attempt, None, request_failure_kind(&error));
+                    return Err(backend("ext-v1", None, error.without_url()));
+                }
             };
             let status = response.status();
+            let retryable_status = status.is_server_error() || status.as_u16() == 429;
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(Duration::from_secs)
+                .unwrap_or_default();
             let mut xml = Vec::new();
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(|e| backend("ext-v1 body", None, e.without_url()))?
-            {
+            let mut body_failure = None;
+            loop {
+                let chunk = match response.chunk().await {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => break,
+                    Err(error) if retryable_status => {
+                        // An unreadable error body must not discard a transient
+                        // HTTP status or supply a partial XML fallback code.
+                        xml.clear();
+                        body_failure = Some(request_failure_kind(&error));
+                        break;
+                    }
+                    Err(error) => {
+                        self.list_failure(attempt, Some(status), request_failure_kind(&error));
+                        return Err(backend("ext-v1 body", None, error.without_url()));
+                    }
+                };
                 if xml.len() + chunk.len() > super::extended_list::MAX_PAGE_BYTES {
+                    self.list_failure(attempt, Some(status), "response_limit");
                     return Err(Error::InvalidResponse(
                         "extension page exceeds byte limit".into(),
                     ));
@@ -1045,18 +1128,22 @@ impl S3 {
                 xml.extend_from_slice(&chunk);
             }
             if status.is_success() {
-                return super::extended_list::decode_page(&xml, prefix, token);
+                return super::extended_list::decode_page(&xml, prefix, token).inspect_err(|_| {
+                    self.list_failure(attempt, Some(status), "invalid_response");
+                });
             }
             let code = quick_xml::de::from_reader::<_, ServiceError>(xml.as_slice())
                 .map(|e| e.code)
                 .unwrap_or_else(|_| format!("HTTP{}", status.as_u16()));
             if attempt + 1 < self.extension_attempts
-                && (status.is_server_error() || status.as_u16() == 429)
+                && retryable_status
                 && !super::extended_list::permits_standard_fallback(&code)
             {
-                tokio::time::sleep(Duration::from_millis(30 * (1 << attempt.min(8)))).await;
+                let throttled = matches!(status.as_u16(), 429 | 502 | 503 | 504);
+                tokio::time::sleep(extension_delay(attempt, throttled, retry_after)?).await;
                 continue;
             }
+            self.list_failure(attempt, Some(status), body_failure.unwrap_or("service"));
             return Err(backend("ext-v1", Some(&code), "extension service error"));
         }
         Err(Error::Timeout("ext-v1 retries"))
@@ -1083,11 +1170,11 @@ impl S3 {
         Ok(self.head_details(key).await?.0)
     }
     async fn head_details(&self, key: &str) -> Result<(ObjectHead, Option<String>)> {
-        metrics::observe(
-            &self.diagnostics,
-            Stage::S3Head,
-            self.head_details_inner(key),
-        )
+        metrics::observe(&self.diagnostics, Stage::S3Head, async {
+            tokio::time::timeout(self.metadata_timeout(), self.head_details_inner(key))
+                .await
+                .map_err(|_| Error::Timeout("HEAD retries/response"))?
+        })
         .await
     }
     async fn head_details_inner(&self, key: &str) -> Result<(ObjectHead, Option<String>)> {
@@ -1251,6 +1338,7 @@ impl S3 {
             self.deliver_range_inner(body, offset, length, budget, first, output),
         )
         .await
+        .inspect_err(|error| self.get_body_failure(error))
     }
 
     async fn deliver_range_inner(
@@ -1344,11 +1432,14 @@ impl S3 {
         length: u64,
         head: &ObjectHead,
     ) -> Result<GetObjectOutput> {
-        metrics::observe(
-            &self.diagnostics,
-            Stage::S3Headers,
-            self.get_range_inner(key, offset, length, head),
-        )
+        metrics::observe(&self.diagnostics, Stage::S3Headers, async {
+            tokio::time::timeout(
+                self.metadata_timeout(),
+                self.get_range_inner(key, offset, length, head),
+            )
+            .await
+            .map_err(|_| Error::Timeout("GET retries/headers"))?
+        })
         .await
     }
 
@@ -1396,6 +1487,7 @@ impl S3 {
             .await
         })
         .await
+        .inspect_err(|error| self.get_body_failure(error))
     }
 
     async fn finish_range_inner(&self, mut body: ByteStream, block: &mut Block) -> Result<()> {

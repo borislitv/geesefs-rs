@@ -5,6 +5,156 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-08: keep tag checks separate from snapshot publication
+
+A version-tag push rebuilt an already published source commit and attempted to
+publish its existing build snapshot again. The independent build had different
+binary bytes, so the immutable-asset comparison correctly refused it. Publish
+build snapshots only from branch pushes; tag pushes still run checks and builds.
+Keep the existing checksum, provenance and binary comparisons for branch reruns,
+and preserve all published releases. CI builds are not a reproducible-build claim.
+
+## 2026-11-08: bounded throttling retries
+
+Extended LIST exhausted four attempts with only 210 ms of backoff on HTTP 429.
+Reduce the default to two retries, with Go-like jittered throttling pauses of
+0.5–1 s and 1–2 s. Numeric Retry-After is a lower bound on the next pause. Keep
+the SDK's native jitter/retry policy without a second retry loop. Bound each
+LIST (including fallback), HEAD and GET-header operation to five seconds, or
+the shorter configured HTTP timeout. GET payload transfer and writer deadlines
+remain separate. Cache freshness and generation rules are unchanged.
+
+Loopback tests cover throttling pauses, Retry-After recovery and exhaustion,
+silent ext-v1/v1/v2 LIST, HEAD and GET headers, and existing configured retry
+and access-error contracts. The retry-spacing regression first failed against
+the previous implementation.
+
+## 2026-11-08: release 0.1.7 preparation
+
+Advance the package and lockfile together for self-contained severe backend
+context. Preserve published v0.1.6 and its assets. Package only the successful
+exact-source default-jemalloc CI executable with source/build provenance,
+checksums and complete locked dependency notices. No external dependencies
+change. Publication is separate from mounted verification, historical EIO
+attribution and compatibility/performance acceptance.
+
+## 2026-11-07: retain backend context in severe records
+
+Terminal EIO records retained only a coarse backend class, requiring debug
+history that can be dropped independently. Real fuser/HTTP regressions first
+reproduce missing status/class/attempt context and missing GET-body attribution.
+Capture final SDK and extension failures in five fixed request-local operation
+slots; serialize their latest sanitized observation, count and monotonic age
+directly with error/warning records. Recovered retries are not recorded as failed
+executions. GET stream/validation failures retain a body class with unknown HTTP
+status and attempt count. Preserve existing retries, errno, queues and filtering;
+do not expose paths, URLs, headers, credentials or arbitrary remote error text.
+This improves future attribution, not diagnosis of historical EIO or acceptance.
+
+## 2026-11-07: release 0.1.6 preparation
+
+Advance the package and lockfile together for transient LIST error-body retries
+and protected severe diagnostic output. Keep published v0.1.5 immutable. Package
+only the successful exact-source default-jemalloc CI executable with checksums,
+source provenance and complete locked dependency notices. Receiver priority and
+application reservation improve attribution, not durability; publication does
+not close compatibility, memory or comparative performance acceptance.
+
+## 2026-11-07: preserve diagnostic severity on journal stderr streams
+
+Debug saturation also consumed the only application output queue, dropping a lone
+error behind otherwise successful traffic. A blocked-stderr fuser regression
+first observes that missing severe reply while FUSE continues. In debug mode,
+reserve a separate 16-record tracing-appender worker for error/warning records;
+retain the 256-record ordinary lane. Aggregate drops across both queues and expose
+reserved-severe drops separately. Each lane is FIFO, but cross-lane output can
+reorder; correlate timestamps and IDs rather than output position. Both lanes
+remain bounded/lossy, and error bursts can still exhaust the reservation.
+
+JSON severity alone does not set a journal stream record's `PRIORITY`. Without a
+line prefix, errors and verbose debug consume the receiver's default severity
+pool together. A real fuser/socket regression first fails for absent severity
+framing. Match `JOURNAL_STREAM` against stderr's actual device/inode once, using
+the existing safe rustix API, then prefix whole records with systemd's supported
+error/warning/info/debug priority. Ordinary stderr, absent/malformed identities
+and redirected descriptors retain plain JSON. Bounded lossy workers and drop
+metrics remain; severity framing does not guarantee delivery or disable the
+receiver's rate limits. No service restart or additional log volume is implied.
+
+## 2026-11-07: retain transient LIST status after error-body failure
+
+The extended LIST adapter read the response body before checking its HTTP status.
+A malformed gzip error response therefore returned a transport/protocol error
+immediately, skipping the configured retry for HTTP 429 and 5xx. A real loopback
+HTTP regression reproduces that failure before the correction. Preserve the
+transient status when its body cannot be read, discard incomplete XML and use the
+existing bounded retry loop. Successful and non-transient response-body failures
+remain errors; neither they nor transient failures select standard LIST fallback.
+Tests cover recovery, exhausted and disabled retries, access denial and malformed
+successful responses. This independently reproduced defect does not establish
+the cause of historical filesystem errors or close performance acceptance.
+
+## 2026-11-07: release 0.1.5 preparation
+
+Advance the package and lockfile together for the explicit diagnostic levels and
+bounded debug events below. Preserve the published v0.1.4 tag and assets. Package
+only the successful exact-source CI executable with checksums, build provenance
+and complete locked dependency notices. Debug logging is opt-in, has observer
+cost and may drop records; this release does not close compatibility or comparative
+performance acceptance.
+
+## 2026-11-07: explicit diagnostic levels and debug request traces
+
+The previous maximum `warn` mixed ordinary slow-work diagnostics with errors and
+could not reconstruct successful requests or parallel phase lifetimes. Make
+`warn` the normal default, move slow/inflight detail to `info`, and provide
+explicit `debug` request/executor/reply/completion, cache/fill, phase and S3-attempt
+events. Preserve request/phase IDs, bounded error classes and cancellation versus
+success, without paths, payloads or backend messages.
+
+Reuse tracing-appender's bounded lossy worker. Debug mode bypasses rate sampling
+for every severity with a 256-record queue; ordinary error/warn/info modes retain
+separate one-record-per-second slots and the normal 16-record queue. Filtering and lazy detail construction keep
+debug formatting out of ordinary operation. A real fuser-wire regression first
+fails because successful requests produce no trace; loopback HTTP and blocked
+stderr fixtures cover remote attribution, cancellation, bounded drops and progress.
+Verbose logging has explicit observer cost and can lose records under pressure;
+this is not an exhaustive audit, kernel trace or performance improvement.
+Final review reproduces 299 suppressed severe replies in a 300-request debug
+burst; mode-based rate bypass corrects that gap. The same test retains bounded
+queue drops and independent FUSE progress. Session-joined counter assertions also
+remove a fixture race after socket delivery without weakening the expected count.
+The published v0.1.4 release is unchanged; its old level meanings remain historical.
+
+## 2026-11-07: release 0.1.4 preparation
+
+Advance the package and lockfile together for the bounded READDIRPLUS metadata
+pipeline below. The operator requests a versioned release and a scoped Linux/S3
+check. Package the successful exact-source CI executable with checksum/build
+provenance and the complete locked dependency notices. Publication does not close
+filesystem, production or Go-relative performance acceptance.
+
+## 2026-11-06: overlap READDIRPLUS directory attributes
+
+An extended delimiter LIST supplies common-prefix names, not authoritative
+directory-marker attributes. READDIRPLUS subsequently refreshed these inodes
+serially, so one fast parent LIST still led to a sum of per-directory HEAD/LIST
+waits before publication. A real fuser wire regression first reproduces this
+serialization with two independent marker requests gated before either response.
+
+Pipeline owned refresh futures through the existing futures-util `FuturesOrdered`
+and global metadata semaphore. Admission precedes network-job creation; fresh
+attributes bypass that lane. Preserve names/cookies, marker metadata, observation
+times, concurrent-writer generation checks and lookup ownership. Full buffers,
+errors and deadlines drop pending futures and their permits. Basic READDIR keeps
+its direct path and performs no new attribute work. No dependency, cache budget,
+TTL, worker count or served mount changes.
+
+The checked 110-directory protocol fixture falls from roughly 381 ms to 65 ms
+with identical backend operation counts. This demonstrates removal of the serial
+critical path in the fixture, not attribution of a past request or a measured
+production/Go speedup. [Verification and limitations](testing.md#readdirplus-directory-attributes--2026-11-06).
+
 ## 2026-11-06: bounded latency and remote-work diagnostics
 
 Cache/RSS counters and terminal errno alone cannot attribute read tails, namespace

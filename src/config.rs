@@ -26,6 +26,8 @@ pub enum DiagnosticLogLevel {
     Off,
     Error,
     Warn,
+    Info,
+    Debug,
 }
 
 /// Only options with implemented configuration semantics are parsed.
@@ -83,7 +85,7 @@ pub struct Config {
     pub request_timeout: Duration,
     #[arg(long, default_value = "5m", value_parser = parse_duration)]
     pub shutdown_timeout: Duration,
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = 2)]
     pub sdk_max_retries: u32,
     #[arg(long)]
     pub no_expire_multipart: bool,
@@ -191,8 +193,8 @@ pub struct Config {
     /// Keep only basic cache/memory observations; allows same-binary overhead controls.
     #[arg(long)]
     pub no_diagnostics: bool,
-    /// Diagnostic records: error, or also slow/inflight at warn; off retains metrics.
-    #[arg(long, value_enum, default_value = "error")]
+    /// Diagnostic JSON: warn normally, info for slow work, debug for request/phase traces.
+    #[arg(long, value_enum, default_value = "warn")]
     pub diagnostic_log_level: DiagnosticLogLevel,
 }
 

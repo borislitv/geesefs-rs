@@ -5,6 +5,15 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-08: keep tag checks separate from snapshot publication
+
+A version-tag push rebuilt an already published source commit and attempted to
+publish its existing build snapshot again. The independent build had different
+binary bytes, so the immutable-asset comparison correctly refused it. Publish
+build snapshots only from branch pushes; tag pushes still run checks and builds.
+Keep the existing checksum, provenance and binary comparisons for branch reruns,
+and preserve all published releases. CI builds are not a reproducible-build claim.
+
 ## 2026-11-08: bounded throttling retries
 
 Extended LIST exhausted four attempts with only 210 ms of backoff on HTTP 429.

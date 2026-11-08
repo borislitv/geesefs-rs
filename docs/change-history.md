@@ -5,6 +5,15 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-08: release 0.1.7 preparation
+
+Advance the package and lockfile together for self-contained severe backend
+context. Preserve published v0.1.6 and its assets. Package only the successful
+exact-source default-jemalloc CI executable with source/build provenance,
+checksums and complete locked dependency notices. No external dependencies
+change. Publication is separate from mounted verification, historical EIO
+attribution and compatibility/performance acceptance.
+
 ## 2026-11-07: retain backend context in severe records
 
 Terminal EIO records retained only a coarse backend class, requiring debug

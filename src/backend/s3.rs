@@ -31,6 +31,18 @@ use crate::{
 
 const READ_CHUNK_BYTES: usize = 128 * 1024;
 
+// The extension uses reqwest because the SDK cannot execute ext-v1. Keep this
+// narrow adapter Go-like: throttling gets seconds of jittered backoff, not the
+// ordinary transport-error millisecond delay. SDK operations own their retries.
+fn extension_delay(attempt: u32, throttled: bool, retry_after: Duration) -> Result<Duration> {
+    let mut random = [0; 8];
+    getrandom::fill(&mut random)
+        .map_err(|_| Error::Config("retry jitter random source unavailable".into()))?;
+    let base = if throttled { 500 } else { 30 };
+    let millis = (base + u64::from_le_bytes(random) % base) * (1 << attempt.min(8));
+    Ok(Duration::from_millis(millis).max(retry_after))
+}
+
 /// One SDK client owns ordinary transport, TLS, credentials, signing and retries.
 #[derive(Clone)]
 pub struct S3 {
@@ -197,6 +209,11 @@ fn request_failure_kind(error: &reqwest::Error) -> &'static str {
 }
 
 impl S3 {
+    // LIST includes response bodies and extension fallback. GET stops this
+    // budget at headers: the existing payload/admission timeout stays separate.
+    fn metadata_timeout(&self) -> Duration {
+        self.read_timeout.min(Duration::from_secs(5))
+    }
     fn list_failure(&self, attempt: u32, status: Option<reqwest::StatusCode>, kind: &'static str) {
         self.diagnostics
             .backend_failure(metrics::BackendFailure::new(
@@ -838,11 +855,14 @@ impl S3 {
         token: Option<&str>,
         after: Option<&str>,
     ) -> Result<super::extended_list::ListPage> {
-        metrics::observe(
-            &self.diagnostics,
-            Stage::S3List,
-            self.list_after_inner(relative_prefix, delimiter, token, after),
-        )
+        metrics::observe(&self.diagnostics, Stage::S3List, async {
+            tokio::time::timeout(
+                self.metadata_timeout(),
+                self.list_after_inner(relative_prefix, delimiter, token, after),
+            )
+            .await
+            .map_err(|_| Error::Timeout("LIST presign/retries/response/fallback"))?
+        })
         .await
     }
 
@@ -1064,7 +1084,7 @@ impl S3 {
                     if attempt + 1 < self.extension_attempts
                         && (error.is_connect() || error.is_timeout()) =>
                 {
-                    tokio::time::sleep(Duration::from_millis(30 * (1 << attempt.min(8)))).await;
+                    tokio::time::sleep(extension_delay(attempt, false, Duration::ZERO)?).await;
                     continue;
                 }
                 Err(error) => {
@@ -1074,6 +1094,13 @@ impl S3 {
             };
             let status = response.status();
             let retryable_status = status.is_server_error() || status.as_u16() == 429;
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(Duration::from_secs)
+                .unwrap_or_default();
             let mut xml = Vec::new();
             let mut body_failure = None;
             loop {
@@ -1112,7 +1139,8 @@ impl S3 {
                 && retryable_status
                 && !super::extended_list::permits_standard_fallback(&code)
             {
-                tokio::time::sleep(Duration::from_millis(30 * (1 << attempt.min(8)))).await;
+                let throttled = matches!(status.as_u16(), 429 | 502 | 503 | 504);
+                tokio::time::sleep(extension_delay(attempt, throttled, retry_after)?).await;
                 continue;
             }
             self.list_failure(attempt, Some(status), body_failure.unwrap_or("service"));
@@ -1142,11 +1170,11 @@ impl S3 {
         Ok(self.head_details(key).await?.0)
     }
     async fn head_details(&self, key: &str) -> Result<(ObjectHead, Option<String>)> {
-        metrics::observe(
-            &self.diagnostics,
-            Stage::S3Head,
-            self.head_details_inner(key),
-        )
+        metrics::observe(&self.diagnostics, Stage::S3Head, async {
+            tokio::time::timeout(self.metadata_timeout(), self.head_details_inner(key))
+                .await
+                .map_err(|_| Error::Timeout("HEAD retries/response"))?
+        })
         .await
     }
     async fn head_details_inner(&self, key: &str) -> Result<(ObjectHead, Option<String>)> {
@@ -1404,11 +1432,14 @@ impl S3 {
         length: u64,
         head: &ObjectHead,
     ) -> Result<GetObjectOutput> {
-        metrics::observe(
-            &self.diagnostics,
-            Stage::S3Headers,
-            self.get_range_inner(key, offset, length, head),
-        )
+        metrics::observe(&self.diagnostics, Stage::S3Headers, async {
+            tokio::time::timeout(
+                self.metadata_timeout(),
+                self.get_range_inner(key, offset, length, head),
+            )
+            .await
+            .map_err(|_| Error::Timeout("GET retries/headers"))?
+        })
         .await
     }
 

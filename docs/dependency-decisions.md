@@ -6,6 +6,22 @@ translated, vendored or linked. This package forbids unsafe code in every target
 License declarations are checked; the complete binary-distribution notice audit
 remains outstanding. See LICENSE and NOTICE for source attribution.
 
+## Throttling in the existing extension adapter — 2026-11-08
+
+The supported aws-smithy-types 1.9.0 RetryConfig API already provides exponential
+backoff with jitter for SDK requests; retain that implementation. Extended LIST
+uses the existing reqwest adapter because the S3 SDK does not expose ext-v1.
+Adjust its existing retry loop with getrandom 0.4.3 (already locked) and Tokio
+sleep/timeout, without a second retry framework or new dependency. The policy
+follows the public Apache-2.0 Go GeeseFS 0.43.9 AWS SDK configuration: throttling
+starts at 500 ms with jitter and doubles between retries. Numeric Retry-After
+cannot extend the aggregate deadline. This is an independently implemented
+policy adapter, not a replacement HTTP/signing/retry framework.
+
+Sources: [Go SDK retryer](https://github.com/aws/aws-sdk-go/blob/v1.55.8/aws/client/default_retryer.go),
+[Go configuration](https://github.com/yandex-cloud/geesefs/blob/80c214ef14f620d93407454fc76ca01dd71fa25f/core/cfg/conf_s3.go),
+[Rust RetryConfig API](https://docs.rs/aws-smithy-types/1.9.0/aws_smithy_types/retry/struct.RetryConfig.html).
+
 ## Selected mechanisms
 
 | Concern | Selection and reason |

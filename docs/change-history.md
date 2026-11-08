@@ -5,6 +5,21 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-08: bounded throttling retries
+
+Extended LIST exhausted four attempts with only 210 ms of backoff on HTTP 429.
+Reduce the default to two retries, with Go-like jittered throttling pauses of
+0.5–1 s and 1–2 s. Numeric Retry-After is a lower bound on the next pause. Keep
+the SDK's native jitter/retry policy without a second retry loop. Bound each
+LIST (including fallback), HEAD and GET-header operation to five seconds, or
+the shorter configured HTTP timeout. GET payload transfer and writer deadlines
+remain separate. Cache freshness and generation rules are unchanged.
+
+Loopback tests cover throttling pauses, Retry-After recovery and exhaustion,
+silent ext-v1/v1/v2 LIST, HEAD and GET headers, and existing configured retry
+and access-error contracts. The retry-spacing regression first failed against
+the previous implementation.
+
 ## 2026-11-08: release 0.1.7 preparation
 
 Advance the package and lockfile together for self-contained severe backend

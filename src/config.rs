@@ -85,7 +85,7 @@ pub struct Config {
     pub request_timeout: Duration,
     #[arg(long, default_value = "5m", value_parser = parse_duration)]
     pub shutdown_timeout: Duration,
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = 2)]
     pub sdk_max_retries: u32,
     #[arg(long)]
     pub no_expire_multipart: bool,

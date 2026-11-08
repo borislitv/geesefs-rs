@@ -980,6 +980,137 @@ async fn changed_source_is_rejected_before_any_copy_mutation() {
 }
 
 #[tokio::test]
+async fn extension_throttling_uses_seconds_of_backoff_before_its_last_attempt() {
+    let failure = || Reply {
+        status: 429,
+        headers: vec![],
+        body: "<Error><Code>SlowDown</Code></Error>".into(),
+    };
+    let (endpoint, task) = server(vec![failure(), failure(), failure()]);
+    let mut c = config(&endpoint, &["--list-type=ext-v1"]);
+    c.sdk_max_retries = 2;
+    c.http_timeout = Duration::from_secs(10);
+    let s = store(&endpoint, &c);
+    let started = std::time::Instant::now();
+    assert!(
+        matches!(s.list("", None, None).await, Err(Error::Backend { code, .. }) if code == "SlowDown")
+    );
+    assert!(started.elapsed() >= Duration::from_millis(1500));
+    assert_eq!(task.join().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn extension_honors_retry_after_before_recovering() {
+    let (endpoint, task) = server(vec![
+        Reply {
+            status: 429,
+            headers: vec![("Retry-After", "2")],
+            body: "<Error><Code>SlowDown</Code></Error>".into(),
+        },
+        xml(
+            "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>prefix/recovered</Key><Size>7</Size></Contents></ListBucketResult>",
+        ),
+    ]);
+    let mut c = config(&endpoint, &["--list-type=ext-v1"]);
+    c.sdk_max_retries = 1;
+    c.http_timeout = Duration::from_secs(10);
+    let s = store(&endpoint, &c);
+    let started = std::time::Instant::now();
+    let page = s.list("", None, None).await.unwrap();
+    assert_eq!(page.objects[0].key, "recovered");
+    assert!(started.elapsed() >= Duration::from_secs(2));
+    assert_eq!(task.join().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn extension_retry_after_cannot_extend_the_five_second_operation_budget() {
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", server.server_addr());
+    let task = std::thread::spawn(move || {
+        server
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap()
+            .unwrap()
+            .respond(
+                Response::from_string("<Error><Code>SlowDown</Code></Error>")
+                    .with_status_code(429)
+                    .with_header(Header::from_bytes("Retry-After", "60").unwrap()),
+            )
+            .unwrap();
+        assert!(
+            server
+                .recv_timeout(Duration::from_secs(6))
+                .unwrap()
+                .is_none(),
+            "no retry before Retry-After"
+        );
+    });
+    let mut c = config(&endpoint, &["--list-type=ext-v1"]);
+    c.sdk_max_retries = 2;
+    c.http_timeout = Duration::from_secs(30);
+    let s = store(&endpoint, &c);
+    let result = tokio::time::timeout(Duration::from_secs(7), s.list("", None, None)).await;
+    task.join().unwrap();
+    assert!(
+        matches!(result, Ok(Err(Error::Timeout(_)))),
+        "five second deadline: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn metadata_deadline_bounds_silent_list_and_head_without_waiting_for_http_timeout() {
+    for operation in ["ext-v1", "1", "2", "HEAD", "GET"] {
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", server.server_addr());
+        let (release, wait) = std::sync::mpsc::channel();
+        let task = std::thread::spawn(move || {
+            let request = server
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap()
+                .unwrap();
+            wait.recv_timeout(Duration::from_secs(9)).unwrap();
+            drop(request);
+        });
+        let mut c = config(&endpoint, &[]);
+        c.http_timeout = Duration::from_secs(30);
+        c.list_type = Some(match operation {
+            "ext-v1" => geesefs_rs::config::ListType::Extended,
+            "2" => geesefs_rs::config::ListType::V2,
+            _ => geesefs_rs::config::ListType::V1,
+        });
+        let s = store(&endpoint, &c);
+        let result = tokio::time::timeout(Duration::from_secs(7), async {
+            if operation == "HEAD" {
+                s.head("item").await.map(|_| ())
+            } else if operation == "GET" {
+                s.read_range(
+                    "item",
+                    0,
+                    1,
+                    &geesefs_rs::backend::s3::ObjectHead {
+                        size: 1,
+                        etag: "generation".into(),
+                        ..Default::default()
+                    },
+                    &Budget::new(16).unwrap(),
+                )
+                .await
+                .map(|_| ())
+            } else {
+                s.list("", None, None).await.map(|_| ())
+            }
+        })
+        .await;
+        release.send(()).unwrap();
+        task.join().unwrap();
+        assert!(
+            matches!(result, Ok(Err(Error::Timeout(_)))),
+            "{operation} five second deadline: {result:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn extension_retry_count_is_configured_and_access_errors_are_never_retried() {
     let (endpoint, task) = server(vec![
         Reply {

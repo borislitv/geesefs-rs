@@ -5,6 +5,15 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-08: consolidate merged corrections in release 0.1.10
+
+Publish the merged extended-list resume and Go-compatible symlink-size corrections
+from the main branch as a new immutable release. Advance only the package version
+and its lockfile entry; dependencies and filesystem behavior are unchanged from
+0.1.9. Retain existing releases and package the successful exact-source CI build
+with checksums, build provenance and complete locked dependency notices.
+Compatibility and comparative performance acceptance remain open.
+
 ## 2026-11-08: Go-compatible symlink size and release 0.1.9
 
 Report the stored object-body size for symlinks, matching Go 0.43.9, instead of

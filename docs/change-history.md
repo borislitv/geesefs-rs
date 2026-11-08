@@ -5,6 +5,35 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-08: Go-compatible symlink size and release 0.1.9
+
+Report the stored object-body size for symlinks, matching Go 0.43.9, instead of
+substituting the decoded target length. Newly created metadata-only symlinks
+therefore have size zero before and after fsync/reload. Existing symlink objects
+with nonempty bodies retain their actual object size. Target metadata and readlink
+are unchanged. Public filesystem regressions first reproduced both size overrides;
+they cover HEAD, extended listings and durable creation/reload.
+
+Advance the package and lockfile together for this correction and the extended
+listing resume fix below. Preserve all previously published releases and assets;
+package the exact-source successful default-jemalloc CI executable with checksums,
+build provenance and complete locked dependency notices. These fixes do not close
+compatibility or comparative performance acceptance.
+
+## 2026-11-08: preserve exclusive resume bounds in extended listings
+
+The ext-v1 adapter discarded the exclusive key bound supplied by bounded directory
+reads. A later chunk could restart from the beginning and repeatedly fetch already
+visited pages. Pass the confined, percent-encoded `start-after` through the existing
+SDK signing path. An opaque continuation token still takes precedence. Standard
+fallback, metadata, cache freshness and backend error handling remain unchanged.
+
+The loopback wire regression first failed for the missing extended-list bound;
+it covers mounted-prefix confinement and special characters alongside v1/v2.
+Existing token-precedence and directory-page contracts remain applicable. This
+corrects redundant listing work; it does not establish comparative performance
+or explain every slow traversal.
+
 ## 2026-11-08: keep tag checks separate from snapshot publication
 
 A version-tag push rebuilt an already published source commit and attempted to

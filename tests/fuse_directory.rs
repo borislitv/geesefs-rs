@@ -606,6 +606,7 @@ fn native_writer_metadata_xattrs_links_and_removal_preserve_committed_bytes() {
         std::fs::rename(&source, &moved).unwrap();
         let link = directory.join("link");
         std::os::unix::fs::symlink("moved", &link).unwrap();
+        assert_eq!(std::fs::symlink_metadata(&link).unwrap().len(), 0);
         assert_eq!(std::fs::read_link(&link).unwrap(), Path::new("moved"));
         assert_eq!(std::fs::read(&link).unwrap(), expected);
         let fifo = directory.join("fifo");
@@ -628,6 +629,45 @@ fn native_writer_metadata_xattrs_links_and_removal_preserve_committed_bytes() {
         std::fs::remove_dir(&directory).unwrap();
     });
     assert!(store.objects.lock().unwrap().is_empty());
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Linux FUSE fixture"]
+fn native_symlink_sizes_match_object_bodies_and_preserve_readlink() {
+    let store = MemoryStore::new();
+    for (name, body) in [("empty", b"".as_slice()), ("body", b"retained".as_slice())] {
+        store.seed(name, body);
+        store
+            .objects
+            .lock()
+            .unwrap()
+            .get_mut(name)
+            .unwrap()
+            .metadata
+            .insert("--symlink-target".into(), "missing-target".into());
+    }
+    mounted(store.filesystem(16), |path| {
+        for (name, expected) in [("empty", 0), ("body", 8)] {
+            let link = path.join(name);
+            assert_eq!(std::fs::symlink_metadata(&link).unwrap().len(), expected);
+            assert_eq!(
+                std::fs::read_link(&link).unwrap(),
+                Path::new("missing-target")
+            );
+        }
+        let link = path.join("created");
+        std::os::unix::fs::symlink("empty", &link).unwrap();
+        assert_eq!(std::fs::symlink_metadata(&link).unwrap().len(), 0);
+        assert_eq!(std::fs::read_link(&link).unwrap(), Path::new("empty"));
+        std::fs::File::open(path).unwrap().sync_all().unwrap();
+    });
+    mounted(store.filesystem(16), |path| {
+        let link = path.join("created");
+        assert_eq!(std::fs::symlink_metadata(&link).unwrap().len(), 0);
+        assert_eq!(std::fs::read_link(&link).unwrap(), Path::new("empty"));
+    });
+    assert_eq!(store.bytes("created"), b"");
+    assert_eq!(store.bytes("body"), b"retained");
 }
 
 #[test]

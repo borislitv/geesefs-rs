@@ -915,7 +915,6 @@ impl Filesystem {
                 state
                     .metadata
                     .insert(self.config.symlink_attr.clone(), target.to_vec());
-                state.size = target.len() as u64;
             }
             self.prepare_metadata(&mut state);
             ns.track_dirty(node.ino, &state);

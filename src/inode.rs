@@ -163,13 +163,6 @@ impl Inode {
             .and_then(|b| parse_integer(b))
             .and_then(|v| u32::try_from(v).ok())
             .unwrap_or(0);
-        let size = if mode & libc::S_IFMT == libc::S_IFLNK {
-            metadata
-                .get(&config.symlink_attr)
-                .map_or(size, |v| v.len() as u64)
-        } else {
-            size
-        };
         Self {
             ino,
             directory_epoch: AtomicU64::new(0),

@@ -68,7 +68,7 @@ async fn absent_standard_metadata_never_claims_a_regular_file_type() {
     let fs = filesystem(&store);
     let node = fs.lookup(1, "link").await.unwrap();
     assert_eq!(node.attr().kind, fuser::FileType::Symlink);
-    assert_eq!(node.attr().size, 6);
+    assert_eq!(node.attr().size, 0);
     assert_eq!(*store.head_keys.lock().unwrap(), ["link"]);
 }
 

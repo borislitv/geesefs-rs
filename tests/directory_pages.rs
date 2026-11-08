@@ -113,7 +113,7 @@ async fn page_remainders_still_refresh_expired_unconsumed_types() {
     assert_eq!(remainder.entries.len(), 2);
     assert_eq!(remainder.entries[0].name, "b");
     assert_eq!(remainder.entries[0].kind, fuser::FileType::Symlink);
-    assert_eq!(fs.node(remainder.entries[0].ino).unwrap().attr().size, 6);
+    assert_eq!(fs.node(remainder.entries[0].ino).unwrap().attr().size, 1);
     assert_eq!(remainder.entries[1].name, "c");
     assert_eq!(remainder.entries[1].kind, fuser::FileType::RegularFile);
     assert_eq!(fs.node(remainder.entries[1].ino).unwrap().attr().size, 1);
@@ -328,7 +328,7 @@ async fn cached_page_rechecks_expired_child_metadata() {
         let attr = fs.node(fresh.ino).unwrap().attr();
         if fresh.name == "b" {
             assert_eq!(fresh.kind, fuser::FileType::Symlink);
-            assert_eq!(attr.size, 6);
+            assert_eq!(attr.size, 7);
         } else {
             assert_eq!(fresh.kind, fuser::FileType::RegularFile);
             assert_eq!(

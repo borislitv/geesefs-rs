@@ -76,6 +76,7 @@ pub struct MemoryStore {
     pub active_heads: AtomicUsize,
     pub peak_heads: AtomicUsize,
     pub list_calls: AtomicUsize,
+    pub list_requests: Mutex<Vec<(String, Option<String>)>>,
     pub fail_list: AtomicBool,
     pub failed_list_prefix: Mutex<Option<String>>,
     patch_pause: Mutex<Pause>,
@@ -600,6 +601,10 @@ impl Store for MemoryStore {
         token: Option<&str>,
     ) -> Result<ListPage> {
         self.list_calls.fetch_add(1, Ordering::Relaxed);
+        self.list_requests
+            .lock()
+            .unwrap()
+            .push((prefix.into(), delimiter.map(str::to_owned)));
         if self.fail_list.load(Ordering::Relaxed)
             || self.failed_list_prefix.lock().unwrap().as_deref() == Some(prefix)
         {

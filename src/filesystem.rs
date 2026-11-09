@@ -43,6 +43,7 @@ pub struct Filesystem {
     upload_admission: write::UploadAdmission,
     metadata_slots: Arc<Semaphore>,
     directory_pages: moka::sync::Cache<(u64, u64, String, usize), Arc<DirectoryPage>>,
+    subtree_pages: moka::sync::Cache<(u64, String), Arc<SubtreePage>>,
     preloaded_directories: moka::sync::Cache<u64, std::time::Instant>,
     closing: AtomicBool,
     read_metrics: crate::metrics::ReadMetrics,
@@ -52,6 +53,13 @@ pub struct Filesystem {
 struct DirectoryPage {
     fetched: std::time::Instant,
     entries: Vec<DirEntry>,
+}
+
+// One bounded flat response, shared by the complete directories it covers.
+// The namespace epoch invalidates speculative ranges on local name changes.
+struct SubtreePage {
+    fetched: Instant,
+    page: crate::backend::extended_list::ListPage,
 }
 
 impl DirectoryPage {
@@ -356,6 +364,11 @@ impl Filesystem {
             directory_pages: moka::sync::Cache::builder()
                 .max_capacity(config.entry_limit)
                 .weigher(|_, page: &Arc<DirectoryPage>| page.entries.len().max(1) as u32)
+                .build(),
+            subtree_pages: moka::sync::Cache::builder()
+                .max_capacity(config.entry_limit)
+                .weigher(|_, page: &Arc<SubtreePage>| page.page.objects.len().max(1) as u32)
+                .time_to_live(config.stat_cache_ttl.max(Duration::from_nanos(1)))
                 .build(),
             preloaded_directories: moka::sync::Cache::new(config.entry_limit),
             closing: AtomicBool::new(false),
@@ -1751,7 +1764,7 @@ impl Filesystem {
         resume_after: &str,
     ) -> Result<DirectoryRemainder> {
         let fetched = std::time::Instant::now();
-        let snapshot = {
+        let mut snapshot = {
             let ns = self.lock_namespace();
             let snapshot = self.directory_snapshot(&ns, ino, resolve_types, fetched)?;
             if resolve_types
@@ -1765,8 +1778,18 @@ impl Filesystem {
         let mut selected = self
             .local_directory_entries(&snapshot.prefix, after, limit)
             .await;
-        self.remote_directory_entries(&snapshot.prefix, after, limit, fetched, &mut selected)
-            .await?;
+        let slurped = if resolve_types && !self.config.stat_cache_ttl.is_zero() && limit > 0 {
+            self.subtree_directory_entries(&snapshot.prefix, after, limit, &mut selected)
+                .await?
+        } else {
+            None
+        };
+        if let Some(fetched) = slurped {
+            snapshot.fetched = fetched;
+        } else {
+            self.remote_directory_entries(&snapshot.prefix, after, limit, fetched, &mut selected)
+                .await?;
+        }
         // Standard LIST cannot supply a safe concrete fuser type. Resolve only
         // this bounded page; extended authoritative metadata avoids these HEADs.
         if resolve_types {
@@ -1906,6 +1929,127 @@ impl Filesystem {
             }
             tokio::task::yield_now().await;
         }
+    }
+
+    async fn subtree_directory_entries(
+        &self,
+        prefix: &str,
+        after: &str,
+        limit: usize,
+        selected: &mut DirectorySelection,
+    ) -> Result<Option<Instant>> {
+        let epoch = self.lock_namespace().epoch;
+        let key = (epoch, prefix.to_owned());
+        let cached = self.subtree_pages.get(&key).filter(|page| {
+            page.fetched.elapsed() < self.config.stat_cache_ttl && {
+                let ns = self.lock_namespace();
+                page.page.objects.iter().all(|object| {
+                    let Some(relative) = object.key.strip_prefix(prefix) else {
+                        return true;
+                    };
+                    let name = relative.split('/').next().unwrap_or("");
+                    ns.named(&format!("{prefix}{name}")).is_none_or(|node| {
+                        let state = node.state.lock().unwrap();
+                        state.version > state.durable
+                            || state.fetched.elapsed() < self.config.stat_cache_ttl
+                    })
+                })
+            }
+        });
+        let page = if let Some(page) = cached {
+            page
+        } else {
+            // Go 0.43.9: one flat page at the start of readdir, then ordinary
+            // delimiter pages if that response does not cover this directory.
+            if !after.is_empty() {
+                return Ok(None);
+            }
+            let fetched = Instant::now();
+            let page = self
+                .store
+                .list_after(
+                    "",
+                    None,
+                    None,
+                    (!prefix.is_empty()).then(|| prefix.trim_end_matches('/')),
+                )
+                .await?;
+            if !page.common_prefixes.is_empty() {
+                return Err(Error::InvalidResponse(
+                    "flat listing returned common prefixes".into(),
+                ));
+            }
+            let last = page
+                .objects
+                .iter()
+                .map(|object| object.key.as_str())
+                .max()
+                .unwrap_or("");
+            let mut directories = std::collections::BTreeSet::from([prefix.to_owned()]);
+            'objects: for object in &page.objects {
+                for (slash, _) in object.key.match_indices('/') {
+                    if directories.len() >= crate::backend::extended_list::MAX_PAGE_ENTRIES {
+                        break 'objects;
+                    }
+                    directories.insert(object.key[..=slash].to_owned());
+                }
+            }
+            directories.retain(|directory| {
+                directory.as_str() >= prefix
+                    && (page.next_token.is_none()
+                        || !directory.is_empty()
+                            && format!("{}0", directory.trim_end_matches('/')).as_str() <= last)
+            });
+            let page = Arc::new(SubtreePage { fetched, page });
+            // Do not publish speculative siblings across a concurrent mutation.
+            if self.lock_namespace().epoch == epoch {
+                for directory in &directories {
+                    self.subtree_pages
+                        .insert((epoch, directory.clone()), page.clone());
+                }
+                self.subtree_pages.run_pending_tasks();
+            }
+            if !directories.contains(prefix) {
+                return Ok(None);
+            }
+            page
+        };
+        let mut remote = DirectorySelection::new();
+        for object in &page.page.objects {
+            let Some(relative) = object.key.strip_prefix(prefix) else {
+                continue;
+            };
+            let (name, metadata) = if let Some((directory, _)) = relative.split_once('/') {
+                if !direct_directory_name(directory) {
+                    continue;
+                }
+                let marker = format!("{prefix}{directory}/");
+                let metadata = if object.key == marker {
+                    listed_object(object.clone(), page.fetched).1
+                } else {
+                    DirectoryMetadata {
+                        directory: true,
+                        head: None,
+                        known: true,
+                        fetched: page.fetched,
+                    }
+                };
+                (directory, metadata)
+            } else {
+                (relative, listed_object(object.clone(), page.fetched).1)
+            };
+            if direct_directory_name(name) && name > after {
+                remote.entry(name.to_owned()).or_insert(metadata);
+            }
+        }
+        let mut ns = self.lock_namespace();
+        for (name, metadata) in remote {
+            if !ns.hidden(&format!("{prefix}{name}")) {
+                selected.entry(name).or_insert(metadata);
+                trim_directory_selection(selected, limit);
+            }
+        }
+        Ok(Some(page.fetched))
     }
 
     async fn remote_directory_entries(

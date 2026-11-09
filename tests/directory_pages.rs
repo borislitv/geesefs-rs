@@ -175,8 +175,8 @@ async fn bounded_directory_chunks_resume_after_names_instead_of_rescanning_old_p
     assert_eq!(names, ["a", "b", "c", "d", "e", "f", "g"]);
     assert_eq!(
         store.list_calls.load(Ordering::Relaxed),
-        5,
-        "each bounded chunk and the final empty chunk need only their next backend page"
+        6,
+        "one truncated flat attempt, then one delimiter page per chunk including EOF"
     );
 }
 
@@ -232,7 +232,11 @@ async fn repeated_directory_pages_keep_names_types_and_avoid_relisting() {
             assert_eq!(fs.node(entry.ino).unwrap().attr().size, 1);
         }
     }
-    assert_eq!(store.list_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        store.list_calls.load(Ordering::SeqCst),
+        1,
+        "one flat page serves both bounded chunks"
+    );
 }
 
 #[tokio::test]
@@ -279,7 +283,11 @@ async fn evicted_listing_inodes_are_resolved_again_instead_of_returning_dead_ids
         assert_eq!(fs.node(entry.ino).unwrap().attr().size, 1);
     }
     assert_eq!(held.attr().size, 1);
-    assert_eq!(store.list_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        store.list_calls.load(Ordering::SeqCst),
+        1,
+        "fresh flat metadata recreates evicted identities without another LIST"
+    );
 }
 
 #[tokio::test]

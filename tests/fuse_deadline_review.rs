@@ -191,6 +191,7 @@ fn readdirplus_overlaps_directory_metadata_and_preserves_marker_attributes_and_r
         config.max_requests = 2;
         config.request_timeout = Duration::from_secs(5);
     });
+    store.standard_listing.store(true, Ordering::Relaxed);
     for name in ["a", "b", "c", "d"] {
         store.seed(&format!("{name}/"), b"");
         store
@@ -255,6 +256,7 @@ fn readdirplus_metadata_is_globally_bounded_and_deadlines_cancel_all_work() {
         config.max_requests = 2;
         config.request_timeout = Duration::from_millis(250);
     });
+    store.standard_listing.store(true, Ordering::Relaxed);
     let mut parents = Vec::new();
     for parent in ["left", "right"] {
         store.seed(&format!("{parent}/"), b"");
@@ -403,6 +405,7 @@ fn readdirplus_metadata_error_cancels_siblings_without_lookup_references() {
         config.max_requests = 2;
         config.request_timeout = Duration::from_secs(5);
     });
+    store.standard_listing.store(true, Ordering::Relaxed);
     store.seed("a/", b"");
     store.seed("b/", b"");
     let gate = Arc::new(tokio::sync::Semaphore::new(0));

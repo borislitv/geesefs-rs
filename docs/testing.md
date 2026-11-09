@@ -5,6 +5,34 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Bounded subtree listing — 2026-11-09 (unreleased)
+
+`tests/subtree_listing.rs` checks a complete small traversal and marker ownership
+with exactly one flat LIST and no HEADs. Before the change these require nine and
+two LISTs respectively. Further fixtures check incomplete-page fallback, sibling
+warming without sealing an ancestor, standard-metadata HEADs, expired attributes
+and error propagation/retry. Deliberately sealing a truncated response as complete
+fails the independent expected-name assertion; restore the range check afterward.
+
+Existing directory-page tests retain lexical resume, eviction, local mutation and
+in-flight rename/removal checks. Their request-count expectations distinguish the
+new single flat attempt from delimiter continuation. HEAD deadline/concurrency
+fixtures explicitly omit LIST metadata so they continue exercising real HEADs.
+
+The opt-in `native_du_traverses_a_small_subtree_with_one_flat_page` mounts a
+disposable in-memory namespace, checks exact allocated bytes, readlink and payload
+bytes, and requires one flat LIST with no HEAD in that namespace. Unrelated native
+mount observer probes are excluded by the synthetic namespace boundary.
+
+```bash
+cargo test --locked --test subtree_listing --test directory_pages --test directory_resolution --test lookup_preload
+cargo test --locked --test fuse_directory native_du_traverses_a_small_subtree_with_one_flat_page -- --ignored --exact
+cargo test --locked --all-targets --all-features --no-fail-fast
+```
+
+Request-count reduction in these synthetic fixtures is not a full-tree performance
+or memory acceptance measurement. Directory block accounting is unchanged.
+
 ## Severe backend context — 2026-11-07 (unreleased)
 
 `severe_replies_retain_backend_status_without_debug_history` drives real fuser

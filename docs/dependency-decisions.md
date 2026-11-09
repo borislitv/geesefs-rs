@@ -22,6 +22,54 @@ Sources: [Go SDK retryer](https://github.com/aws/aws-sdk-go/blob/v1.55.8/aws/cli
 [Go configuration](https://github.com/yandex-cloud/geesefs/blob/80c214ef14f620d93407454fc76ca01dd71fa25f/core/cfg/conf_s3.go),
 [Rust RetryConfig API](https://docs.rs/aws-smithy-types/1.9.0/aws_smithy_types/retry/struct.RetryConfig.html).
 
+## Selective disk payload cache qualification — 2026-11-09
+
+Evaluate released [Foyer 0.22.6](https://docs.rs/foyer/0.22.6/foyer/) (Apache-2.0)
+first as a development-only dependency. Its supported disk-only writer, single-file
+device, region reclamation, checksum validation and recovery avoid a custom disk
+format or one inode per small payload block. **The released engine fails the
+reinsertion/recovery gate and is not selected for runtime.**
+Qualification must establish memory ownership, recency adaptation, fixed-capacity
+reuse, error/cancellation behavior and persistent inventory costs. Default FIFO
+eviction is not the agreed approximate-LRU policy. The application retains its
+existing charged L1; missing TTL support is irrelevant because payload TTL was
+explicitly removed. Keep raw receipts outside tracked source.
+
+`tests/disk_cache_engine.rs` qualifies the public API with a 16-MiB container,
+1-MiB regions, 128-KiB records, 512-KiB configured buffer pool and one
+flusher/reclaimer. The disk-only roundtrip/reopen and fixed-container recycling
+checks pass. Default eviction loses a continuously read record at cold-scan step
+106. The test-only `StorageFilterCondition`/`EvictionPicker` adapter uses the
+already selected `lru` crate for at most 64 reference hashes and limits copied
+records to one quarter of each reclaimed region. The hot record survives the
+scan, and becomes evictable when access stops. This does not establish an
+aggregate in-flight memory bound or an accepted runtime policy.
+
+The combined persistence test fails: after inserting keys 0–255 while repeatedly
+reading key 0, keys `[0, 210, 211, 212, 213, 214]` are readable after `close()` but
+missing after reopen. This reproduces on both tmpfs and local ext4. The four-test
+qualification result is **three passed, one failed**; the failing test is retained
+without ignoring it or changing its expected behavior.
+
+The crate's recorded upstream revision is
+`dd46245c45071d1036331e4e2c48e15386017b96` (tag `v0.22.6`).
+[Reinsertion preserves the original sequence](https://github.com/foyer-rs/foyer/blob/dd46245c45071d1036331e4e2c48e15386017b96/foyer-storage/src/engine/block/reclaimer.rs#L137-L159),
+whereas [recovery stops a region when sequences decrease](https://github.com/foyer-rs/foyer/blob/dd46245c45071d1036331e4e2c48e15386017b96/foyer-storage/src/engine/block/recover.rs#L164-L198).
+An isolated checkout at that exact revision reproduces the failure. Temporarily
+removing only the decreasing-sequence cutoff makes the same test pass; restoring
+the source restores the same missing-key failure. The checkout was restored.
+This is a causal diagnostic, **not a safe fix**: the cutoff also distinguishes
+old region tails, and simply removing it has not established crash/reuse safety.
+No fork, patched dependency or cache-format workaround is adopted.
+
+At inspection, [v0.22.6 remains the latest release](https://github.com/foyer-rs/foyer/releases/tag/v0.22.6).
+The newer [recovery optimization](https://github.com/foyer-rs/foyer/commit/4e5ca058d3552d963cdc47289094bdd118ea4584)
+addresses [large-index costs](https://github.com/foyer-rs/foyer/issues/1295), but retains
+the decreasing-sequence cutoff; it does not resolve this incompatibility.
+Resolve reinsertion/recovery semantics upstream or qualify another maintained
+engine before stage 2. Stalled-I/O ownership, collision/corruption handling,
+terabyte-scale recovery and filesystem/performance acceptance remain unverified.
+
 ## Selected mechanisms
 
 | Concern | Selection and reason |

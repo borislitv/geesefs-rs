@@ -57,6 +57,7 @@ tokio-util = { version = "=0.7.20", features = ["compat"] }
 tracing-appender = "=0.2.5"
 
 [dev-dependencies]
+foyer = "=0.22.6"
 crc32fast = "1"
 rcgen = "0.14"
 tempfile = "3"

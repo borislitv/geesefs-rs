@@ -5,6 +5,14 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-09: release 0.1.11 preparation
+
+Advance the package and lockfile together for bounded subtree prefetch. Package
+only the successful exact-source default-jemalloc CI build, including checksums,
+build provenance and complete locked dependency notices. Retain earlier immutable
+releases. Dependencies, timeouts and directory block accounting are unchanged.
+Publication does not close compatibility or comparative performance acceptance.
+
 ## 2026-11-09: prefetch one flat page at the start of directory reads
 
 Delimiter-only directory reads repeated LIST for each small descendant. Follow

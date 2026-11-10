@@ -349,6 +349,9 @@ pub struct EffectiveBudgets {
     pub payload_limit_bytes: usize,
     pub data_shared_bytes: usize,
     pub disk_cache_funding_bytes: usize,
+    /// Upper bound including revocable idle flush loans. With Ready L2,
+    /// selected victims demote before loans, so selected residency may exclude
+    /// that lane even though this shared policy upper bound is unchanged.
     pub read_cache_policy_bytes: usize,
     pub read_cache_loaned_bytes: usize,
     pub ingress_bytes: usize,
@@ -2202,12 +2205,9 @@ impl Filesystem {
     async fn admit_pressured(&self, size: usize) -> Result<crate::budget::Reservation> {
         // Reclaim only as much old cache ownership as admission needs.
         // Pinned borrowers retain their permits; FIFO waiters stay ahead.
-        {
-            let cache = &self.cache;
-            while self.try_cache_loan(cache) || self.evict_cache() {
-                if let Ok(reservation) = self.data.try_reserve(size) {
-                    return Ok(reservation);
-                }
+        while self.reclaim_read_cache() {
+            if let Ok(reservation) = self.data.try_reserve(size) {
+                return Ok(reservation);
             }
         }
         if let Ok(reservation) = self.data.try_reserve(size) {
@@ -2230,10 +2230,7 @@ impl Filesystem {
                     biased;
                     result = &mut reservation => return result,
                     _ = async {
-                        let reclaimed = {
-                            let cache = &self.cache;
-                            self.try_cache_loan(cache) || self.evict_cache()
-                        };
+                        let reclaimed = self.reclaim_read_cache();
                         if !reclaimed {
                             published.await;
                         }
@@ -2245,12 +2242,26 @@ impl Filesystem {
         .map_err(|_| Error::Timeout("payload admission"))?
     }
 
-    fn try_cache_loan(&self, cache: &crate::cache::ReadCache) -> bool {
+    fn reclaim_read_cache(&self) -> bool {
+        // Loan-first reclamation permanently hides byte-pressure victims from
+        // L2: subsequent evictions remove loaned owners, which must not demote.
+        // Prefer an eligible capacity victim before transferring its charge.
+        if self.config.disk_cache_regex.is_some()
+            && let Some(key) = self.cache.loan_candidate()
+            && let Ok(node) = self.node(key.0)
+            && let Some(disk) = self.disk_read(&node, key.1)
+            && disk.cache.status().state() == crate::disk_cache::State::Ready
+            && let Some(victim) = self.cache.unloaned_capacity_victim(key)
+        {
+            self.demote_capacity(victim);
+            return true;
+        }
         // Never wait for optional capacity or lend while an upload/body owns it.
-        let Ok(_activity) = self.flush_activity.try_write() else {
-            return false;
-        };
-        cache.loan_lru(&self.flush_lane)
+        let loaned = self
+            .flush_activity
+            .try_write()
+            .is_ok_and(|_activity| self.cache.loan_lru(&self.flush_lane));
+        loaned || self.evict_cache()
     }
 
     pub async fn write(&self, ino: u64, offset: u64, bytes: &[u8]) -> Result<usize> {

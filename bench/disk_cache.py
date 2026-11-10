@@ -1051,6 +1051,35 @@ def evidence_work(output):
                 shutil.copytree(directory, output / directory.name)
 
 
+def run_matrix_cases(args, config, report, binaries, fixtures, work, group_root):
+    """Retain every failed case and finish independent cases, never select wins.
+
+    Source changes, aggregate deadlines or failed owned-resource cleanup remain
+    fatal. An unmet warm-state gate is not permission to discard the whole arm.
+    """
+    for record in cases(config, args.pairs, args.controls):
+        current = dataset_config(config, record['state'], record['workload'])
+        expected_arm = 'baseline' if record['arm'] == 'control' else record['arm']
+        if integration.sha_file(binaries[record['arm']]) != report['provenance'][expected_arm]['binary_sha256']:
+            raise RuntimeError('frozen executable changed during the matrix')
+        try:
+            measured_run(binaries[record['arm']], fixtures[current['dataset_bytes']], work, record, current, group_root, args.output)
+        except compare.BenchmarkDeadline as error:
+            record.update(correctness=False, error=str(error))
+            raise
+        except Exception as error:
+            record.update(correctness=False, error=str(error))
+            # Continue only after the existing mount/worker/cgroup owners have
+            # completed cleanup. Do not accumulate live failed workloads.
+            groups_remain = any(p.is_dir() and p.name.startswith('geesefs-bench-') for p in Path(group_root).iterdir())
+            mounts_remain = any(p.name.endswith('-mount') and os.path.ismount(p) for p in work.iterdir())
+            if groups_remain or mounts_remain:
+                raise RuntimeError('owned benchmark resource cleanup incomplete') from error
+        finally:
+            report['runs'].append(record)
+            (args.output / 'runs.json').write_text(json.dumps(report['runs'], indent=2) + '\n')
+
+
 def execute(args, config, report):
     group_root = compare.cgroup_preflight(args.cgroup_root)
     if integration.command(['git', 'status', '--porcelain', '--', 'src', 'Cargo.toml', 'Cargo.lock'],
@@ -1099,19 +1128,7 @@ def execute(args, config, report):
                                              for size, value in fixtures.items()}
             report['native_checks'] = native_checks(binaries['candidate'], fixtures[config['dataset_bytes']], work, config, group_root, args.output)
             if not args.native_only:
-                for record in cases(config, args.pairs, args.controls):
-                    current = dataset_config(config, record['state'], record['workload'])
-                    try:
-                        expected_arm = 'baseline' if record['arm'] == 'control' else record['arm']
-                        if integration.sha_file(binaries[record['arm']]) != report['provenance'][expected_arm]['binary_sha256']:
-                            raise RuntimeError('frozen executable changed during the matrix')
-                        measured_run(binaries[record['arm']], fixtures[current['dataset_bytes']], work, record, current, group_root, args.output)
-                    except Exception as error:
-                        record.update(correctness=False, error=str(error))
-                        report['runs'].append(record)
-                        raise
-                    report['runs'].append(record)
-                    (args.output / 'runs.json').write_text(json.dumps(report['runs'], indent=2) + '\n')
+                run_matrix_cases(args, config, report, binaries, fixtures, work, group_root)
             if not args.native_only:
                 report.update(summarize(report['runs'], config, args.pairs, args.controls))
             report['native_passed'] = True
@@ -1204,7 +1221,7 @@ def main():
         'bench/disk_cache.py', 'bench/accounting.py', 'bench/compare.py', 'bench/paired.py',
         'bench/sealed_s3_fixture.py', 'scripts/integration.py']}
     def expired(_signum, _frame):
-        raise TimeoutError('local disk-cache aggregate deadline exceeded')
+        raise compare.BenchmarkDeadline('local disk-cache aggregate deadline exceeded')
     signal.signal(signal.SIGALRM, expired)
     signal.alarm(args.deadline)
     try:

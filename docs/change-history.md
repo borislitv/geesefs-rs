@@ -5,6 +5,21 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-10: demote eligible byte-pressure victims before loans
+
+A real-file regression reading 48 MiB with a 32-MiB payload budget retained
+10 MiB of idle flush loans but admitted zero L2 records: loan-first pressure
+handling made every later victim ineligible for demotion. Prefer an eligible
+nonloaned capacity victim before borrowing, rechecking identity outside the
+cache lock and the selected candidate again under it. The same fixture now
+persists 266 records and reads the first block after restart without a source GET.
+No budget, queue or required-request wait was added. Disabled/excluded behavior
+and genuine Prepared-to-Ready loan revocation remain separately tested.
+
+This changes selected-data residency policy, not the total admission limit:
+Ready selected victims may no longer use the idle flush lane. Native/paired
+qualification remains necessary; bounded optional drops are still permitted.
+
 ## 2026-11-10: compact canonical metadata and shared keys
 
 Controlled allocation probes confirmed two retained attribute containers per

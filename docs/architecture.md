@@ -143,6 +143,14 @@ ingress reserves. Recovery is asynchronous with source fallback and no inventory
 reset. Owned jobs retain funding/directory ownership past caller cancellation;
 shutdown starts cache teardown even when writer flushing later fails.
 
+Under byte pressure, Ready/eligible nonloaned victims demote before borrowing the
+idle flush lane. Loan-first selection would make subsequent victims ineligible
+and could starve L2 completely. Disabled, excluded and not-yet-Ready paths retain
+loan-first behavior; already loaned owners are always discarded without demotion.
+The published L1 policy capacity is an upper bound including revocable loans,
+not a promise that selected data uses the flush lane in Ready mode. Benchmark
+comparisons must report actual residency/loan counts as well as the funding cut.
+
 Metrics distinguish admission, actual worker completion and caller delivery.
 Region-reclaim callbacks are not per-record eviction counts; funded metadata is
 not measured index heap, and opening-time filesystem allocation is not a live

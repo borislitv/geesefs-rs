@@ -560,7 +560,14 @@ async fn saturated_optional_spill_and_revoked_writer_loans_preserve_fsync_progre
         let dir = tempfile::tempdir().unwrap();
         let mount = tempfile::tempdir().unwrap();
         let store = scoped_store();
-        store.seed("package.rpm", &vec![0x53; 24 * MIB]);
+        // Ready selected victims demote before borrowing idle flush capacity.
+        // Keep ordinary loan/revocation coverage on an excluded object.
+        let key = if saturated {
+            "package.rpm"
+        } else {
+            "package.txt"
+        };
+        store.seed(key, &vec![0x53; 24 * MIB]);
         store.seed("writer.txt", b"old");
         let mut config = configured(dir.path(), mount.path());
         if saturated {
@@ -573,7 +580,7 @@ async fn saturated_optional_spill_and_revoked_writer_loans_preserve_fsync_progre
             config.entry_limit = 1024;
         }
         let fs = attach(config, store.clone()).await;
-        let node = fs.lookup(1, "package.rpm").await.unwrap();
+        let node = fs.lookup(1, key).await.unwrap();
         let writer = fs.lookup(1, "writer.txt").await.unwrap();
         let pending_flush = if saturated {
             // A real upload owns the flush lane, excluding optional L1 loans.
@@ -644,6 +651,120 @@ async fn saturated_optional_spill_and_revoked_writer_loans_preserve_fsync_progre
             budgets.read_cache_policy_bytes + budgets.disk_cache_funding_bytes,
             budgets.data_shared_bytes + budgets.flush_bytes
         );
+        fs.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn selected_loans_from_before_attachment_are_discarded_without_demotion_after_ready() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for revoke_by_fsync in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let store = scoped_store();
+        store.seed("selected.rpm", &vec![0x53; 4 * MIB]);
+        store.seed("pressure.txt", &vec![0x71; 8 * MIB]);
+        store.seed("writer.txt", b"old");
+        let mut config = configured(dir.path(), mount.path());
+        config.entry_limit = 64;
+        config.read_ahead_parallel = READ_BLOCK_BYTES / 1024;
+        // Pre-attachment requests legitimately use loans. Dirty data creates
+        // byte pressure without filling the cache's entry-count upper bound.
+        let fs = Filesystem::new(config.clone(), store.clone()).unwrap();
+        let selected = fs.lookup(1, "selected.rpm").await.unwrap();
+        for offset in (0..4 * MIB).step_by(READ_BLOCK_BYTES) {
+            let block = tokio::time::timeout(
+                DEADLINE,
+                fs.read(selected.ino, offset as u64, READ_BLOCK_BYTES),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(block.as_slice(), &[0x53; READ_BLOCK_BYTES]);
+        }
+        let holder = fs
+            .create(1, "holder", libc::S_IFREG | 0o644, None, 0)
+            .await
+            .unwrap();
+        for offset in 0..17 {
+            tokio::time::timeout(
+                DEADLINE,
+                fs.write(holder.ino, (offset * MIB) as u64, &vec![0x31; MIB]),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        let loaned = fs.effective_budgets().read_cache_loaned_bytes;
+        assert!(
+            loaned > 0,
+            "selected clean owners must actually be loaned before attachment"
+        );
+        assert_eq!(
+            fs.disk_cache_state(),
+            Some(geesefs_rs::disk_cache::State::Prepared)
+        );
+        assert!(fs.disk_cache_stats().is_none());
+        // Releasing disposable dirty extents supplies attachment funding, without
+        // a flush (which would revoke the selected loans before the transition).
+        fs.truncate(holder.ino, 0).unwrap();
+        assert_eq!(fs.effective_budgets().read_cache_loaned_bytes, loaned);
+        let disk = config.disk_cache_config().unwrap().unwrap();
+        std::fs::set_permissions(&disk.directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let prepared = PreparedDiskCache::prepare(&disk.directory, disk.max_bytes).unwrap();
+        tokio::time::timeout(DEADLINE, fs.attach_disk_cache(prepared))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fs.disk_cache_state(),
+            Some(geesefs_rs::disk_cache::State::Ready)
+        );
+        assert_eq!(fs.effective_budgets().read_cache_loaned_bytes, loaned);
+        assert_eq!(fs.disk_cache_stats().unwrap().admitted_demotions, 0);
+
+        if revoke_by_fsync {
+            let writer = fs.lookup(1, "writer.txt").await.unwrap();
+            fs.write(writer.ino, 0, b"committed").await.unwrap();
+            tokio::time::timeout(DEADLINE, fs.fsync(writer.ino))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(store.bytes("writer.txt"), b"committed");
+        } else {
+            // Exactly fill the remaining entry slots, then evict the old loaned
+            // selected prefix. Data-lane headroom excludes byte-pressure
+            // demotions of newer unloaned selected blocks in this branch.
+            let pressure = fs.lookup(1, "pressure.txt").await.unwrap();
+            let entries = 64 - 4 * MIB / READ_BLOCK_BYTES + loaned / READ_BLOCK_BYTES;
+            for index in 0..entries {
+                let block = tokio::time::timeout(
+                    DEADLINE,
+                    fs.read(
+                        pressure.ino,
+                        (index * READ_BLOCK_BYTES) as u64,
+                        READ_BLOCK_BYTES,
+                    ),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(block.as_slice(), &[0x71; READ_BLOCK_BYTES]);
+            }
+        }
+        fs.drain_disk_cache(DEADLINE).await.unwrap();
+        assert_eq!(fs.effective_budgets().read_cache_loaned_bytes, 0);
+        let stats = fs.disk_cache_stats().unwrap();
+        assert_eq!(stats.admitted_demotions, 0);
+        assert_eq!(stats.index_entries, 0);
+        assert_eq!(
+            stats.drops, 0,
+            "loaned victims must not even attempt adapter admission"
+        );
+        assert_eq!(stats.errors, 0);
+        assert_eq!(stats.active_jobs, 0);
+        assert_eq!(stats.copied_bytes, 0);
         fs.shutdown().await.unwrap();
     }
 }

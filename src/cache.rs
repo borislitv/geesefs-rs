@@ -130,16 +130,20 @@ impl State {
 
     fn capacity_victim(&mut self) -> Option<CapacityVictim> {
         let (key, block) = self.entries.pop_lru()?;
+        Some(self.capacity_removed(key, block))
+    }
+
+    fn capacity_removed(&mut self, key: Key, block: Block) -> CapacityVictim {
         self.evictions += 1;
         self.capacity_evictions += 1;
         self.evicted_bytes += block.as_slice().len() as u64;
         self.removed(key, &block);
-        Some(CapacityVictim {
+        CapacityVictim {
             inode: key.0,
             generation: key.1,
             offset: key.2,
             block,
-        })
+        }
     }
 }
 
@@ -329,6 +333,38 @@ impl ReadCache {
 
     pub(crate) fn capacity_victim(&self) -> Option<CapacityVictim> {
         self.state.lock().unwrap().capacity_victim()
+    }
+
+    /// Identity-only hint: eligibility checks must not pin a backing or nest
+    /// namespace/inode locks inside the cache lock.
+    pub(crate) fn loan_candidate(&self) -> Option<(u64, u64, u64)> {
+        self.state
+            .lock()
+            .unwrap()
+            .entries
+            .iter()
+            .rev()
+            .find(|(_, block)| !block.is_loaned())
+            .map(|(key, _)| *key)
+    }
+
+    /// Revalidate the hint after eligibility was checked without cache ownership.
+    /// Older loaned entries cannot release data-lane capacity for this request.
+    pub(crate) fn unloaned_capacity_victim(
+        &self,
+        expected: (u64, u64, u64),
+    ) -> Option<CapacityVictim> {
+        let mut state = self.state.lock().unwrap();
+        let (&key, _) = state
+            .entries
+            .iter()
+            .rev()
+            .find(|(_, block)| !block.is_loaned())?;
+        if key != expected {
+            return None;
+        }
+        let block = state.entries.pop(&key)?;
+        Some(state.capacity_removed(key, block))
     }
 
     pub(crate) fn span_at(&self, inode: u64, generation: u64, offset: u64) -> Option<(u64, usize)> {

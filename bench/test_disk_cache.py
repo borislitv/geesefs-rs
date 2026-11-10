@@ -15,6 +15,65 @@ import disk_cache as disk
 
 
 class Contracts(unittest.TestCase):
+    def test_matrix_retains_failed_case_and_executes_later_independent_arms(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / 'binary'
+            binary.write_bytes(b'frozen-artifact')
+            records = [dict(workload='sequential', state='both_cold', pair=0, arm=arm, mount_id=arm)
+                       for arm in ['baseline', 'candidate', 'control']]
+            report = dict(runs=[], provenance={arm: dict(binary_sha256=disk.hashlib.sha256(b'frozen-artifact').hexdigest())
+                                               for arm in ['baseline', 'candidate']})
+            def measured(*args):
+                record = args[3]
+                if record['arm'] == 'baseline':
+                    raise RuntimeError('owned fixture dependency failed')
+                record.update(correctness=True, independent_mount=True, metrics={'throughput': 7})
+            args = SimpleNamespace(pairs=8, controls=8, output=root)
+            with patch.object(disk, 'cases', return_value=iter(records)), patch.object(disk, 'measured_run', measured):
+                disk.run_matrix_cases(args, disk.example_manifest(), report, {arm: binary for arm in ['baseline', 'candidate', 'control']},
+                                      {128 * disk.MIB: {}}, root, root)
+            saved = json.loads((root / 'runs.json').read_text())
+            self.assertEqual(len(saved), 3)
+            self.assertFalse(saved[0]['correctness'])
+            self.assertEqual(saved[0]['error'], 'owned fixture dependency failed')
+            self.assertTrue(saved[1]['correctness'])
+            self.assertTrue(saved[2]['correctness'])
+            self.assertEqual(saved[2]['metrics']['throughput'], 7)
+
+    def test_matrix_stops_on_deadline_artifact_change_or_incomplete_cleanup(self):
+        for failure in ['deadline', 'artifact', 'cleanup', 'mount-cleanup']:
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                binary = root / 'binary'
+                binary.write_bytes(b'frozen-artifact')
+                records = [dict(workload='sequential', state='both_cold', pair=0, arm=arm, mount_id=arm)
+                           for arm in ['baseline', 'candidate']]
+                report = dict(runs=[], provenance={arm: dict(binary_sha256=disk.hashlib.sha256(b'frozen-artifact').hexdigest())
+                                                   for arm in ['baseline', 'candidate']})
+                if failure == 'artifact':
+                    binary.write_bytes(b'changed-artifact')
+                def measured(*args):
+                    if failure == 'deadline':
+                        raise disk.compare.BenchmarkDeadline('aggregate expired')
+                    (root / ('owned-mount' if failure == 'mount-cleanup' else 'geesefs-bench-owned')).mkdir()
+                    raise RuntimeError('cleanup failed')
+                args = SimpleNamespace(pairs=8, controls=8, output=root)
+                expected = {'deadline': 'aggregate expired', 'artifact': 'frozen executable changed',
+                            'cleanup': 'owned benchmark resource cleanup incomplete',
+                            'mount-cleanup': 'owned benchmark resource cleanup incomplete'}[failure]
+                with patch.object(disk, 'cases', return_value=iter(records)), patch.object(disk, 'measured_run', side_effect=measured) as run, \
+                     patch.object(disk.os.path, 'ismount', return_value=failure == 'mount-cleanup'):
+                    with self.assertRaisesRegex((RuntimeError, disk.compare.BenchmarkDeadline), expected):
+                        disk.run_matrix_cases(args, disk.example_manifest(), report, {'baseline': binary, 'candidate': binary},
+                                              {128 * disk.MIB: {}}, root, root)
+                self.assertEqual(run.call_count, 0 if failure == 'artifact' else 1)
+                if failure in ['deadline', 'cleanup', 'mount-cleanup']:
+                    saved = json.loads((root / 'runs.json').read_text())
+                    self.assertEqual(len(saved), 1)
+                    self.assertFalse(saved[0]['correctness'])
+                    self.assertEqual(saved[0]['error'], 'aggregate expired' if failure == 'deadline' else 'cleanup failed')
+
     def test_population_has_eight_identical_io_rounds_per_role_not_extra_measured_pairs(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

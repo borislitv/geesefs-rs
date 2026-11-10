@@ -66,7 +66,7 @@ struct DirectoryPage {
 struct SubtreePage {
     _metadata_charge: crate::metadata_budget::MetadataCharge,
     fetched: Instant,
-    page: crate::backend::extended_list::ListPage,
+    objects: Vec<(crate::metadata_budget::SharedKey, DirectoryMetadata)>,
 }
 
 impl DirectoryPage {
@@ -103,12 +103,51 @@ impl DirectoryPage {
 struct DirectoryMetadata {
     _metadata_charge: crate::metadata_budget::MetadataCharge,
     directory: bool,
-    head: Option<ObjectHead>,
+    head: Option<crate::backend::metadata::CachedRemote>,
+    last_modified: Option<SystemTime>,
+    key: Option<crate::metadata_budget::SharedKey>,
     known: bool,
     fetched: std::time::Instant,
 }
 
+impl DirectoryMetadata {
+    fn try_clone(
+        &self,
+        budget: &crate::metadata_budget::MetadataBudget,
+        key_len: usize,
+    ) -> Result<Self> {
+        Ok(Self {
+            _metadata_charge: budget.charge(std::mem::size_of::<Self>() + key_len)?,
+            directory: self.directory,
+            head: self.head.clone(),
+            last_modified: self.last_modified,
+            key: self.key.clone(),
+            known: self.known,
+            fetched: self.fetched,
+        })
+    }
+}
+
 type DirectorySelection = BTreeMap<String, DirectoryMetadata>;
+
+fn share_listed_owners(
+    ns: &Namespace,
+    key: &mut crate::metadata_budget::SharedKey,
+    entry: &mut DirectoryMetadata,
+) {
+    if let Some(node) = ns.named(key) {
+        let state = node.state.lock().unwrap();
+        *key = state.key.clone();
+        entry.key = Some(key.clone());
+        if let (Some(cached), Some(listed)) = (&state.remote, &entry.head)
+            && cached.size == listed.size
+            && cached.etag == listed.etag
+            && cached.metadata == listed.metadata
+        {
+            entry.head = Some(cached.clone());
+        }
+    }
+}
 
 struct DirectorySnapshot {
     node: Arc<Inode>,
@@ -177,14 +216,15 @@ fn trim_directory_selection(selected: &mut DirectorySelection, limit: usize) {
 }
 
 fn listed_object(
-    object: &crate::backend::extended_list::ListedObject,
+    mut object: crate::backend::extended_list::ListedObject,
     fetched: std::time::Instant,
     budget: &crate::metadata_budget::MetadataBudget,
-) -> Result<(String, DirectoryMetadata)> {
-    let charge = budget.charge_with(|| {
+) -> Result<(crate::metadata_budget::SharedKey, DirectoryMetadata)> {
+    let mut charge = budget.charge_with(|| {
         std::mem::size_of::<DirectoryMetadata>()
             + 2 * object.key.capacity()
             + std::mem::size_of::<ObjectHead>()
+            + 256
             + object.etag.as_ref().map_or(0, String::capacity)
             + object
                 .metadata
@@ -193,29 +233,36 @@ fn listed_object(
     })?;
     let known =
         object.metadata.is_some() && object.etag.as_ref().is_some_and(|etag| !etag.is_empty());
-    let metadata = object
-        .metadata
-        .as_ref()
-        .and_then(|metadata| crate::backend::metadata::encode_metadata(metadata).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
+    let metadata = crate::backend::metadata::CachedMetadata::from_admitted(
+        object.metadata.unwrap_or_default(),
+        &mut charge,
+    )?;
     let head = ObjectHead {
         size: object.size,
-        etag: object.etag.clone().unwrap_or_default(),
-        metadata,
+        etag: object.etag.unwrap_or_default(),
         last_modified: object
             .last_modified
             .and_then(|date| SystemTime::try_from(date).ok()),
         ..Default::default()
     };
     let directory = object.key.ends_with('/');
+    object.key.truncate(object.key.trim_end_matches('/').len());
+    let head = crate::backend::metadata::CachedRemote::from_admitted(head, metadata, &mut charge)?;
+    let key_len = object.key.len();
+    let key = crate::metadata_budget::SharedKey::from_admitted(object.key, &mut charge)?;
+    charge.resize(budget.estimate(|| {
+        std::mem::size_of::<DirectoryMetadata>() + key_len + crate::metadata_budget::LINKS
+    }))?;
     Ok((
-        object.key.clone(),
+        key.clone(),
         DirectoryMetadata {
             _metadata_charge: charge,
             directory,
             head: Some(head),
+            key: Some(key),
+            last_modified: object
+                .last_modified
+                .and_then(|date| SystemTime::try_from(date).ok()),
             known,
             fetched,
         },
@@ -833,7 +880,7 @@ impl Filesystem {
                 .build(),
             subtree_pages: moka::sync::Cache::builder()
                 .max_capacity(config.entry_limit)
-                .weigher(|_, page: &Arc<SubtreePage>| page.page.objects.len().max(1) as u32)
+                .weigher(|_, page: &Arc<SubtreePage>| page.objects.len().max(1) as u32)
                 .time_to_live(config.stat_cache_ttl.max(Duration::from_nanos(1)))
                 .build(),
             preloaded_directories: moka::sync::Cache::new(config.entry_limit),
@@ -1003,7 +1050,7 @@ impl Filesystem {
         }
         if let Some(node) = ns.named(&key) {
             let mut fresh =
-                Inode::new_admitted(node.ino, key.clone(), directory, head, &self.config, charge)
+                Inode::new_admitted(node.ino, key.clone(), directory, head, &self.config, charge)?
                     .state
                     .into_inner()
                     .unwrap();
@@ -1027,10 +1074,11 @@ impl Filesystem {
         if observed.is_some() {
             return Err(self.again("lookup_binding_removed"));
         }
-        ns.install(&key, |ino| {
-            let node = Inode::new_admitted(ino, key.clone(), directory, head, &self.config, charge);
+        ns.try_install(&key, |ino| {
+            let node =
+                Inode::new_admitted(ino, key.clone(), directory, head, &self.config, charge)?;
             node.state.lock().unwrap().fetched = started;
-            node
+            Ok(node)
         })
     }
 
@@ -1090,33 +1138,23 @@ impl Filesystem {
                 continue;
             }
             child(prefix.trim_end_matches('/'), name)?;
-            let (Some(metadata), Some(etag)) =
-                (object.metadata, object.etag.filter(|etag| !etag.is_empty()))
-            else {
+            if object.metadata.is_none() || object.etag.as_ref().is_none_or(|etag| etag.is_empty())
+            {
                 continue;
-            };
-            let _encoding_charge = self
+            }
+            let (key, entry) = listed_object(object, fetched, &self.metadata)?;
+            let charge = self
                 .metadata
-                .charge_with(|| crate::metadata_budget::encoding_bytes(&metadata))?;
-            let head = ObjectHead {
-                size: object.size,
-                etag,
-                metadata: crate::backend::metadata::encode_metadata(&metadata)?
-                    .into_iter()
-                    .collect(),
-                last_modified: object
-                    .last_modified
-                    .and_then(|date| SystemTime::try_from(date).ok()),
-                ..Default::default()
-            };
-            ns.try_install(&object.key, |ino| {
-                let node = Inode::try_new(
+                .charge_with(|| Inode::metadata_estimate(&key, None))?;
+            ns.try_install(&key, |ino| {
+                let node = Inode::cached_admitted(
                     ino,
-                    object.key.clone(),
+                    key.clone(),
                     false,
-                    Some(head),
+                    entry.head,
+                    entry.last_modified,
                     &self.config,
-                    &self.metadata,
+                    charge,
                 )?;
                 node.state.lock().unwrap().fetched = fetched;
                 Ok(node)
@@ -1204,7 +1242,7 @@ impl Filesystem {
                     .head(&if directory {
                         format!("{key}/")
                     } else {
-                        key.clone()
+                        key.to_string()
                     })
                     .await
                 {
@@ -1264,12 +1302,12 @@ impl Filesystem {
                 Ok(head) => {
                     let mut fresh = Inode::new_admitted(
                         ino,
-                        key,
+                        key.to_string(),
                         directory,
                         head,
                         &self.config,
                         charge.expect("successful refresh admission"),
-                    )
+                    )?
                     .state
                     .into_inner()
                     .unwrap();
@@ -1435,7 +1473,7 @@ impl Filesystem {
             .admit_metadata(Inode::metadata_estimate(&key, None), true)
             .await?;
         let mut candidate =
-            Inode::new_admitted(0, key.clone(), directory, None, &self.config, charge);
+            Inode::new_admitted(0, key.clone(), directory, None, &self.config, charge)?;
         {
             let mut state = candidate.state.lock().unwrap();
             state.admit_metadata(target.map_or(0, |value| {
@@ -1457,7 +1495,7 @@ impl Filesystem {
             if let Some(target) = target {
                 state
                     .metadata
-                    .insert(self.config.symlink_attr.clone(), target.to_vec());
+                    .try_insert(&self.config.symlink_attr, target)?;
             }
             state.settle_metadata();
             self.prepare_metadata(&mut state)?;
@@ -2028,7 +2066,11 @@ impl Filesystem {
                                     &snapshot.key,
                                     at,
                                     amount,
-                                    snapshot.remote.as_ref().expect("clean remote snapshot"),
+                                    &snapshot
+                                        .remote
+                                        .as_ref()
+                                        .expect("clean remote snapshot")
+                                        .read_head(),
                                     &local,
                                     &output,
                                 )
@@ -2373,17 +2415,24 @@ impl Filesystem {
         ns: &mut Namespace,
         key: &str,
         entry: &mut DirectoryMetadata,
-        charge: crate::metadata_budget::MetadataCharge,
+        mut charge: crate::metadata_budget::MetadataCharge,
     ) -> Result<Arc<Inode>> {
         let make = |ino| {
-            let node = Inode::new_admitted(
+            let key = match entry.key.take().filter(|owner| owner.as_str() == key) {
+                Some(owner) => owner,
+                None => {
+                    crate::metadata_budget::SharedKey::from_admitted(key.to_owned(), &mut charge)?
+                }
+            };
+            let node = Inode::cached_admitted(
                 ino,
-                key.into(),
+                key,
                 entry.directory,
                 entry.head.take(),
+                entry.last_modified,
                 &self.config,
                 charge,
-            );
+            )?;
             {
                 let mut state = node.state.lock().unwrap();
                 state.metadata_known = entry.known;
@@ -2540,18 +2589,15 @@ impl Filesystem {
         if !fresh {
             return Ok(None);
         }
-        let charge = self.metadata.charge_with(|| {
-            std::mem::size_of::<DirectoryMetadata>()
-                + name.len()
-                + state
-                    .remote
-                    .as_ref()
-                    .map_or(0, crate::metadata_budget::head_bytes)
-        })?;
+        let charge = self
+            .metadata
+            .charge_with(|| std::mem::size_of::<DirectoryMetadata>() + name.len())?;
         Ok(Some(DirectoryMetadata {
             _metadata_charge: charge,
             directory: file_type(state.mode) == FileType::Directory,
             head: state.remote.clone(),
+            key: Some(state.key.clone()),
+            last_modified: Some(state.mtime),
             known: state.metadata_known,
             fetched: state.fetched,
         }))
@@ -2574,7 +2620,11 @@ impl Filesystem {
                 // Bound each critical section even when every cached child has
                 // expired. Descendants are skipped by ordered seek, not visited.
                 for _ in 0..128 {
-                    let Some((name, _)) = ns.names.range((cursor.clone(), Unbounded)).next() else {
+                    let Some((name, _)) = ns
+                        .names
+                        .range::<str, _>((cursor.as_ref().map(String::as_str), Unbounded))
+                        .next()
+                    else {
                         return Ok(selected);
                     };
                     let Some(relative) = name.strip_prefix(prefix) else {
@@ -2586,10 +2636,10 @@ impl Filesystem {
                         cursor = Included(format!("{prefix}{directory}0"));
                         continue;
                     }
-                    cursor = Excluded(name.clone());
+                    cursor = Excluded(name.to_string());
                     if ns
                         .tombstones
-                        .get(name)
+                        .get(name.as_str())
                         .is_none_or(|until| *until <= Instant::now())
                         && let Some(entry) = self.fresh_local_directory_entry(&ns, name)?
                     {
@@ -2616,8 +2666,8 @@ impl Filesystem {
         let cached = self.subtree_pages.get(&key).filter(|page| {
             page.fetched.elapsed() < self.config.stat_cache_ttl && {
                 let ns = self.lock_namespace();
-                page.page.objects.iter().all(|object| {
-                    let Some(relative) = object.key.strip_prefix(prefix) else {
+                page.objects.iter().all(|(key, _)| {
+                    let Some(relative) = key.strip_prefix(prefix) else {
                         return true;
                     };
                     let name = relative.split('/').next().unwrap_or("");
@@ -2677,7 +2727,9 @@ impl Filesystem {
                     .sum::<usize>()
                     + prefix.len()
                     + std::mem::size_of::<SubtreePage>();
-                crate::metadata_budget::page_bytes(&page) + index_bytes
+                page.objects.capacity()
+                    * std::mem::size_of::<(crate::metadata_budget::SharedKey, DirectoryMetadata)>()
+                    + index_bytes
             })?;
             let mut directories = std::collections::BTreeSet::from([prefix.to_owned()]);
             'objects: for object in &page.objects {
@@ -2694,10 +2746,22 @@ impl Filesystem {
                         || !directory.is_empty()
                             && format!("{}0", directory.trim_end_matches('/')).as_str() <= last)
             });
+            let objects = page
+                .objects
+                .into_iter()
+                .map(|object| {
+                    let (mut key, mut entry) = listed_object(object, fetched, &self.metadata)?;
+                    share_listed_owners(&self.lock_namespace(), &mut key, &mut entry);
+                    entry._metadata_charge.resize(self.metadata.estimate(|| {
+                        std::mem::size_of::<DirectoryMetadata>() + crate::metadata_budget::LINKS
+                    }))?;
+                    Ok((key, entry))
+                })
+                .collect::<Result<Vec<_>>>()?;
             let page = Arc::new(SubtreePage {
                 _metadata_charge: charge,
                 fetched,
-                page,
+                objects,
             });
             // Do not publish speculative siblings across a concurrent mutation.
             if self.lock_namespace().epoch == epoch {
@@ -2713,8 +2777,8 @@ impl Filesystem {
             page
         };
         let mut remote = DirectorySelection::new();
-        for object in &page.page.objects {
-            let Some(relative) = object.key.strip_prefix(prefix) else {
+        for (key, cached) in &page.objects {
+            let Some(relative) = key.strip_prefix(prefix) else {
                 continue;
             };
             let (name, metadata) = if let Some((directory, _)) = relative.split_once('/') {
@@ -2722,8 +2786,8 @@ impl Filesystem {
                     continue;
                 }
                 let marker = format!("{prefix}{directory}/");
-                let metadata = if object.key == marker {
-                    listed_object(object, page.fetched, &self.metadata)?.1
+                let metadata = if *key == marker {
+                    cached.try_clone(&self.metadata, key.len())?
                 } else {
                     DirectoryMetadata {
                         _metadata_charge: self
@@ -2731,16 +2795,15 @@ impl Filesystem {
                             .charge(std::mem::size_of::<DirectoryMetadata>() + relative.len())?,
                         directory: true,
                         head: None,
+                        last_modified: None,
+                        key: None,
                         known: true,
                         fetched: page.fetched,
                     }
                 };
                 (directory, metadata)
             } else {
-                (
-                    relative,
-                    listed_object(object, page.fetched, &self.metadata)?.1,
-                )
+                (relative, cached.try_clone(&self.metadata, key.len())?)
             };
             if direct_directory_name(name) && name > after {
                 remote.entry(name.to_owned()).or_insert(metadata);
@@ -2800,17 +2863,25 @@ impl Filesystem {
             .objects
             .into_iter()
             .filter(|o| o.key != prefix)
-            .map(|object| listed_object(&object, fetched, &self.metadata))
-            .chain(page.common_prefixes.into_iter().map(|p| {
-                let charge = self
+            .map(|object| {
+                let (mut key, mut entry) = listed_object(object, fetched, &self.metadata)?;
+                share_listed_owners(&self.lock_namespace(), &mut key, &mut entry);
+                Ok((key, entry))
+            })
+            .chain(page.common_prefixes.into_iter().map(|mut p| {
+                let mut charge = self
                     .metadata
-                    .charge(std::mem::size_of::<DirectoryMetadata>() + p.len())?;
+                    .charge(std::mem::size_of::<DirectoryMetadata>() + 2 * p.len() + 128)?;
+                p.truncate(p.trim_end_matches('/').len());
+                let p = crate::metadata_budget::SharedKey::from_admitted(p, &mut charge)?;
                 Ok((
-                    p,
+                    p.clone(),
                     DirectoryMetadata {
                         _metadata_charge: charge,
                         directory: true,
                         head: None,
+                        last_modified: None,
+                        key: Some(p),
                         known: false,
                         fetched,
                     },
@@ -2893,17 +2964,15 @@ impl Filesystem {
             .await
             .map_err(|_| Error::Timeout("directory metadata lookup"))??;
         let state = resolved.state.lock().unwrap();
-        let charge = self.metadata.charge_with(|| {
-            std::mem::size_of::<DirectoryMetadata>()
-                + state
-                    .remote
-                    .as_ref()
-                    .map_or(0, crate::metadata_budget::head_bytes)
-        })?;
+        let charge = self
+            .metadata
+            .charge_with(std::mem::size_of::<DirectoryMetadata>)?;
         *entry = DirectoryMetadata {
             _metadata_charge: charge,
             directory: file_type(state.mode) == FileType::Directory,
             head: state.remote.clone(),
+            key: Some(state.key.clone()),
+            last_modified: Some(state.mtime),
             known: state.metadata_known,
             fetched: state.fetched,
         };
@@ -2940,7 +3009,7 @@ impl Filesystem {
                 let charge = self
                     .admit_metadata(
                         if self.metadata.enabled() {
-                            Inode::metadata_estimate(&full, entry.head.as_ref())
+                            Inode::metadata_estimate(&full, None)
                         } else {
                             0
                         },
@@ -3041,7 +3110,7 @@ impl Filesystem {
             let state = node.state.lock().unwrap();
             if state.deleted
                 || state.key != key
-                || ns.names.get(&key) != Some(&node.ino)
+                || ns.names.get(key.as_str()) != Some(&node.ino)
                 || Self::pending_rename(&ns, &key, None)
             {
                 return Err(Error::Fs(libc::ENOENT));
@@ -3051,7 +3120,7 @@ impl Filesystem {
         {
             let ns = self.lock_namespace();
             let state = node.state.lock().unwrap();
-            if state.deleted || state.key != key || ns.names.get(&key) != Some(&node.ino) {
+            if state.deleted || state.key != key || ns.names.get(key.as_str()) != Some(&node.ino) {
                 return Err(Error::Fs(libc::ENOENT));
             }
             if let Some((parent, name)) = parent {
@@ -3099,7 +3168,7 @@ impl Filesystem {
         }
         let mut ns = self.lock_namespace();
         ns.remove_pending_delete(&key);
-        ns.names.remove(&key);
+        ns.names.remove(key.as_str());
         ns.changed(&key);
         let mut state = node.state.lock().unwrap();
         state.deleted = true;
@@ -3124,7 +3193,7 @@ impl Filesystem {
             let ns = self.lock_namespace();
             if Self::pending_rename(&ns, &old, Some(source.ino))
                 || Self::pending_rename(&ns, &destination, Some(source.ino))
-                || [&old, &destination].into_iter().any(|key| {
+                || [old.as_str(), destination.as_str()].into_iter().any(|key| {
                     let prefix = format!("{key}/");
                     ns.pending_moves
                         .range(prefix.clone()..)
@@ -3135,7 +3204,7 @@ impl Filesystem {
                 return Err(Error::Fs(libc::EBUSY));
             }
         }
-        if destination == old {
+        if old == destination {
             return Ok(());
         }
         if destination.starts_with(&format!("{old}/")) {
@@ -3162,7 +3231,8 @@ impl Filesystem {
             Err(error) if not_found(&error) => None,
             Err(error) => return Err(error),
         };
-        let _moving = MoveLease::begin(&self.namespace, vec![old.clone(), destination.clone()])?;
+        let _moving =
+            MoveLease::begin(&self.namespace, vec![old.to_string(), destination.clone()])?;
         let bindings = self.lock_namespace().bindings(&old, directory)?;
         let _pin_charge = self
             .metadata
@@ -3244,17 +3314,14 @@ impl Filesystem {
                         .get(&node.ino)
                         .map(|head| crate::metadata_budget::head_bytes(head));
                     let mut head = 2 * observed_head.unwrap_or_else(|| {
-                        state
-                            .remote
-                            .as_ref()
-                            .map_or(0, crate::metadata_budget::head_bytes)
+                        state.remote.as_ref().map_or(0, |remote| remote.bytes())
                     }) + 1024;
                     if state.version > state.durable {
                         // A preceding flush can replace a small raw HEAD with
                         // percent-encoded local attributes. Include that known
                         // generation before allowing the flush or any COPY.
                         head = head.max(
-                            crate::metadata_budget::encoding_bytes(&state.metadata)
+                            state.metadata.encoding_bytes()
                                 + 16 * write::metadata_growth(&self.config)
                                 + std::mem::size_of::<ObjectHead>()
                                 + 1024,
@@ -3302,6 +3369,28 @@ impl Filesystem {
         // retry intent is never removed, and possibly applied requests retain it.
         self.flush_node_locked_before(&source, Some(&mut || publish_move(&mut move_credit)))
             .await?;
+        // A dirty flush created a new generation. Keep its complete HTTP
+        // properties only in this COPY operation's pre-admitted working set.
+        if self.metadata.enabled()
+            && source_was_dirty
+            && source.state.lock().unwrap().remote.is_some()
+        {
+            let key = {
+                let state = source.state.lock().unwrap();
+                let key = state.data_key.as_ref().unwrap_or(&state.key);
+                if directory {
+                    format!("{key}/")
+                } else {
+                    key.to_string()
+                }
+            };
+            let head = self.store.head(&key).await?;
+            let charge = move_credit.take(crate::metadata_budget::head_bytes(&head))?;
+            copy_heads.insert(
+                source.ino,
+                crate::metadata_budget::MetadataOwner::new(head, charge),
+            );
+        }
         // A clean/no-directory-object flush sends no request. Keep only the
         // scoped lease during read-only discovery; persistent intent starts at
         // COPY, after its fallible preparation, not before LIST or ETag HEAD.
@@ -3361,11 +3450,7 @@ impl Filesystem {
                         let mut state = node.state.lock().unwrap();
                         let mut _normalization = None;
                         if self.metadata.enabled() {
-                            let expected = if node.ino == source.ino && source_was_dirty {
-                                state.remote.as_ref()
-                            } else {
-                                copy_heads.get(&node.ino).map(|head| &**head)
-                            };
+                            let expected = copy_heads.get(&node.ino).map(|head| &**head);
                             if expected.is_none_or(|expected| !same_copy_metadata(expected, &head))
                             {
                                 return Err(Error::Fs(libc::ESTALE));
@@ -3382,8 +3467,15 @@ impl Filesystem {
                                 crate::metadata_budget::head_bytes(&head) + target.len()
                             }),
                         )?;
-                        state.remote = Some(head);
-                        state.data_key = Some(target.trim_end_matches('/').into());
+                        let remote = state.cache_remote_from(head, &mut move_credit)?;
+                        if state.version == state.durable {
+                            state.metadata = remote.metadata.clone();
+                        }
+                        state.remote = Some(remote);
+                        state.data_key = Some(crate::metadata_budget::SharedKey::from_admitted(
+                            target.trim_end_matches('/').to_owned(),
+                            &mut move_credit,
+                        )?);
                         state.settle_metadata();
                     }
                     self.store.delete(&object.key).await?;
@@ -3394,19 +3486,18 @@ impl Filesystem {
             let needs_copy =
                 source.state.lock().unwrap().data_key.as_deref() != Some(destination.as_str());
             if needs_copy {
-                let (mut head, _copy_charge) = {
+                let (remote, mut head, _copy_charge) = {
                     let state = source.state.lock().unwrap();
-                    let remote = if self.metadata.enabled() && !source_was_dirty {
-                        copy_heads.get(&source.ino).map(|head| &**head)
-                    } else {
-                        state.remote.as_ref()
-                    }
-                    .ok_or(Error::Fs(libc::EIO))?;
+                    let remote = state.remote.clone().ok_or(Error::Fs(libc::EIO))?;
+                    let head = copy_heads
+                        .get(&source.ino)
+                        .map(|head| (**head).clone())
+                        .unwrap_or_else(|| remote.read_head());
                     let charge = move_credit.take(
                         self.metadata
-                            .estimate(|| crate::metadata_budget::head_bytes(remote)),
+                            .estimate(|| crate::metadata_budget::head_bytes(&head)),
                     )?;
-                    (remote.clone(), charge)
+                    (remote, head, charge)
                 };
                 publish_move(&mut move_credit)?;
                 head.etag = self.store.copy(&old, &destination, &head.etag).await?;
@@ -3418,8 +3509,19 @@ impl Filesystem {
                     self.metadata
                         .estimate(|| crate::metadata_budget::head_bytes(&head) + destination.len()),
                 )?;
-                state.remote = Some(head);
-                state.data_key = Some(destination.clone());
+                let remote = if self.metadata.enabled() {
+                    state.cache_remote_from(head, &mut move_credit)?
+                } else {
+                    remote.with_generation(head.size, head.etag)?
+                };
+                if state.version == state.durable {
+                    state.metadata = remote.metadata.clone();
+                }
+                state.remote = Some(remote);
+                state.data_key = Some(crate::metadata_budget::SharedKey::from_admitted(
+                    destination.clone(),
+                    &mut move_credit,
+                )?);
                 state.settle_metadata();
             }
             let mut head = self.store.head(&destination).await?;
@@ -3437,16 +3539,17 @@ impl Filesystem {
                 let mut state = source.state.lock().unwrap();
                 let mut _normalization = None;
                 if self.metadata.enabled()
-                    && state
-                        .remote
-                        .as_ref()
+                    && copy_heads
+                        .get(&source.ino)
                         .is_none_or(|expected| !same_copy_metadata(expected, &head))
                 {
                     return Err(Error::Fs(libc::ESTALE));
                 }
                 if self.metadata.enabled() {
                     _normalization = Some(move_credit.take(
-                        2 * crate::metadata_budget::head_bytes(state.remote.as_ref().unwrap()),
+                        2 * crate::metadata_budget::head_bytes(
+                            copy_heads.get(&source.ino).unwrap(),
+                        ),
                     )?);
                     compact_copy_head(&mut head);
                 }
@@ -3455,7 +3558,11 @@ impl Filesystem {
                     self.metadata
                         .estimate(|| crate::metadata_budget::head_bytes(&head)),
                 )?;
-                state.remote = Some(head);
+                let remote = state.cache_remote_from(head, &mut move_credit)?;
+                if state.version == state.durable {
+                    state.metadata = remote.metadata.clone();
+                }
+                state.remote = Some(remote);
                 state.settle_metadata();
             }
             self.store.delete(&old).await?;
@@ -3482,16 +3589,17 @@ impl Filesystem {
                     let mut state = node.state.lock().unwrap();
                     let mut _normalization = None;
                     if self.metadata.enabled()
-                        && state
-                            .remote
-                            .as_ref()
+                        && copy_heads
+                            .get(&node.ino)
                             .is_none_or(|expected| !same_copy_metadata(expected, &head))
                     {
                         return Err(Error::Fs(libc::ESTALE));
                     }
                     if self.metadata.enabled() {
                         _normalization = Some(move_credit.take(
-                            2 * crate::metadata_budget::head_bytes(state.remote.as_ref().unwrap()),
+                            2 * crate::metadata_budget::head_bytes(
+                                copy_heads.get(&node.ino).unwrap(),
+                            ),
                         )?);
                         compact_copy_head(&mut head);
                     }
@@ -3500,27 +3608,42 @@ impl Filesystem {
                         self.metadata
                             .estimate(|| crate::metadata_budget::head_bytes(&head)),
                     )?;
-                    state.remote = Some(head);
+                    let remote = state.cache_remote_from(head, &mut move_credit)?;
+                    if state.version == state.durable {
+                        state.metadata = remote.metadata.clone();
+                    }
+                    state.remote = Some(remote);
                     state.settle_metadata();
                 }
             }
         }
         // Reserve the complete publication before changing any name binding.
         // Failed admission leaves the retryable move markers and old live names.
-        for node in &pinned {
-            let mut state = node.state.lock().unwrap();
-            if state.key == old || directory && state.key.starts_with(&format!("{old}/")) {
-                let new_len = destination.len() + state.key.len() - old.len();
-                state.admit_metadata_from(&mut move_credit, 3 * new_len)?;
-            }
-        }
+        let _new_keys_charge = move_credit.take(self.metadata.estimate(|| {
+            bindings.len() * std::mem::size_of::<crate::metadata_budget::SharedKey>()
+        }))?;
         let mut ns = self.lock_namespace();
+        let new_keys = bindings
+            .iter()
+            .map(|(key, ino)| {
+                let new = format!("{destination}{}", &key[old.len()..]);
+                if let Some(node) = ns.nodes.get(ino) {
+                    let state = node.state.lock().unwrap();
+                    if let Some(backing) = &state.data_key
+                        && *backing == new
+                    {
+                        return Ok(backing.clone());
+                    }
+                }
+                crate::metadata_budget::SharedKey::from_admitted(new, &mut move_credit)
+            })
+            .collect::<Result<Vec<_>>>()?;
         // Empty/pure-local directories reach this synchronous namespace commit
         // without remote mutation: the scoped lease suffices, so no persistent
         // retry intent is needed. There is no await during this publication.
         ns.tombstone_reserved(&old, tombstone_credit)?;
         ns.remove_tombstone(&destination);
-        if let Some(ino) = ns.names.remove(&destination)
+        if let Some(ino) = ns.names.remove(destination.as_str())
             && let Some(target) = ns.nodes.get(&ino)
         {
             let mut state = target.state.lock().unwrap();
@@ -3529,11 +3652,8 @@ impl Filesystem {
             state.durable = state.version;
         }
         ns.forget_dirty(&destination);
-        for (key, &ino) in bindings.iter().map(|(key, ino)| (key, ino)) {
-            let mut new = String::with_capacity(destination.len() + key.len() - old.len());
-            new.push_str(&destination);
-            new.push_str(&key[old.len()..]);
-            ns.names.remove(key);
+        for ((key, &ino), new) in bindings.iter().map(|(key, ino)| (key, ino)).zip(new_keys) {
+            ns.names.remove(key.as_str());
             ns.names.insert(new.clone(), ino);
             ns.forget_dirty(key);
             if let Ok(node) = ns.get(ino) {
@@ -3582,10 +3702,7 @@ impl Filesystem {
             if state.deleted {
                 return Err(Error::Fs(libc::ENOENT));
             }
-            state.admit_metadata(
-                self.metadata
-                    .estimate(|| write::metadata_growth(&self.config)),
-            )?;
+            let previous = (state.mode, state.uid, state.gid, state.mtime);
             if self.config.enable_perms {
                 if let Some(mode) = mode {
                     state.mode = (state.mode & libc::S_IFMT) | (mode & 0o7777);
@@ -3600,8 +3717,11 @@ impl Filesystem {
             if let Some(mtime) = mtime {
                 state.mtime = mtime;
             }
+            if let Err(error) = self.prepare_metadata(&mut state) {
+                (state.mode, state.uid, state.gid, state.mtime) = previous;
+                return Err(error);
+            }
             state.version += 1;
-            self.prepare_metadata(&mut state)?;
             ns.track_dirty(node.ino, &state);
         }
         Ok(node.attr())
@@ -3614,7 +3734,7 @@ impl Filesystem {
         let node = self.node(ino)?;
         let state = node.state.lock().unwrap();
         let charge = self.metadata.charge_with(|| {
-            2 * crate::metadata_budget::map_bytes(&state.metadata)
+            2 * state.metadata.map_bytes()
                 + state.metadata.len() * 5
                 + state
                     .remote
@@ -3624,7 +3744,7 @@ impl Filesystem {
         let mut attrs: BTreeMap<_, _> = state
             .metadata
             .iter()
-            .map(|(k, v)| (format!("user.{k}"), v.clone()))
+            .map(|(k, v)| (format!("user.{k}"), v.to_vec()))
             .collect();
         if let Some(remote) = &state.remote {
             attrs.insert("s3.etag".into(), remote.etag.as_bytes().to_vec());
@@ -3668,22 +3788,16 @@ impl Filesystem {
         let size: usize = state
             .metadata
             .iter()
-            .filter(|(k, _)| k.as_str() != name)
+            .filter(|(k, _)| *k != name)
             .map(|(k, v)| k.len() + v.len())
             .sum();
         if size + name.len() + value.map_or(0, <[u8]>::len) > 65536 {
             return Err(Error::Fs(libc::E2BIG));
         }
-        state.admit_metadata(
-            name.len()
-                + value.map_or(0, <[u8]>::len)
-                + std::mem::size_of::<(String, Vec<u8>)>()
-                + crate::metadata_budget::LINKS,
-        )?;
         if let Some(value) = value {
-            state.metadata.insert(name.into(), value.to_vec());
+            state.metadata.try_insert(name, value)?;
         } else {
-            state.metadata.remove(name);
+            state.metadata.try_remove(name)?;
         }
         state.version += 1;
         state.settle_metadata();

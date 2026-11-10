@@ -14,8 +14,8 @@ pub(crate) type InodeIndex = papaya::HashMap<u64, Weak<Inode>>;
 pub struct Namespace {
     pub nodes: BTreeMap<u64, Arc<Inode>>,
     pub(crate) inodes: Arc<InodeIndex>,
-    dirty: BTreeMap<String, u64>,
-    pub names: BTreeMap<String, u64>,
+    dirty: BTreeMap<crate::metadata_budget::SharedKey, u64>,
+    pub names: BTreeMap<crate::metadata_budget::SharedKey, u64>,
     pub tombstones: BTreeMap<String, Instant>,
     pub epoch: u64,
     pub moving: BTreeSet<String>,
@@ -46,6 +46,7 @@ impl Namespace {
             .metadata_budget()
             .charge(0)
             .expect("empty namespace operation charge");
+        let root_key = root.state.lock().unwrap().key.clone();
         let root = Arc::new(root);
         let inodes = Arc::new(InodeIndex::new());
         inodes.pin().insert(1, Arc::downgrade(&root));
@@ -53,7 +54,7 @@ impl Namespace {
             nodes: BTreeMap::from([(1, root)]),
             inodes,
             dirty: BTreeMap::new(),
-            names: BTreeMap::from([("".into(), 1)]),
+            names: BTreeMap::from([(root_key, 1)]),
             tombstones: BTreeMap::new(),
             epoch: 0,
             moving: BTreeSet::new(),
@@ -88,7 +89,10 @@ impl Namespace {
             });
             let children: usize = if descendants {
                 self.names
-                    .range(prefix.clone()..)
+                    .range::<str, _>((
+                        std::ops::Bound::Included(prefix.as_str()),
+                        std::ops::Bound::Unbounded,
+                    ))
                     .take_while(|(name, _)| name.starts_with(&prefix))
                     .map(|(name, _)| 2 * (name.len() + std::mem::size_of::<(String, u64)>()))
                     .sum()
@@ -107,9 +111,12 @@ impl Namespace {
             let prefix = format!("{key}/");
             bindings.extend(
                 self.names
-                    .range(prefix.clone()..)
+                    .range::<str, _>((
+                        std::ops::Bound::Included(prefix.as_str()),
+                        std::ops::Bound::Unbounded,
+                    ))
                     .take_while(|(name, _)| name.starts_with(&prefix))
-                    .map(|(name, ino)| (name.clone(), *ino)),
+                    .map(|(name, ino)| (name.as_str().to_owned(), *ino)),
             );
         }
         Ok(crate::metadata_budget::MetadataOwner::new(bindings, charge))
@@ -157,7 +164,10 @@ impl Namespace {
         let prefix = format!("{key}/");
         for (_, ino) in self
             .names
-            .range(prefix.clone()..)
+            .range::<str, _>((
+                std::ops::Bound::Included(prefix.as_str()),
+                std::ops::Bound::Unbounded,
+            ))
             .take_while(|(name, _)| name.starts_with(&prefix))
         {
             if let Some(node) = self.nodes.get(ino) {
@@ -180,7 +190,10 @@ impl Namespace {
             .is_some_and(|(name, _)| name.starts_with(&prefix))
             || self
                 .dirty
-                .range(prefix.clone()..)
+                .range::<str, _>((
+                    std::ops::Bound::Included(prefix.as_str()),
+                    std::ops::Bound::Unbounded,
+                ))
                 .next()
                 .is_some_and(|(name, _)| name.starts_with(&prefix))
     }
@@ -189,8 +202,8 @@ impl Namespace {
     pub(crate) fn track_dirty(&mut self, ino: u64, state: &State) {
         if !state.deleted && state.version > state.durable {
             self.dirty.insert(state.key.clone(), ino);
-        } else if self.dirty.get(&state.key) == Some(&ino) {
-            self.dirty.remove(&state.key);
+        } else if self.dirty.get(state.key.as_str()) == Some(&ino) {
+            self.dirty.remove(state.key.as_str());
         }
     }
 
@@ -398,7 +411,8 @@ impl Namespace {
             .ok_or(Error::Fs(libc::EOVERFLOW))?;
         let node = Arc::new(make(ino)?);
         self.nodes.insert(ino, node.clone());
-        self.names.insert(key.into(), ino);
+        self.names
+            .insert(node.state.lock().unwrap().key.clone(), ino);
         self.inodes.pin().insert(ino, Arc::downgrade(&node));
         Ok(node)
     }

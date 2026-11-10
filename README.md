@@ -51,7 +51,30 @@ original run URL and its checksums remain attached to the published release.
 CI compilation and library checks do not establish mounted filesystem or
 comparative performance acceptance.
 
-## Current checkpoint — 2026-11-03
+## Optional cache controls — 2026-11-10
+
+- `--memory-limit` keeps its existing payload budget in MiB. Independent opt-in
+  `--metadata-limit '128 MiB'` bounds admitted application metadata owners; neither
+  is an RSS/cgroup limit. Shared canonical attributes and keys avoid duplicate
+  clean metadata while retaining COW writer baselines and pinned owners.
+- Supply `--disk-cache-dir`, `--disk-cache-max-size` and `--disk-cache-regex`
+  together to enable persistent payload L2. For example, a regex
+  `'\.(deb|rpm)$'` selects resolved regular-file paths. Without them, reads retain
+  RAM-only operation. The cache has no payload TTL or inactivity expiry.
+- Use an existing private local directory outside the mount. Capacity is
+  preallocated once; incompatible or damaged inventory is never automatically
+  wiped. Engine/index/workspace funding reduces effective L1 capacity within the
+  same payload total. Demotion is best-effort on capacity eviction, with source
+  fallback during recovery, overload or disk failure.
+- Persistent access scopes are supported for explicit known static credentials
+  and anonymous access. Opaque/rotating/profile/IAM providers explicitly bypass
+  persistence rather than sharing data under an inferred principal.
+
+See [design](docs/disk-cache-design.md), [stage status](docs/disk-cache-plan-track.md)
+and [ownership](docs/architecture.md). Local regression/native checks are distinct
+from representative performance and production acceptance.
+
+## Earlier serving checkpoint — 2026-11-03
 
 The optional [Prometheus listener](docs/metrics.md) is available through
 `--metrics-listen 127.0.0.1:9469`. It observes payload reuse/eviction, byte admission,
@@ -101,8 +124,8 @@ Frozen checkpoints retain favorable and adverse results and executable identitie
   [historical cache-policy/mixed measurements](docs/performance-cache-policy.md).
 
 [Next work](docs/next-work.md) lists actionable gaps. FUSE io_uring is an
-[upstream watch](docs/fuse-io-uring-assessment.md); passthrough and disk-backed
-caching remain deferred.
+[upstream watch](docs/fuse-io-uring-assessment.md); passthrough remains deferred.
+Optional disk caching is under the separate qualification plan above.
 
 ## Project context
 

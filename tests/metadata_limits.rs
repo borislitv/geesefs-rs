@@ -104,7 +104,9 @@ async fn live_and_kernel_referenced_inodes_are_never_evicted_to_pay_for_admissio
     for name in ["held", "other"] {
         metadata_object(&store, name, 10 * 1024);
     }
-    let fs = Filesystem::new(limited(56 * 1024), store).unwrap();
+    // Compact retained metadata leaves more spare room than the old two-map
+    // representation. Keep this fixture under actual admission pressure.
+    let fs = Filesystem::new(limited(48 * 1024), store).unwrap();
     let held = fs.lookup(1, "held").await.unwrap();
     fs.reference(&held);
     let ino = held.ino;
@@ -287,7 +289,7 @@ async fn a_read_snapshot_keeps_its_charge_after_its_inode_is_reclaimed() {
     );
     assert_eq!(
         snapshot.remote().unwrap().metadata["label"],
-        "x".repeat(8 * 1024)
+        vec![b'x'; 8 * 1024]
     );
     drop(snapshot);
     assert_eq!(fs.lookup(1, "second").await.unwrap().attr().size, 7);

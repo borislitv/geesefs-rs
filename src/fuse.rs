@@ -1072,7 +1072,7 @@ impl fuser::Filesystem for Fuse {
                     .unwrap()
                     .metadata
                     .get(&self.fs.config.symlink_attr)
-                    .cloned();
+                    .map(<[u8]>::to_vec);
                 match target {
                     Some(target) => reply.data(&target),
                     None => reply.error(Errno::EINVAL),

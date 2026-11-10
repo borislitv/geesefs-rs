@@ -1,11 +1,11 @@
 use crate::{
-    backend::{Store, s3::ObjectHead},
+    backend::{Store, metadata::CachedRemote},
     budget::{Block, Budget, Reservation},
     error::{Error, Result},
     inode::Inode,
     write::{Snapshot, materialize},
 };
-use std::{collections::HashMap, ops::Range, sync::Arc};
+use std::{ops::Range, sync::Arc};
 
 /// Logical payload unit shared by L1/L2 and streamed S3 delivery.
 pub const READ_BLOCK_BYTES: usize = 128 * 1024;
@@ -20,7 +20,7 @@ pub(crate) struct Window {
     pub fill: FillGuard,
 }
 
-pub(crate) fn generation(version: u64, remote: Option<&ObjectHead>) -> u64 {
+pub(crate) fn generation(version: u64, remote: Option<&CachedRemote>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     remote.map(|head| &head.etag).hash(&mut hash);
@@ -220,7 +220,7 @@ pub(crate) async fn load_disk_range(
                         &snapshot.key,
                         missing,
                         (next - missing) as usize,
-                        remote,
+                        &remote.read_head(),
                         local,
                         output,
                     )
@@ -245,7 +245,7 @@ pub(crate) async fn load_disk_range(
                 &snapshot.key,
                 missing,
                 (end - missing) as usize,
-                remote,
+                &remote.read_head(),
                 local,
                 output,
             )
@@ -337,7 +337,7 @@ pub fn snapshot(node: &Inode) -> Result<Snapshot> {
         remote: state.remote.clone(),
         visible: state.visible_remote_size,
         extents: state.extents.clone(),
-        metadata: HashMap::new(),
+        metadata: state.metadata.clone(),
     };
     snapshot.settle_metadata()?;
     Ok(snapshot)

@@ -44,6 +44,21 @@ The count guard is additional. Reclamation examines bounded batches and yields
 outside the namespace lock; lookup/open/dirty and in-flight pins remain intact.
 These are admitted logical allocations, not allocator size classes or an RSS cap.
 
+Clean current attributes and their committed baseline share `CachedMetadata`, an
+immutable sorted slice. Writers prepare a separately admitted copy-on-write
+version; old snapshots/baselines remain unchanged. `CachedRemote` retains only
+size, ETag and the canonical baseline. Full `ObjectHead`/HTTP properties belong to
+transient backend HEAD/COPY/REPLACE handling, where private upload receipts are
+checked before projection. Operation credit for committed-generation records is
+reserved before PUT/completion/PATCH and transferred into the new owners.
+
+`SharedKey` keeps one immutable key backing and its charge across namespace name
+bindings, inode state, snapshots and cached listing records. Both key and metadata
+wrappers expose borrowed data, preventing a caller from detaching storage from its
+permit. Shared backings are charged once until their final actual owner; index
+and operation-wrapper costs remain separate. Extended listings pass canonical
+metadata directly to inodes instead of encoding then decoding it again.
+
 `src/namespace.rs` binds names to stable inodes; `src/inode.rs` owns generation,
 remote object identity, dirty extents and lifetime state. Namespace epochs,
 tombstones and move/delete leases prevent stale responses from resurrecting

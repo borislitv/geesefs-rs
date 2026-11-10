@@ -155,6 +155,15 @@ This is application metadata admission, not allocator accounting or a total-RSS
 limit. SDK/parser allocations, allocator rounding/container slack, runtime and
 kernel memory remain separate measured costs. No production limit is selected.
 
+The subsequent compaction uses standard-library immutable sorted boxed pairs,
+slice binary search and `Arc` ownership with the existing admission wrapper.
+No global interner, custom hash table or new cache dependency is needed. Clean
+attributes share one canonical allocation with their committed baseline; COW
+writers retain distinct versions only when required. Shared keys similarly
+preserve namespace/snapshot lifetime. Transport metadata and HTTP properties stay
+at the backend boundary rather than in every cached inode. Preserve the existing
+owned flush gate, conditional reads and private-receipt recovery contract.
+
 ## Selected mechanisms
 
 | Concern | Selection and reason |

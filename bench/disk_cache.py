@@ -34,6 +34,8 @@ from paired import assess
 integration = compare.integration
 ROOT = integration.ROOT
 MIB = 1024 ** 2
+POPULATION_ROUNDS = 8
+POPULATION_SECONDS = 180
 STATES = ['both_cold', 'l1_hot', 'l2_hot_pagecache_hot', 'l2_hot_pagecache_cold_requested']
 WORKLOADS = ['metadata', 'sequential', 'random', 'concurrent', 'eviction', 'mixed', 'writer_fsync']
 READS = ['sequential', 'random', 'concurrent', 'mixed']
@@ -273,7 +275,7 @@ def capabilities(cgroup_root):
     result = dict(system=platform.platform(), kernel=platform.release(), machine=platform.machine(),
                   cpu_count=os.cpu_count(), cgroup_root=str(cgroup_root) if cgroup_root else None,
                   cpu_affinity=sorted(os.sched_getaffinity(0)),
-                  tools={name: shutil.which(name) for name in ['fusermount3', 'unshare', 'nginx', 'rsync', 'mount', 'umount']},
+                  tools={name: shutil.which(name) for name in ['fusermount3', 'unshare', 'nginx', 'rsync', 'mount', 'umount', 'sha256sum']},
                   python=sys.version, modules={name: importlib.util.find_spec(name) is not None
                                               for name in ['boto3', 'moto', 'aiohttp']}, errors=[])
     try:
@@ -336,6 +338,29 @@ def provenance(path, receipt):
 def sample_endpoint(port, mapping):
     with urllib.request.urlopen(f'http://127.0.0.1:{port}/metrics', timeout=3) as response:
         return parse_metrics(response.read(2 * MIB).decode(), mapping)
+
+
+def native_snapshot(port, config, output, label, require_adapter=True):
+    """Preserve failure evidence, including SDK GET attempts independent of fill bytes."""
+    with urllib.request.urlopen(f'http://127.0.0.1:{port}/metrics', timeout=3) as response:
+        text = response.read(2 * MIB).decode()
+    (output / (label + '-metrics.txt')).write_text(text)
+    mapping = config['disk_metrics'] if require_adapter else {
+        key: config['disk_metrics'][key] for key in ['l1_hit_bytes', 'remote_bytes']}
+    values = parse_metrics(text, mapping)
+    if not require_adapter:
+        values.update(parse_metrics(text, dict(state_bypass='geesefs_disk_cache_state{state="bypass"}',
+            stats_available='geesefs_disk_cache_stats_available')))
+    # Diagnostics expose transmission attempts, not guaranteed server receipts.
+    # The family is sparse before the first GET, so enabled + absent means zero.
+    enabled = parse_metrics(text, {'enabled': 'geesefs_diagnostics_enabled'})['enabled']
+    if enabled != 1:
+        raise RuntimeError('native GET-attempt verification requires enabled diagnostics')
+    values.update(parse_metrics(text, dict(fuse_reads='geesefs_fuse_replies_total{opcode="read",errno="OK"}')))
+    values['source_get_attempts'] = sum(float(line.split()[1]) for line in text.splitlines()
+        if line.startswith('geesefs_s3_attempts_total{') and 'operation="get"' in line)
+    (output / (label + '-metrics.json')).write_text(json.dumps(values, indent=2) + '\n')
+    return values
 
 
 def io_counters(pid):
@@ -476,19 +501,99 @@ def disk_idle(port, config):
         time.sleep(0.02)
 
 
+def disk_ready(port, config):
+    """FUSE visibility does not imply that asynchronous disk recovery is Ready."""
+    wait_disk_state(port, 'ready')
+    return sample_endpoint(port, config['disk_metrics'])
+
+
+def wait_disk_state(port, expected):
+    deadline = time.monotonic() + 30
+    while True:
+        state = sample_endpoint(port, dict(ready='geesefs_disk_cache_state{state="ready"}',
+            bypass='geesefs_disk_cache_state{state="bypass"}',
+            closed='geesefs_disk_cache_state{state="closed"}', available='geesefs_disk_cache_stats_available'))
+        if state[expected] and (expected != 'ready' or state['available']):
+            return state
+        if state['bypass'] or state['closed']:
+            raise RuntimeError('disk adapter bypassed/closed before native workload: ' + json.dumps(state))
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f'disk adapter not {expected.title()} within thirty seconds: ' + json.dumps(state))
+        time.sleep(0.02)
+
+
+def verify_native_hot(before, after, size):
+    verify_state('l2_hot_pagecache_hot', before, after, 'candidate')
+    if delta(before, after, 'source_get_attempts') != 0:
+        raise RuntimeError('native recovered L2 package caused source GET attempts')
+    if delta(before, after, 'l2_hit_bytes') < size or delta(before, after, 'fuse_reads') <= 0:
+        raise RuntimeError('native warm declaration requires full L2 bytes and observed FUSE reads, not client pagecache')
+
+
+def verify_startup_fallback(before, after, size):
+    if any(row['state_bypass'] != 1 or row['stats_available'] != 0 for row in [before, after]):
+        raise RuntimeError('startup fault requires Bypass without an attached adapter snapshot')
+    if (delta(before, after, 'remote_bytes') < size or delta(before, after, 'source_get_attempts') <= 0
+            or delta(before, after, 'fuse_reads') <= 0):
+        raise RuntimeError('startup fault requires actual FUSE source reads and full validated payload bytes')
+
+
 def prime(binary, fixture, work, record, config, cache, group, output):
-    label = record['mount_id'] + '-prime'
-    extra = mount_extra(config, record['arm'], cache, output / (label + '-stats.jsonl'), integration.free_port(), read_only=True)
+    # A fixed protocol in every baseline/candidate/control arm, not a
+    # candidate-only retry-until-hot. Warmup mounts are not measured mount pairs.
+    deadline = time.monotonic() + POPULATION_SECONDS
+    rounds = record['population_rounds'] = []
+    for number in range(POPULATION_ROUNDS):
+        if time.monotonic() >= deadline:
+            raise RuntimeError('population protocol exceeded its fixed deadline')
+        label = record['mount_id'] + f'-prime-{number}'
+        port = integration.free_port()
+        extra = mount_extra(config, record['arm'], cache, output / (label + '-stats.jsonl'), port, read_only=True)
+        row = dict(round=number, independent_measured_mount=False)
+        rounds.append(row)
+        with integration.mount(binary, fixture['bucket'], fixture['prefix'], fixture['endpoint'], fixture['environment'],
+                               work, label, config['memory_limit_mb'], extra, group, row) as (path, daemon):
+            if record['arm'] == 'candidate':
+                disk_ready(port, config)
+            row['before'] = native_snapshot(port, config, output, label + '-before', require_adapter=record['arm'] == 'candidate')
+            if record['workload'] == 'eviction':
+                eviction_probe(path, min(MIB, config['l1_hot_bytes']))
+            else:
+                native_hash(path / 'payload', fixture['expected_sha'], group, max(1, min(30, deadline - time.monotonic())))
+            native_hash(path / 'pressure', fixture['pressure_sha'], group, max(1, min(30, deadline - time.monotonic())))
+            if record['arm'] == 'candidate':
+                disk_idle(port, config)
+            row['after'] = native_snapshot(port, config, output, label + '-after', require_adapter=record['arm'] == 'candidate')
+            if delta(row['before'], row['after'], 'fuse_reads') <= 0:
+                raise RuntimeError('population I/O did not reach FUSE')
+        row.update(daemon_exit=daemon.returncode, mount_present_after=os.path.ismount(path))
+    if time.monotonic() >= deadline:
+        raise RuntimeError('population protocol exceeded its fixed deadline')
+    # Validate logical coverage BEFORE hot/advisory-cold pagecache preparation.
+    # Otherwise this full read would itself invalidate the requested media state.
+    label, port = record['mount_id'] + '-prime-validation', integration.free_port()
+    extra = mount_extra(config, record['arm'], cache, output / (label + '-stats.jsonl'), port, read_only=True)
+    validation = record['population_validation'] = dict(independent_measured_mount=False)
     with integration.mount(binary, fixture['bucket'], fixture['prefix'], fixture['endpoint'], fixture['environment'],
-                           work, label, config['memory_limit_mb'], extra, group) as (path, _):
+                           work, label, config['memory_limit_mb'], extra, group, validation) as (path, daemon):
+        if record['arm'] == 'candidate':
+            disk_ready(port, config)
+        before = native_snapshot(port, config, output, label + '-before', require_adapter=record['arm'] == 'candidate')
         if record['workload'] == 'eviction':
-            eviction_probe(path, min(MIB, config['l1_hot_bytes']))
-        elif integration.sha_file(path / 'payload') != fixture['expected_sha']:
-            raise AssertionError('priming payload SHA256')
-        # Excluded pressure evicts the complete selected target from L1 without
-        # replacing it with another disk-selected object. Shutdown drains spills.
-        if integration.sha_file(path / 'pressure') != fixture['pressure_sha']:
-            raise AssertionError('pressure payload SHA256')
+            size = min(MIB, config['l1_hot_bytes'])
+            eviction_probe(path, size)
+        else:
+            size = config['dataset_bytes']
+            native_hash(path / 'payload', fixture['expected_sha'], group, max(1, min(30, deadline - time.monotonic())))
+        after = native_snapshot(port, config, output, label + '-after', require_adapter=record['arm'] == 'candidate')
+        validation.update(before=before, after=after, byte_correct=True)
+        if record['arm'] == 'candidate':
+            verify_native_hot(before, after, size)
+        elif delta(before, after, 'fuse_reads') <= 0:
+            raise RuntimeError('population validation bypassed FUSE')
+    validation.update(daemon_exit=daemon.returncode, mount_present_after=os.path.ismount(path))
+    if time.monotonic() >= deadline:
+        raise RuntimeError('population protocol exceeded its fixed deadline')
 
 
 def measured_run(binary, fixture, work, record, config, group_root, output):
@@ -501,7 +606,7 @@ def measured_run(binary, fixture, work, record, config, group_root, output):
                             media='unclassified local filesystem; no SSD/HDD generalization')
     stats, port = output / (label + '-stats.jsonl'), integration.free_port()
     with compare.cgroup(group_root, config) as group:
-        if record['state'].startswith('l2_hot') or (record['workload'] == 'eviction' and record['arm'] == 'candidate'):
+        if record['state'].startswith('l2_hot') or record['workload'] == 'eviction':
             prime(binary, fixture, work, record, config, cache, group, output)
             record['pagecache_protocol'] = cache_page_state(cache, cold=record['state'].endswith('cold_requested'))
         extra = mount_extra(config, record['arm'], cache, stats, port, read_only=record['workload'] != 'writer_fsync')
@@ -510,6 +615,8 @@ def measured_run(binary, fixture, work, record, config, group_root, output):
         started = time.monotonic()
         with integration.mount(binary, fixture['bucket'], fixture['prefix'], fixture['endpoint'], fixture['environment'],
                                work, label, config['memory_limit_mb'], extra, group, record) as (path, daemon):
+            if record['arm'] == 'candidate':
+                disk_ready(port, config)
             record['mount_and_recovery_seconds'] = time.monotonic() - started
             if record['workload'] == 'eviction':
                 # Outside the timed workload; warm the same prefix in every arm.
@@ -649,6 +756,93 @@ def summarize(records, config, pairs, controls):
                 scope='local Rust qualification only; no Go 0.43.9 comparative acceptance')
 
 
+def native_hash(path, expected, group, timeout=30):
+    result = integration.command(['sha256sum', '--', path], capture_output=True, text=True, timeout=timeout,
+                                 preexec_fn=lambda: integration.enter_cgroup(group))
+    if result.stdout.split()[0] != expected:
+        raise AssertionError('native independent SHA256 mismatch: ' + str(path))
+
+
+def native_read_cache_phase(binary, fixture, package, work, config, group_root, output):
+    """Bounded warmup, then a separate fresh-mount full-coverage declaration.
+
+    A warmup mount is NOT an independent measured pair. Best-effort drops are
+    allowed. Fresh RO/direct-I/O mounts ensure both empty L1 and actual FUSE reads
+    each round; no writer uses the direct-I/O flag. Budgets/data stay unchanged.
+    """
+    cache = work / 'native-reader-cache'
+    cache.mkdir(mode=0o700)
+    deadline = time.monotonic() + POPULATION_SECONDS
+    expected_records = (len(package) + 128 * 1024 - 1) // (128 * 1024)
+    receipt = dict(warm_declared=False, max_rounds=POPULATION_ROUNDS, fixed_rounds=POPULATION_ROUNDS, warmup_deadline_seconds=POPULATION_SECONDS,
+                   protocol='fixed eight fresh RO/direct-I/O population mounts, full package + excluded pressure, drain, clean shutdown; fresh RO validation mount; same fixed population schedule in matrix baseline/candidate/control',
+                   independent_measured_mounts=0, expected_package_records=expected_records, rounds=[])
+    package_sha = hashlib.sha256(package).hexdigest()
+    try:
+        with compare.cgroup(group_root, config) as group:
+            for number in range(receipt['max_rounds']):
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('native cache population exceeded 180-second deadline')
+                label, port = f'reader-warm-{number}', integration.free_port()
+                extra = mount_extra(config, 'candidate', cache, output / (label + '-stats.jsonl'), port, read_only=True)
+                row = dict(round=number, independent_measured_mount=False)
+                receipt['rounds'].append(row)
+                with integration.mount(binary, fixture['bucket'], fixture['prefix'], fixture['endpoint'], fixture['environment'],
+                                       work, label, config['memory_limit_mb'], extra, group, row) as (path, daemon):
+                    disk_ready(port, config)
+                    before = native_snapshot(port, config, output, label + '-before')
+                    row['before'] = before
+                    native_hash(path / 'package.rpm', package_sha, group, max(1, min(30, deadline - time.monotonic())))
+                    native_hash(path / 'pressure', fixture['pressure_sha'], group, max(1, min(30, deadline - time.monotonic())))
+                    disk_idle(port, config)
+                    after = native_snapshot(port, config, output, label + '-after')
+                    row.update(after=after, byte_correct=True)
+                    if delta(before, after, 'fuse_reads') <= 0:
+                        raise RuntimeError('population round bypassed FUSE; kernel pagecache is not a warmup protocol')
+                row.update(daemon_exit=daemon.returncode, mount_present_after=os.path.ismount(path))
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('native cache population exceeded 180-second deadline')
+                (output / 'native-reader-protocol.json').write_text(json.dumps(receipt, indent=2) + '\n')
+            # Inventory is only a population condition, NOT proof of identity
+            # or coverage. Never vary round count to obtain a favorable result.
+            if after['index_entries'] < expected_records:
+                raise RuntimeError('native population condition unmet after eight bounded warmup mounts; allowed drops are not a runtime correctness failure')
+            label, port = 'reader-validate', integration.free_port()
+            extra = mount_extra(config, 'candidate', cache, output / (label + '-stats.jsonl'), port, read_only=True)
+            validation = {}
+            receipt['validation'] = validation
+            with integration.mount(binary, fixture['bucket'], fixture['prefix'], fixture['endpoint'], fixture['environment'],
+                                   work, label, config['memory_limit_mb'], extra, group, validation) as (path, daemon):
+                disk_ready(port, config)
+                before = native_snapshot(port, config, output, label + '-before')
+                native_hash(path / 'package.rpm', package_sha, group)
+                after = native_snapshot(port, config, output, label + '-after')
+                validation.update(before=before, after=after, byte_correct=True)
+                verify_native_hot(before, after, len(package))
+                receipt['warm_declared'] = True
+                compare.workload(path, 'metadata', config, fixture['client'], fixture['bucket'], fixture['prefix'],
+                                 fixture['endpoint'], True, fixture['expected_sha'])
+                attrs = (path / 'package.rpm').stat()
+                if attrs.st_mode & 0o777 != 0o640 or int(attrs.st_mtime) != 1700000000:
+                    raise AssertionError('native RO metadata mode/mtime')
+                with (path / 'package.rpm').open('rb', buffering=0) as stream:
+                    if os.pread(stream.fileno(), 8, len(package) - 2) != package[-2:]:
+                        raise AssertionError('native RO short EOF')
+                nginx_range(path, package, work, group)
+                copy = work / 'rsync-ro'
+                copy.mkdir()
+                integration.command(['rsync', '-a', '--checksum', str(path / 'package.rpm'), str(copy)], timeout=60)
+                if (copy / 'package.rpm').read_bytes() != package:
+                    raise AssertionError('rsync RO bytes')
+            validation.update(daemon_exit=daemon.returncode, mount_present_after=os.path.ismount(path))
+        return 'RO/direct-I/O: bounded observed population, full byte-correct recovered L2 with zero GET, nginx/rsync/EOF/metadata'
+    except Exception as error:
+        receipt['error'] = str(error)
+        raise
+    finally:
+        (output / 'native-reader-protocol.json').write_text(json.dumps(receipt, indent=2) + '\n')
+
+
 def native_checks(binary, fixture, work, config, group_root, output):
     """Real FUSE+localhost S3+nginx+rsync. Only owned mounts/data are touched."""
     from sealed_s3_fixture import blocks
@@ -659,25 +853,28 @@ def native_checks(binary, fixture, work, config, group_root, output):
                       Metadata={'mode': str(0o100640), 'mtime': '1700000000'})
     cache = work / 'native-cache'
     cache.mkdir(mode=0o700)
-    checks = []
+    checks = [native_read_cache_phase(binary, fixture, package, work, config, group_root, output)]
     with compare.cgroup(group_root, config) as group:
-        for cycle in range(2):
+        # Separate RW compatibility mount: never enable RO direct-I/O here and
+        # never claim that buffered writer reads establish recovered L2 warmth.
+        for cycle in range(1):
             port = integration.free_port()
             extra = mount_extra(config, 'candidate', cache, output / f'native-{cycle}-stats.jsonl', port)
+            compatibility = dict(phase='RW compatibility, not L2-hot qualification', passed=False)
             with integration.mount(binary, bucket, prefix, fixture['endpoint'], fixture['environment'], work,
-                                   f'native-{cycle}', config['memory_limit_mb'], extra, group) as (path, _):
+                                   f'native-{cycle}', config['memory_limit_mb'], extra, group, compatibility) as (path, daemon):
+                disk_ready(port, config)
                 compare.workload(path, 'metadata', config, s3, bucket, prefix,
                                  fixture['endpoint'], True, fixture['expected_sha'])
                 attrs = (path / 'package.rpm').stat()
                 if attrs.st_mode & 0o777 != 0o640 or int(attrs.st_mtime) != 1700000000:
                     raise AssertionError('native metadata-limit traversal and fixed mode/mtime')
-                before = sample_endpoint(port, config['disk_metrics'])
+                before = native_snapshot(port, config, output, f'native-{cycle}-before')
+                compatibility['before'] = before
+                (output / 'native-writer-protocol.json').write_text(json.dumps(compatibility, indent=2) + '\n')
                 for name in ['package.rpm', 'excluded.txt']:
                     if integration.sha_file(path / name) != hashlib.sha256(package).hexdigest():
                         raise AssertionError('native independent package hash')
-                    if name == 'package.rpm' and cycle == 1:
-                        after = sample_endpoint(port, config['disk_metrics'])
-                        verify_state('l2_hot_pagecache_hot', before, after, 'candidate')
                 with (path / 'package.rpm').open('rb', buffering=0) as stream:
                     if os.pread(stream.fileno(), 8, MIB - 2) != package[-2:]:
                         raise AssertionError('native short EOF')
@@ -695,35 +892,44 @@ def native_checks(binary, fixture, work, config, group_root, output):
                         os.fsync(stream.fileno())
                     if integration.remote_bytes(s3, bucket, prefix + '/written.rpm') != package[:4096]:
                         raise AssertionError('rsync fsync backend durability')
+                    compatibility['rsync_fsync_remote_sha256'] = hashlib.sha256(package[:4096]).hexdigest()
+                    compatibility['fsync_before'] = native_snapshot(port, config, output, 'writer-fsync-before')
                     integration.fault(fixture['endpoint'], 'put')
                     try:
                         with (path / 'fault').open('w+b', buffering=0) as stream:
                             stream.write(b'retained independent bytes')
                             try:
                                 os.fsync(stream.fileno())
-                            except OSError:
-                                pass
+                            except OSError as error:
+                                compatibility['injected_upload_fsync_error'] = dict(errno=error.errno, message=str(error))
+                                (output / 'native-writer-protocol.json').write_text(json.dumps(compatibility, indent=2) + '\n')
                             else:
                                 raise AssertionError('failed upload acknowledged fsync durability')
                             integration.fault(fixture['endpoint'])
                             integration.recover_fsync(stream.fileno())
                         if integration.remote_bytes(s3, bucket, prefix + '/fault') != b'retained independent bytes':
                             raise AssertionError('failed fsync recovery bytes')
+                        compatibility['failed_fsync_recovery_byte_correct'] = True
+                        compatibility['fsync_after_recovery'] = native_snapshot(port, config, output, 'writer-fsync-after')
                     finally:
                         integration.fault(fixture['endpoint'])
                 checks.append(f'cycle-{cycle}: package/excluded/full/range/EOF/nginx/rsync/metadata-limit')
                 # Force selected payload victims before graceful recovery cycle.
                 if integration.sha_file(path / 'pressure') != fixture['pressure_sha']:
                     raise AssertionError('native pressure bytes')
+                disk_idle(port, config)
+                compatibility['after_pressure'] = native_snapshot(port, config, output, f'native-{cycle}-after-pressure')
+            compatibility.update(passed=True, daemon_exit=daemon.returncode, mount_present_after=os.path.ismount(path))
+            (output / 'native-writer-protocol.json').write_text(json.dumps(compatibility, indent=2) + '\n')
     checks.append(local_disk_failure(binary, fixture, work, config, group_root, output))
     return checks
 
 
 def local_disk_failure(binary, fixture, work, config, group_root, output):
-    """ENOSPC only in a newly mounted owned tmpfs, in our private namespace.
+    """Exhaust only owned tmpfs BEFORE opening an empty cache: real fallocate failure.
 
-    If the engine's preallocation avoids ENOSPC, do not pretend an injected disk
-    fault occurred: fail the requested case and keep its error/counter receipt.
+    This verifies optional startup Bypass + authoritative-source reads, not an
+    ongoing engine I/O failure against already preallocated media.
     """
     volume = work / 'fault-volume'
     volume.mkdir()
@@ -732,39 +938,49 @@ def local_disk_failure(binary, fixture, work, config, group_root, output):
         raise ValueError('native tmpfs fault requires an explicit cgroup memory ceiling covering cache plus daemon/client headroom')
     integration.command(['mount', '-t', 'tmpfs', '-o', f'size={capacity + 8 * MIB},mode=0700',
                          'geesefs-disposable-l2-fault', volume], timeout=5)
-    receipt = {'injection': 'owned-tmpfs-ENOSPC', 'capacity_bytes': capacity + 8 * MIB,
-               'source_fallback_verified': False}
+    receipt = {'injection': 'owned-tmpfs-startup-preallocation-ENOSPC', 'capacity_bytes': capacity + 8 * MIB,
+               'source_fallback_verified': False, 'ongoing_engine_io_failure_verified': False}
     try:
         cache = volume / 'cache'
         cache.mkdir(mode=0o700)
         with compare.cgroup(group_root, config) as group:
+            receipt['cache_inventory_before'] = [p.name for p in cache.iterdir()]
+            filler = integration.command([sys.executable, str(Path(__file__).resolve()), '--fill-owned-volume',
+                str(volume / 'space-blocker'), '--fill-bytes', str(capacity + 8 * MIB)],
+                capture_output=True, text=True, timeout=15,
+                preexec_fn=lambda: integration.enter_cgroup(group))
+            receipt['filler_enospc_observed'] = json.loads(filler.stdout)['enospc']
+            receipt['available_bytes_before_startup'] = os.statvfs(volume).f_bavail * os.statvfs(volume).f_frsize
+            if not receipt['filler_enospc_observed'] or receipt['cache_inventory_before']:
+                raise RuntimeError('startup fault requires exhausted owned volume and empty private cache')
             port = integration.free_port()
-            extra = mount_extra(config, 'candidate', cache, output / 'disk-fault-stats.jsonl', port)
+            extra = mount_extra(config, 'candidate', cache, output / 'disk-fault-stats.jsonl', port, read_only=True)
+            mount_receipt = {}
+            receipt['mount'] = mount_receipt
             with integration.mount(binary, fixture['bucket'], fixture['prefix'], fixture['endpoint'], fixture['environment'],
-                                   work, 'disk-fault', config['memory_limit_mb'], extra, group) as (path, _):
-                before = sample_endpoint(port, config['disk_metrics'])
-                # Bounded by the mounted filesystem, not the host free space.
-                filler = integration.command([sys.executable, str(Path(__file__).resolve()), '--fill-owned-volume',
-                    str(volume / 'space-blocker'), '--fill-bytes', str(capacity + 8 * MIB)],
-                    capture_output=True, text=True, timeout=15,
-                    preexec_fn=lambda: integration.enter_cgroup(group))
-                receipt['filler_enospc_observed'] = json.loads(filler.stdout)['enospc']
-                if not receipt['filler_enospc_observed']:
-                    raise RuntimeError('owned filesystem was not exhausted')
-                if integration.sha_file(path / 'payload') != fixture['expected_sha']:
-                    raise AssertionError('source bytes with unavailable disk admission')
-                if integration.sha_file(path / 'pressure') != fixture['pressure_sha']:
-                    raise AssertionError('pressure with unavailable disk admission')
-                after = disk_idle(port, config)
+                                   work, 'disk-fault', config['memory_limit_mb'], extra, group, mount_receipt) as (path, daemon):
+                wait_disk_state(port, 'bypass')
+                before = native_snapshot(port, config, output, 'disk-fault-before', require_adapter=False)
+                native_hash(path / 'payload', fixture['expected_sha'], group)
+                with (path / 'payload').open('rb', buffering=0) as stream:
+                    for offset in [0, config['dataset_bytes'] // 2, config['dataset_bytes'] - 37]:
+                        if os.pread(stream.fileno(), 37, offset) != integration.expected_range(offset, 37):
+                            raise AssertionError('startup fallback range bytes')
+                    if os.pread(stream.fileno(), 1, config['dataset_bytes']) != b'':
+                        raise AssertionError('startup fallback EOF')
+                after = native_snapshot(port, config, output, 'disk-fault-after', require_adapter=False)
                 receipt.update(before=before, after=after)
-                if delta(before, after, 'errors') <= 0:
-                    raise RuntimeError('cache disk failure not reproduced (possibly preallocated); not a passed injection')
-                # Force a clean client revisit: the source remains authoritative.
-                drop_client_pages(path)
-                if integration.sha_file(path / 'payload') != fixture['expected_sha']:
-                    raise AssertionError('disk-failure fallback revisit bytes')
+                verify_startup_fallback(before, after, config['dataset_bytes'])
+                error_log = (work / 'disk-fault.log').read_text()
+                receipt['startup_error_log'] = error_log
+                if 'disk cache unavailable; using source reads: filesystem error: 28' not in error_log:
+                    raise RuntimeError('startup Bypass did not report actual ENOSPC preallocation failure')
                 receipt['source_fallback_verified'] = True
-        return 'owned ENOSPC: observed cache error and exact source-fallback bytes'
+            mount_receipt.update(daemon_exit=daemon.returncode, mount_present_after=os.path.ismount(path))
+        return 'owned startup-preallocation ENOSPC: observed Bypass and exact full/range/EOF source bytes; ongoing I/O-error injection unverified'
+    except Exception as error:
+        receipt['error'] = str(error)
+        raise
     finally:
         (output / 'native-disk-failure.json').write_text(json.dumps(receipt, indent=2) + '\n')
         integration.command(['umount', volume], timeout=10)

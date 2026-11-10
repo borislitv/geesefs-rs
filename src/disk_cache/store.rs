@@ -165,9 +165,20 @@ fn options() -> OpenOptions {
 pub struct PreparedDiskCache {
     directory: PathBuf,
     capacity: usize,
-    _lock: File,
+    _lock: DirectoryLock,
     status: DiskCacheStatus,
 }
+
+struct DirectoryLock(File);
+
+impl Drop for DirectoryLock {
+    fn drop(&mut self) {
+        // CLOEXEC does not close a forked child's inherited descriptor until
+        // exec. Release our logical ownership even while that description lives.
+        let _ = self.0.unlock();
+    }
+}
+
 impl PreparedDiskCache {
     pub fn prepare(directory: &Path, capacity: u64) -> Result<Self> {
         // Validate geometry without allocating engine resources.
@@ -214,7 +225,7 @@ impl PreparedDiskCache {
         Ok(directory)
     }
 
-    fn lock_directory(directory: &Path) -> Result<File> {
+    fn lock_directory(directory: &Path) -> Result<DirectoryLock> {
         let lock = options()
             .create(true)
             .truncate(false)
@@ -228,7 +239,8 @@ impl PreparedDiskCache {
             std::fs::TryLockError::WouldBlock => Error::Fs(libc::EWOULDBLOCK),
             std::fs::TryLockError::Error(error) => io(error),
         })?;
-        Ok(lock)
+        // Construct the guard before inventory validation can reject prepare.
+        Ok(DirectoryLock(lock))
     }
 
     fn validate_inventory(directory: &Path, capacity: usize) -> Result<()> {
@@ -856,5 +868,33 @@ impl DiskCache {
             .await
             .map_err(|_| Error::Timeout("L2 close"))?
             .map_err(engine)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepared_drop_releases_lock_even_with_an_inherited_descriptor() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let capacity = 16 * 1024 * 1024;
+        let prepared = PreparedDiskCache::prepare(directory.path(), capacity).unwrap();
+        // A forked child retains this same open-file description until CLOEXEC.
+        // A safe duplicate gives deterministic coverage without a pre_exec hook.
+        let inherited = prepared._lock.0.try_clone().unwrap();
+        drop(prepared);
+        let replacement = PreparedDiskCache::prepare(directory.path(), capacity)
+            .unwrap_or_else(|error| panic!("the logical lock owner already dropped: {error:?}"));
+        drop(inherited);
+        assert!(matches!(
+            PreparedDiskCache::prepare(directory.path(), capacity),
+            Err(Error::Fs(libc::EWOULDBLOCK))
+        ));
+        drop(replacement);
+        assert!(PreparedDiskCache::prepare(directory.path(), capacity).is_ok());
     }
 }

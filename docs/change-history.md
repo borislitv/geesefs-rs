@@ -5,6 +5,26 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-10: compact canonical metadata and shared keys
+
+Controlled allocation probes confirmed two retained attribute containers per
+clean inode and independently allocated namespace/state keys. Replace these with
+shared immutable sorted attributes, a compact committed remote record and one
+charged key backing. Writers use pre-admitted COW versions; snapshots/listing
+records share owners without releasing admission early. Keep full transport
+metadata and HTTP properties only in backend operations.
+
+Removing LIST decode/encode/decode also preserves binary xattr bytes that the
+roundtrip could substitute with UTF-8 replacement characters. Review regressions
+ensure canonical projection after a successful PUT and a longer PATCH ETag use
+prepaid operation credit, not fresh postcommit admission. Native directory-lock
+checks also exposed inherited pre-exec descriptors retaining a failed preparation
+lock; an owned safe unlock guard now covers that validation error path.
+
+Matched default-jemalloc allocation experiments show lower clean metadata costs;
+final exact-source mounted/paired performance verification remains separate. Keep
+all adverse CPU samples and distinguish allocated memory, admission and RSS.
+
 ## 2026-11-10: bounded metadata admission and persistent payload tier
 
 Add opt-in metadata byte admission independent of the existing payload limit.

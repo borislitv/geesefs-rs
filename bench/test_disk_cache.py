@@ -1,16 +1,103 @@
 """Contract tests for the mounted L2 harness; no FUSE or external service needed."""
 import copy
+import contextlib
+import io
 import json
 from pathlib import Path
 import tempfile
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 
 import disk_cache as disk
 
 
 class Contracts(unittest.TestCase):
+    def test_population_has_eight_identical_io_rounds_per_role_not_extra_measured_pairs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'payload').write_bytes(b'payload')
+            (root / 'pressure').write_bytes(b'pressure')
+            fixture = dict(bucket='fixture', prefix='data', endpoint='http://127.0.0.1:9', environment={},
+                           expected_sha=disk.hashlib.sha256(b'payload').hexdigest(),
+                           pressure_sha=disk.hashlib.sha256(b'pressure').hexdigest())
+            mounts = []
+            @contextlib.contextmanager
+            def mount(*args):
+                mounts.append(args[8])  # Public mount helper's explicit CLI extras.
+                yield root, SimpleNamespace(returncode=0)
+            for role in ['baseline', 'candidate', 'control']:
+                record = dict(mount_id=role, arm=role, workload='sequential')
+                cache = root / (role + '-cache')
+                cache.mkdir()
+                config = disk.example_manifest()
+                config['dataset_bytes'] = 7
+                with patch.object(disk.integration, 'mount', mount), patch.object(disk, 'disk_ready'), \
+                     patch.object(disk, 'disk_idle'), patch.object(disk, 'native_snapshot',
+                         side_effect=[dict(fuse_reads=n, l2_hit_bytes=7 * n, remote_bytes=0, source_get_attempts=0)
+                                      for _ in range(9) for n in [0, 1]]):
+                    disk.prime('/unused', fixture, root, record, config, cache, None, root)
+                self.assertEqual(len(record['population_rounds']), 8)
+                self.assertTrue(all(not row['independent_measured_mount'] for row in record['population_rounds']))
+                self.assertFalse(record['population_validation']['independent_measured_mount'])
+                for extra in mounts[-9:]:
+                    self.assertIn('--read-only-direct-io', extra)
+                    self.assertEqual(extra[extra.index('-o') + 1], 'ro')
+                    self.assertEqual('--disk-cache-dir' in extra, role == 'candidate')
+            self.assertEqual(len(mounts), 27)
+            writer = disk.mount_extra(disk.example_manifest(), 'candidate', root, root / 'writer-stats', 123)
+            self.assertNotIn('--read-only-direct-io', writer)
+
+    def test_native_hot_gate_requires_full_coverage_get_absence_and_real_fuse_reads(self):
+        before = dict(l2_hit_bytes=0, remote_bytes=0, source_get_attempts=0, fuse_reads=0)
+        hot = dict(l2_hit_bytes=1024, remote_bytes=0, source_get_attempts=0, fuse_reads=8)
+        disk.verify_native_hot(before, hot, 1024)
+        for changed in [dict(hot, l2_hit_bytes=512), dict(hot, source_get_attempts=1),
+                        dict(hot, remote_bytes=512), dict(hot, fuse_reads=0)]:
+            with self.assertRaises(RuntimeError):
+                disk.verify_native_hot(before, changed, 1024)
+
+    def test_startup_failure_gate_requires_bypass_and_actual_source_fallback_not_disk_error_counters(self):
+        before = dict(state_bypass=1, stats_available=0, remote_bytes=0, source_get_attempts=0, fuse_reads=0)
+        after = dict(before, remote_bytes=1024, source_get_attempts=1, fuse_reads=8)
+        disk.verify_startup_fallback(before, after, 1024)
+        for changed in [dict(after, state_bypass=0), dict(after, stats_available=1),
+                        dict(after, remote_bytes=0), dict(after, source_get_attempts=0), dict(after, fuse_reads=0)]:
+            with self.assertRaises(RuntimeError):
+                disk.verify_startup_fallback(before, changed, 1024)
+
+    def test_fuse_mount_visibility_is_not_disk_readiness_or_a_zero_snapshot(self):
+        recovering = dict(ready=0, bypass=0, closed=0, available=0)
+        ready = dict(ready=1, bypass=0, closed=0, available=1)
+        with patch.object(disk, 'sample_endpoint', side_effect=[recovering, ready, {'l2_hits': 7}]), patch.object(disk.time, 'sleep'):
+            self.assertEqual(disk.disk_ready(1, {'disk_metrics': {}}), {'l2_hits': 7})
+        with patch.object(disk, 'sample_endpoint', return_value=dict(recovering, bypass=1)):
+            with self.assertRaisesRegex(RuntimeError, 'bypassed/closed'):
+                disk.disk_ready(1, {'disk_metrics': {}})
+        with patch.object(disk, 'sample_endpoint', return_value=recovering), patch.object(disk.time, 'monotonic', side_effect=[0, 31]):
+            with self.assertRaisesRegex(RuntimeError, 'not Ready within thirty seconds'):
+                disk.disk_ready(1, {'disk_metrics': {}})
+
+    def test_native_snapshot_preserves_failure_metrics_and_counts_get_attempts_not_list(self):
+        text = ('geesefs_diagnostics_enabled 1\nx_total 11\ngeesefs_fuse_replies_total{opcode="read",errno="OK"} 8\n'
+                'geesefs_s3_attempts_total{operation="get",transport="sdk"} 3\n'
+                'geesefs_s3_attempts_total{operation="get",transport="extension"} 4\n'
+                'geesefs_s3_attempts_total{operation="list",transport="sdk"} 99\n')
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            with patch.object(disk.urllib.request, 'urlopen', return_value=io.BytesIO(text.encode())):
+                result = disk.native_snapshot(1, {'disk_metrics': {'l2_hits': 'x_total'}}, output, 'observed')
+            self.assertEqual(result, dict(l2_hits=11, source_get_attempts=7, fuse_reads=8))
+            self.assertEqual((output / 'observed-metrics.txt').read_text(), text)
+            self.assertEqual(json.loads((output / 'observed-metrics.json').read_text()), result)
+            with patch.object(disk.urllib.request, 'urlopen', return_value=io.BytesIO(b'geesefs_diagnostics_enabled 1\nx_total 0\ngeesefs_fuse_replies_total{opcode="read",errno="OK"} 0\n')):
+                self.assertEqual(disk.native_snapshot(1, {'disk_metrics': {'l2_hits': 'x_total'}}, output, 'empty')['source_get_attempts'], 0)
+            with patch.object(disk.urllib.request, 'urlopen', return_value=io.BytesIO(b'geesefs_diagnostics_enabled 0\nx_total 0\n')):
+                with self.assertRaisesRegex(RuntimeError, 'enabled diagnostics'):
+                    disk.native_snapshot(1, {'disk_metrics': {'l2_hits': 'x_total'}}, output, 'disabled')
+
     def test_pairs_are_independent_mounts_with_same_executable_controls(self):
         config = disk.example_manifest()
         cases = list(disk.cases(config, pairs=8, controls=8))

@@ -101,6 +101,7 @@ struct Allocation {
     _reservation: Reservation,
     _owner: Option<Reservation>,
     loaned: bool,
+    disk_origin: bool,
 }
 
 impl Reservation {
@@ -162,6 +163,7 @@ impl Block {
                 _reservation: reservation,
                 _owner: None,
                 loaned: false,
+                disk_origin: false,
             }),
             range,
         }
@@ -190,6 +192,17 @@ impl Block {
 
     pub(crate) fn is_loaned(&self) -> bool {
         self.allocation.loaned
+    }
+
+    pub(crate) fn with_disk_origin(mut self) -> Self {
+        Arc::get_mut(&mut self.allocation)
+            .expect("new disk output is exclusively owned")
+            .disk_origin = true;
+        self
+    }
+
+    pub(crate) fn is_disk_origin(&self) -> bool {
+        self.allocation.disk_origin
     }
 
     /// Transfer a complete, exclusively cache-owned backing; never add capacity.

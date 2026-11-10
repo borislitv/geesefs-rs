@@ -5,6 +5,22 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-10: bounded metadata admission and persistent payload tier
+
+Add opt-in metadata byte admission independent of the existing payload limit.
+Charges follow returned names/xattrs, listing/inode state, writer snapshots and
+rename plans. Independent regressions exposed premature charge release, encoding
+growth and move intent published before a mutating request; preserve old names
+on pre-remote rejection/cancellation and retain intent after attempted operations.
+
+Qualify the maintained Foyer fork and integrate capacity-only L1 demotion,
+validated L2 reads/refill, bounded funding and owned recovery/shutdown. Correct
+the demonstrated stale-size admission panic by checking size and generation
+before splitting the new window. Real-file and native ext4 ENOSPC/EACCES tests
+preserve completed inventory without reset. Full mounted/performance acceptance
+remains open. Separate allocation evidence confirms duplicate clean metadata and
+key owners still need compaction; a byte limit alone does not remove their cost.
+
 ## 2026-11-09: release 0.1.11 preparation
 
 Advance the package and lockfile together for bounded subtree prefetch. Package

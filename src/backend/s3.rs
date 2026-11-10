@@ -30,7 +30,7 @@ use crate::{
     metrics::{self, Stage},
 };
 
-const READ_CHUNK_BYTES: usize = 128 * 1024;
+const READ_CHUNK_BYTES: usize = crate::read::READ_BLOCK_BYTES;
 
 // The extension uses reqwest because the SDK cannot execute ext-v1. Keep this
 // narrow adapter Go-like: throttling gets seconds of jittered backoff, not the

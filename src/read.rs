@@ -7,6 +7,10 @@ use crate::{
 };
 use std::{collections::HashMap, ops::Range, sync::Arc};
 
+/// Logical payload unit shared by L1/L2 and streamed S3 delivery.
+pub const READ_BLOCK_BYTES: usize = 128 * 1024;
+const _: () = assert!(READ_BLOCK_BYTES == crate::disk_cache::MAX_PAYLOAD_BYTES);
+
 pub(crate) struct Window {
     pub snapshot: Arc<Snapshot>,
     pub range: Range<u64>,
@@ -20,6 +24,7 @@ pub(crate) fn generation(version: u64, remote: Option<&ObjectHead>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     remote.map(|head| &head.etag).hash(&mut hash);
+    remote.map(|head| head.size).hash(&mut hash);
     version.hash(&mut hash);
     hash.finish()
 }
@@ -99,11 +104,154 @@ pub(crate) fn unfilled(node: &Inode, generation: u64, range: Range<u64>) -> Opti
 }
 
 impl FillGuard {
+    pub(crate) fn node(&self) -> &Arc<Inode> {
+        &self.node
+    }
     pub(crate) fn published(&self) {
         if let Some(fill) = self.node.read_fills.lock().unwrap().get(&self.key) {
             fill.done.send_replace(());
         }
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct DiskRead {
+    pub cache: crate::disk_cache::DiskCache,
+    pub namespace: [u8; 32],
+}
+
+pub(crate) fn current(node: &Inode, expected: u64) -> bool {
+    let state = node.state.lock().unwrap();
+    !state.deleted && generation(state.version, state.remote.as_ref()) == expected
+}
+
+/// Exact logical block coverage, including the short EOF block. No source GET
+/// is extended to fill a disk record.
+pub(crate) fn block_end(at: u64, size: u64) -> u64 {
+    (at / READ_BLOCK_BYTES as u64 + 1)
+        .saturating_mul(READ_BLOCK_BYTES as u64)
+        .min(size)
+}
+
+pub(crate) fn disk_coverage(start: u64, end: u64, size: u64) -> usize {
+    if end <= start {
+        return 0;
+    }
+    (block_end(end - 1, size) - start / READ_BLOCK_BYTES as u64 * READ_BLOCK_BYTES as u64) as usize
+}
+
+pub(crate) struct DiskRange {
+    pub disk: DiskRead,
+    pub node: Arc<Inode>,
+    pub generation: u64,
+    pub admission: Reservation,
+    pub deadline: std::time::Duration,
+}
+
+/// Disk output transfers the existing fill reservation. The separate, already
+/// reserved source output remains available on a timed-out disk read: its owned
+/// I/O may still hold the first reservation. Missing adjacent blocks share a GET.
+pub(crate) async fn load_disk_range(
+    store: &Arc<dyn Store>,
+    snapshot: &Snapshot,
+    span: Range<u64>,
+    local: &Budget,
+    output: &crate::backend::RangeSink,
+    sender: &tokio::sync::mpsc::Sender<(u64, Block)>,
+    mut range: DiskRange,
+) -> Result<()> {
+    let (start, end) = (span.start, span.end);
+    let remote = snapshot.remote.as_ref().expect("qualified clean range");
+    let mut next = start;
+    let mut missing = start;
+    while next < end {
+        let full_start = next / READ_BLOCK_BYTES as u64 * READ_BLOCK_BYTES as u64;
+        let full_end = block_end(next, snapshot.size);
+        let segment_end = full_end.min(end);
+        let full_len = (full_end - full_start) as usize;
+        let full = crate::disk_cache::DiskKey::new(
+            &range.disk.namespace,
+            snapshot.key.as_bytes(),
+            remote.etag.as_bytes(),
+            snapshot.size,
+            full_start,
+            full_len,
+        )
+        .ok();
+        let key = full
+            .filter(|key| range.disk.cache.touch_validated(key))
+            .or_else(|| {
+                crate::disk_cache::DiskKey::new(
+                    &range.disk.namespace,
+                    snapshot.key.as_bytes(),
+                    remote.etag.as_bytes(),
+                    snapshot.size,
+                    next,
+                    (segment_end - next) as usize,
+                )
+                .ok()
+            });
+        let mut block_admission = range.admission.split(full_len);
+        let block = if current(&range.node, range.generation) {
+            if let Some(key) = &key {
+                range
+                    .disk
+                    .cache
+                    .read_block_reserved(
+                        key,
+                        block_admission.split(key.covered_len()),
+                        range.deadline,
+                    )
+                    .await
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(block) = block.filter(|_| current(&range.node, range.generation)) {
+            let relative = (next - key.as_ref().unwrap().offset()) as usize;
+            // Identity storage belongs to the bounded disk lookup, not to a
+            // possibly blocked source GET or the retained L1 entry.
+            drop(key);
+            if missing < next {
+                store
+                    .read_range_chunks(
+                        &snapshot.key,
+                        missing,
+                        (next - missing) as usize,
+                        remote,
+                        local,
+                        output,
+                    )
+                    .await?;
+            }
+            sender
+                .send((
+                    next,
+                    block
+                        .with_disk_origin()
+                        .slice(relative..relative + (segment_end - next) as usize),
+                ))
+                .await
+                .map_err(|_| Error::Cancelled)?;
+            missing = segment_end;
+        }
+        next = segment_end;
+    }
+    if missing < end {
+        store
+            .read_range_chunks(
+                &snapshot.key,
+                missing,
+                (end - missing) as usize,
+                remote,
+                local,
+                output,
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 impl Drop for FillGuard {

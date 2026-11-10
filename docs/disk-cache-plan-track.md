@@ -9,9 +9,9 @@ acceptance are separate later work.
 [X] Stage 2: Add CLI configuration and regex policy
 [X] Stage 3: Verify CLI and policy boundaries
 [X] Stage 4: Implement the isolated L2 adapter
-[ ] Stage 5: Verify capacity eviction, failures and recovery
-[ ] Stage 6: Integrate demotion, reads, lifecycle and metrics
-[ ] Stage 7: Verify cross-tier correctness and resource progress
+[X] Stage 5: Verify capacity eviction, failures and recovery
+[X] Stage 6: Integrate demotion, reads, lifecycle and metrics
+[X] Stage 7: Verify cross-tier correctness and resource progress
 [ ] Stage 8: Local mounted verification, measurements and draft delivery
 
 ## Notes
@@ -61,3 +61,17 @@ acceptance are separate later work.
   The initial default run's performance harness failed because the system Python
   lacked psutil; this environment failure is retained separately. Neither this
   suite nor synthetic ledger checks establish mounted/performance acceptance.
+- 2026-11-10 integration: L1 capacity victims alone feed L2 after cache-lock release;
+  validated reads/refill consult exact L2 coverage, and async recovery falls back to
+  the source. Funding is deducted from L1 without changing ingress/writer reserves.
+  Independent review found and corrected an old-size/new-generation admission panic.
+- All 460 active all-feature tests pass; 24 explicitly opt-in native/diagnostic
+  entries remain ignored in that command. Native ext4 block/inode ENOSPC and
+  permission checks were run separately and passed without resetting existing media.
+  Clippy with warnings denied, formatting and source audit pass.
+- Exported observations distinguish admission from completion, region-reclaim
+  starts from evicted records, operation latency from pure device latency, funded
+  index bytes from measured heap, and captured st_blocks from live physical usage.
+- Stage 8 harness is implemented but its mounted/performance matrix remains pending.
+  The operator's subsequent metadata-compaction work is additive: preserve this L2
+  implementation, then verify compact shared owners before final measurements.

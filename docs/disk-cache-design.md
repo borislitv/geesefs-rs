@@ -1,8 +1,9 @@
 # Selective disk payload cache: design proposal
 
-Status: isolated adapter implemented; runtime integration not implemented. The maintained
-Foyer fork supplies qualified guarded Store APIs for the isolated adapter; application
-funding, cross-tier correctness and performance acceptance remain separate gates.
+Status: adapter and runtime integration implemented and locally regression-tested.
+The maintained Foyer fork supplies guarded Store APIs; funding is deducted from
+effective L1 capacity. Native filesystem failure checks pass. Mounted workload and
+performance acceptance remain open; no production acceptance is implied.
 See the
 [decision and reproduction](dependency-decisions.md#selective-disk-payload-cache-qualification--2026-11-09).
 Inspected source: `a5aa9c003d219d7e683cc2053f8e32c653173742`.

@@ -167,6 +167,9 @@ async fn disk_cache_invalid_configuration_never_contacts_backend_or_mounts() {
         (3, "0"),
         (3, "18446744073709551616 B"),
         (3, "invalid"),
+        (3, "1 MiB"),
+        (3, "8388609 B"),
+        (3, "17 TiB"),
         (5, "["),
         (5, r"(deb)\1"),
         (5, "(?=deb)"),
@@ -190,8 +193,6 @@ async fn disk_cache_invalid_configuration_never_contacts_backend_or_mounts() {
         args.push(option.into());
         cases.push(args);
     }
-    // Even valid configuration cannot silently claim an L2 before integration.
-    cases.push(complete);
     for (index, args) in cases.iter().enumerate() {
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_geesefs-rs"));
         command
@@ -226,18 +227,7 @@ async fn disk_cache_invalid_configuration_never_contacts_backend_or_mounts() {
             .unwrap();
         assert!(!output.status.success(), "case={index}");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if index + 1 == cases.len() {
-            assert!(
-                stderr.contains("disk cache runtime is not implemented"),
-                "{stderr}"
-            );
-        } else {
-            assert!(stderr.contains("disk-cache"), "case={index}: {stderr}");
-            assert!(
-                !stderr.contains("runtime is not implemented"),
-                "invalid configuration must be diagnosed before the runtime gate: {stderr}"
-            );
-        }
+        assert!(stderr.contains("disk-cache"), "case={index}: {stderr}");
         assert!(!stats.exists(), "case={index}: statistics side effect");
         assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
         let entries: Vec<_> = std::fs::read_dir(&mount)
@@ -246,4 +236,55 @@ async fn disk_cache_invalid_configuration_never_contacts_backend_or_mounts() {
             .collect();
         assert_eq!(entries, [std::ffi::OsString::from("inside")]);
     }
+}
+
+#[tokio::test]
+async fn disk_cache_directory_is_locked_before_sdk_initialization() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let cache = root.path().join("cache");
+    let mount = root.path().join("mount");
+    std::fs::create_dir(&cache).unwrap();
+    std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::create_dir(&mount).unwrap();
+    let _owner =
+        geesefs_rs::disk_cache::PreparedDiskCache::prepare(&cache, 16 * 1024 * 1024).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_geesefs-rs"));
+    command
+        .env_clear()
+        .env("HOME", root.path())
+        .env("AWS_EC2_METADATA_DISABLED", "true")
+        .kill_on_drop(true)
+        .args([
+            "-f",
+            "--no-detect",
+            "--signature-version=anonymous",
+            "--sdk-max-retries=0",
+            "--http-timeout=1s",
+            "--request-timeout=1s",
+            "--memory-limit=32",
+            &format!("--endpoint=http://{}", listener.local_addr().unwrap()),
+            "--disk-cache-dir",
+            cache.to_str().unwrap(),
+            "--disk-cache-max-size=16 MiB",
+            r"--disk-cache-regex=\.(deb|rpm)$",
+            "bucket",
+            mount.to_str().unwrap(),
+        ]);
+    let output = tokio::time::timeout(Duration::from_secs(5), command.output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(
+        listener.accept().err().map(|error| error.kind()),
+        Some(std::io::ErrorKind::WouldBlock)
+    );
+    assert!(
+        !cache.join("payload-v1.cache").exists(),
+        "directory exclusion must precede engine preallocation"
+    );
+    assert!(std::fs::read_dir(&mount).unwrap().next().is_none());
 }

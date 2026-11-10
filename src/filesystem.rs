@@ -37,6 +37,9 @@ pub struct Filesystem {
     metadata: crate::metadata_budget::MetadataBudget,
     data: Budget,
     cache: crate::cache::ReadCache,
+    disk: Mutex<DiskTier>,
+    disk_funding_bytes: usize,
+    disk_read_bytes: std::sync::atomic::AtomicU64,
     cache_published: Notify,
     flush_lane: Budget,
     flush_activity: Arc<RwLock<()>>,
@@ -298,6 +301,7 @@ impl Drop for OpenFile {
 pub struct EffectiveBudgets {
     pub payload_limit_bytes: usize,
     pub data_shared_bytes: usize,
+    pub disk_cache_funding_bytes: usize,
     pub read_cache_policy_bytes: usize,
     pub read_cache_loaned_bytes: usize,
     pub ingress_bytes: usize,
@@ -325,6 +329,14 @@ pub struct EffectiveBudgets {
     pub max_queued_upload_jobs: usize,
     pub max_metadata_resolution_jobs: usize,
     pub metadata_resolution_jobs_in_use: usize,
+}
+
+struct DiskTier {
+    namespace: Option<[u8; 32]>,
+    bypass: Option<crate::backend::cache_scope::CacheBypass>,
+    status: Option<crate::disk_cache::DiskCacheStatus>,
+    cache: Option<crate::disk_cache::DiskCache>,
+    attaching: bool,
 }
 
 pub fn not_found(error: &Error) -> bool {
@@ -369,15 +381,21 @@ impl Filesystem {
     }
 
     pub fn effective_budgets(&self) -> EffectiveBudgets {
-        let window = self
+        let mut window = self
             .data
             .limit()
+            .saturating_sub(self.disk_funding_bytes)
             .saturating_sub(MAX_IO)
             .min(u32::MAX as usize - MAX_IO);
+        if self.disk_funding_bytes > 0 {
+            window = window.saturating_sub(2 * read::READ_BLOCK_BYTES) / 2;
+        }
         EffectiveBudgets {
             payload_limit_bytes: self.ingress.limit() + self.data.limit() + self.flush_lane.limit(),
             data_shared_bytes: self.data.limit(),
-            read_cache_policy_bytes: self.data.limit() + self.flush_lane.limit(),
+            disk_cache_funding_bytes: self.disk_funding_bytes,
+            read_cache_policy_bytes: self.data.limit() + self.flush_lane.limit()
+                - self.disk_funding_bytes,
             read_cache_loaned_bytes: self.cache.loaned_bytes(),
             ingress_bytes: self.ingress.limit(),
             flush_bytes: self.flush_lane.limit(),
@@ -389,7 +407,13 @@ impl Filesystem {
             requested_large_window_bytes: self.config.read_ahead_large * 1024,
             max_effective_window_bytes: window,
             max_overlay_window_bytes: window / 2,
-            read_parallel_chunk_bytes: (self.config.read_ahead_parallel * 1024).min(window),
+            read_parallel_chunk_bytes: (self.config.read_ahead_parallel * 1024)
+                .max(if self.disk_funding_bytes > 0 {
+                    read::READ_BLOCK_BYTES
+                } else {
+                    1
+                })
+                .min(window),
             upload_chunk_bytes: crate::upload_body::CHUNK_SIZE,
             max_read_tasks_per_window: self.config.max_requests,
             max_request_tasks: self.config.max_requests,
@@ -410,6 +434,268 @@ impl Filesystem {
 
     pub fn metadata_usage(&self) -> crate::metadata_budget::MetadataUsage {
         self.metadata.usage()
+    }
+
+    pub fn disk_cache_stats(&self) -> Option<crate::disk_cache::Stats> {
+        self.disk
+            .lock()
+            .unwrap()
+            .cache
+            .as_ref()
+            .map(|cache| cache.stats())
+    }
+
+    /// Validated L2 bytes delivered into the read pipeline, including read-ahead.
+    pub fn disk_cache_read_bytes(&self) -> u64 {
+        self.disk_read_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Configured deduction from L1, including during recovery/bypass. Actual
+    /// ownership is also visible in the shared data lane's used-byte counter.
+    pub fn disk_cache_funding(&self) -> Option<crate::disk_cache::Funding> {
+        if self.disk_funding_bytes == 0 {
+            return None;
+        }
+        crate::disk_cache::Funding::derive(self.config.disk_cache_max_size?, self.data.limit()).ok()
+    }
+
+    pub fn disk_cache_state(&self) -> Option<crate::disk_cache::State> {
+        let disk = self.disk.lock().unwrap();
+        self.config.disk_cache_dir.as_ref()?;
+        Some(disk.status.as_ref().map_or(
+            if disk.bypass.is_some() {
+                crate::disk_cache::State::Bypass
+            } else {
+                crate::disk_cache::State::Prepared
+            },
+            |status| status.state(),
+        ))
+    }
+
+    pub fn disk_cache_bypass_reason(&self) -> Option<crate::backend::cache_scope::CacheBypass> {
+        self.disk.lock().unwrap().bypass
+    }
+
+    /// Explicit startup step: prepare/lock the directory before backend startup,
+    /// then attach only after the backend has established its persistent scope.
+    /// Recovery is owned independently of caller cancellation; requests fall back
+    /// while it runs, and a concurrent shutdown closes rather than installs it.
+    pub async fn attach_disk_cache(
+        self: &Arc<Self>,
+        prepared: crate::disk_cache::PreparedDiskCache,
+    ) -> Result<()> {
+        {
+            let mut disk = self.disk.lock().unwrap();
+            if self.config.disk_cache_dir.is_none() || disk.attaching || self.is_closing() {
+                return Err(Error::Config(
+                    "invalid or repeated disk cache attachment".into(),
+                ));
+            }
+            disk.attaching = true;
+            if let Some(reason) = disk.bypass {
+                eprintln!("disk cache bypass: {reason:?}");
+                return Ok(());
+            }
+            let funding = prepared.funding(self.data.limit())?;
+            if funding.required_bytes != self.disk_funding_bytes
+                || Some(funding.capacity as u64) != self.config.disk_cache_max_size
+            {
+                return Err(Error::Config(
+                    "disk cache preparation does not match configuration".into(),
+                ));
+            }
+            disk.status = Some(prepared.status());
+        }
+        let fs = self.clone();
+        tokio::spawn(async move {
+            let cache = crate::disk_cache::DiskCache::open(prepared, &fs.data).await?;
+            let closing = {
+                let mut disk = fs.disk.lock().unwrap();
+                if fs.is_closing() {
+                    true
+                } else {
+                    disk.cache = Some(cache.clone());
+                    false
+                }
+            };
+            if closing {
+                cache.close(fs.config.request_timeout).await?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| Error::Cancelled)?
+    }
+
+    pub async fn drain_disk_cache(&self, deadline: Duration) -> Result<()> {
+        let cache = self.disk.lock().unwrap().cache.clone();
+        if let Some(cache) = cache {
+            cache.drain(deadline).await?;
+        }
+        Ok(())
+    }
+
+    fn disk_read(&self, node: &Inode, generation: u64) -> Option<read::DiskRead> {
+        let (cache, namespace) = {
+            let disk = self.disk.lock().unwrap();
+            (disk.cache.clone()?, disk.namespace?)
+        };
+        if self.is_closing() {
+            return None;
+        }
+        // Optional work never waits for namespace/inode ownership. In particular
+        // capacity eviction cannot hold up a FIFO reader or a writer's loan.
+        let ns = self.namespace.try_lock().ok()?;
+        let state = node.state.try_lock().ok()?;
+        if state.deleted
+            || state.version != state.durable
+            || !state.extents.is_empty()
+            || state.pending_upload.is_some()
+            || state.rename_target.is_some()
+            || state.data_key.is_some()
+            || file_type(state.mode) != FileType::RegularFile
+            || state
+                .remote
+                .as_ref()
+                .is_none_or(|head| head.size != state.size || head.etag.is_empty())
+            || state.visible_remote_size < state.size
+            || read::generation(state.version, state.remote.as_ref()) != generation
+            || !self
+                .config
+                .disk_cache_regex
+                .as_ref()?
+                .matches(&format!("/{}", state.key))
+            || state
+                .key
+                .match_indices('/')
+                .map(|(end, _)| end)
+                .chain(std::iter::once(state.key.len()))
+                .any(|end| {
+                    let prefix = &state.key[..end];
+                    ns.moving.contains(prefix)
+                        || ns.pending_moves.contains_key(prefix)
+                        || ns.pending_deletes.contains_key(prefix)
+                        || ns.tombstones.contains_key(prefix)
+                })
+        {
+            return None;
+        }
+        Some(read::DiskRead { cache, namespace })
+    }
+
+    fn demote_capacity(&self, victim: crate::cache::CapacityVictim) {
+        if victim.block.is_loaned() {
+            return;
+        }
+        let Ok(node) = self.node(victim.inode) else {
+            return;
+        };
+        let Some(disk) = self.disk_read(&node, victim.generation) else {
+            return;
+        };
+        let mut relative = 0;
+        while relative < victim.block.as_slice().len() {
+            let at = victim.offset + relative as u64;
+            let key = {
+                let Ok(state) = node.state.try_lock() else {
+                    return;
+                };
+                if state.deleted
+                    || state.version != state.durable
+                    || state.rename_target.is_some()
+                    || read::generation(state.version, state.remote.as_ref()) != victim.generation
+                {
+                    return;
+                }
+                let Some(head) = &state.remote else {
+                    return;
+                };
+                let amount = (read::block_end(at, state.size).saturating_sub(at) as usize)
+                    .min(victim.block.as_slice().len() - relative);
+                crate::disk_cache::DiskKey::new(
+                    &disk.namespace,
+                    state.key.as_bytes(),
+                    head.etag.as_bytes(),
+                    state.size,
+                    at,
+                    amount,
+                )
+                .ok()
+            };
+            let Some(key) = key else {
+                return;
+            };
+            let end = relative + key.covered_len();
+            // No cache/inode/namespace lock and no await while copying. Adapter
+            // owns only its admitted visible copy, never this full L1 backing.
+            disk.cache
+                .try_demote(key, victim.block.slice(relative..end));
+            relative = end;
+        }
+    }
+
+    fn evict_cache(&self) -> bool {
+        let Some(victim) = self.cache.capacity_victim() else {
+            return false;
+        };
+        self.demote_capacity(victim);
+        true
+    }
+
+    fn touch_disk_hit(&self, node: &Inode, generation: u64, offset: u64, length: usize) {
+        let Some(disk) = self.disk_read(node, generation) else {
+            return;
+        };
+        let mut next = offset;
+        while next < offset.saturating_add(length as u64) {
+            let Some((start, len)) = self.cache.span_at(node.ino, generation, next) else {
+                break;
+            };
+            let block_start = next / read::READ_BLOCK_BYTES as u64 * read::READ_BLOCK_BYTES as u64;
+            let at = block_start.max(start);
+            let (full, fragment) = {
+                let Ok(state) = node.state.try_lock() else {
+                    return;
+                };
+                let Some(head) = &state.remote else {
+                    return;
+                };
+                if read::generation(state.version, state.remote.as_ref()) != generation {
+                    return;
+                }
+                let end = read::block_end(at, state.size).min(start.saturating_add(len as u64));
+                let fragment = crate::disk_cache::DiskKey::new(
+                    &disk.namespace,
+                    state.key.as_bytes(),
+                    head.etag.as_bytes(),
+                    state.size,
+                    at,
+                    (end - at) as usize,
+                )
+                .ok();
+                let full_end = read::block_end(block_start, state.size);
+                let full = crate::disk_cache::DiskKey::new(
+                    &disk.namespace,
+                    state.key.as_bytes(),
+                    head.etag.as_bytes(),
+                    state.size,
+                    block_start,
+                    (full_end - block_start) as usize,
+                )
+                .ok();
+                (full, fragment)
+            };
+            let Some(key) = fragment else {
+                return;
+            };
+            next = key.offset() + key.covered_len() as u64;
+            if !full
+                .as_ref()
+                .is_some_and(|full| disk.cache.touch_validated(full))
+            {
+                disk.cache.touch_validated(&key);
+            }
+        }
     }
     pub(crate) fn charge_metadata(
         &self,
@@ -485,6 +771,23 @@ impl Filesystem {
             ingress_bytes,
             flush_bytes,
         } = config.payload_budgets()?;
+        let disk_config = config.disk_cache_config()?;
+        let scope = if disk_config.is_some() {
+            Some(store.persistent_cache_scope()?)
+        } else {
+            None
+        };
+        let disk_namespace = scope.and_then(|scope| scope.namespace());
+        let bypass = match scope {
+            Some(crate::backend::cache_scope::CacheScope::Bypass(reason)) => Some(reason),
+            _ => None,
+        };
+        let disk_funding_bytes = if disk_namespace.is_some() {
+            crate::disk_cache::Funding::derive(disk_config.as_ref().unwrap().max_bytes, data_bytes)?
+                .required_bytes
+        } else {
+            0
+        };
         let config = Arc::new(config);
         let metadata = crate::metadata_budget::MetadataBudget::new(config.metadata_limit)?;
         let root = Inode::try_new(1, "".into(), true, None, &config, &metadata)?;
@@ -505,8 +808,17 @@ impl Filesystem {
             ingress: Budget::new(ingress_bytes)?,
             metadata,
             data: Budget::new(data_bytes)?,
+            disk: Mutex::new(DiskTier {
+                namespace: disk_namespace,
+                bypass,
+                status: None,
+                cache: None,
+                attaching: false,
+            }),
+            disk_funding_bytes,
+            disk_read_bytes: std::sync::atomic::AtomicU64::new(0),
             cache: crate::cache::ReadCache::with_entry_limit(
-                (data_bytes + flush_bytes) as u64,
+                (data_bytes + flush_bytes - disk_funding_bytes) as u64,
                 config.entry_limit as usize,
             ),
             cache_published: Notify::new(),
@@ -1318,7 +1630,13 @@ impl Filesystem {
         if self.cache.gap(ino, generation, range.clone()) != Some(range.clone()) {
             return Ok(());
         }
-        let Some(charge) = self.try_refill_admission(ino, generation, consumed, length) else {
+        let admission = length
+            + if self.disk_funding_bytes > 0 {
+                read::disk_coverage(range.start, range.end, size)
+            } else {
+                0
+            };
+        let Some(charge) = self.try_refill_admission(ino, generation, consumed, admission) else {
             return Ok(());
         };
         let snapshot = read::snapshot(&node)?;
@@ -1388,9 +1706,8 @@ impl Filesystem {
             if let Ok(charge) = self.data.try_reserve(length) {
                 return Some(charge);
             }
-            if !cache.evict_consumed_lru(ino, generation, consumed) {
-                return None;
-            }
+            let victim = cache.consumed_victim(ino, generation, consumed)?;
+            self.demote_capacity(victim);
         }
     }
 
@@ -1423,6 +1740,9 @@ impl Filesystem {
         let node = self.node(ino)?;
         let (size, clean, generation, version, etag, mut single_buffer) = {
             let state = node.state.lock().unwrap();
+            if state.deleted {
+                return Err(Error::Fs(libc::ENOENT));
+            }
             (
                 state.size,
                 state.version == state.durable,
@@ -1452,6 +1772,9 @@ impl Filesystem {
         // an earlier FIFO waiter may need bytes published after its eviction.
         // One-block hits share their allocation; fragment spans use this output.
         let reply = self.admit(length).await?;
+        if !read::current(&node, generation) {
+            return Err(self.again("read_generation_after_admission"));
+        }
         if length == 0 {
             return reply.copy(&[]).map(Some);
         }
@@ -1467,6 +1790,7 @@ impl Filesystem {
             })
         });
         if let Some(block) = cached {
+            self.touch_disk_hit(&node, generation, offset, length);
             self.read_metrics.hits.inc();
             self.read_metrics.hit_bytes.inc_by(length as u64);
             return Ok(Some(block));
@@ -1476,7 +1800,7 @@ impl Filesystem {
         // Miss admission reserves output and scratch atomically below.
         let budgets = self.effective_budgets();
         let mut start = if clean {
-            offset / (128 * 1024) * (128 * 1024)
+            offset / read::READ_BLOCK_BYTES as u64 * read::READ_BLOCK_BYTES as u64
         } else {
             offset
         };
@@ -1510,8 +1834,12 @@ impl Filesystem {
         let fill = loop {
             let admission = read::start_fill(&node, generation, start, start + prefetch as u64);
             let reply = self.admit(length).await?;
+            if !read::current(&node, generation) {
+                return Err(self.again("read_generation_after_fill_wait"));
+            }
             let cached = self.cache.read(ino, generation, offset, length, reply);
             if let Some(block) = cached {
+                self.touch_disk_hit(&node, generation, offset, length);
                 return Ok(Some(block));
             }
             match admission {
@@ -1546,7 +1874,15 @@ impl Filesystem {
         // allocation; otherwise competing readers could each pin half a lane.
         let (charge, snapshot) = loop {
             let charge = self
-                .admit((if single_buffer { 1 } else { 2 }) * prefetch + length)
+                .admit(
+                    (if single_buffer { 1 } else { 2 }) * prefetch
+                        + length
+                        + if single_buffer && self.disk_funding_bytes > 0 {
+                            read::disk_coverage(start, start + prefetch as u64, size)
+                        } else {
+                            0
+                        },
+                )
                 .await?;
             // Capture payload owners only after admission. Pinning dirty extents
             // while waiting for their own permits would deadlock a pressured read.
@@ -1561,6 +1897,17 @@ impl Filesystem {
                     prefetch = (prefetch / chunk * chunk).max(relative + length);
                 }
                 continue;
+            }
+            // A clean L2 plan includes short-EOF disk coverage for the original
+            // size/generation. Admission can flush writers while it waits: drop
+            // obsolete admission and let the caller retry before any splits.
+            // Dirty-overlay replanning above and RAM-only reads stay unchanged.
+            if single_buffer
+                && self.disk_funding_bytes > 0
+                && (snapshot.size != size
+                    || read::generation(snapshot.version, snapshot.remote.as_ref()) != generation)
+            {
+                return Err(self.again("read_generation_after_window_admission"));
             }
             break (charge, Arc::new(snapshot));
         };
@@ -1600,6 +1947,8 @@ impl Filesystem {
             cache_key,
             fill,
         } = window;
+        let disk = cache_key.and_then(|(_, generation)| self.disk_read(fill.node(), generation));
+        let disk_reserved = single_buffer && self.disk_funding_bytes > 0;
         let chunk = self.effective_budgets().read_parallel_chunk_bytes.max(1);
         let mut output = charge.split(length);
         // The snapshot may have shrunk while admission flushed another generation.
@@ -1625,9 +1974,22 @@ impl Filesystem {
         while next < end || !tasks.is_empty() || !chunks.is_empty() {
             while next < end && tasks.len() < self.config.max_requests {
                 let at = next;
-                let amount = (end - next).min(chunk as u64) as usize;
+                let mut amount = (end - next).min(chunk as u64) as usize;
+                if disk_reserved && next + (amount as u64) < end {
+                    let aligned_end = (next + amount as u64) / read::READ_BLOCK_BYTES as u64
+                        * read::READ_BLOCK_BYTES as u64;
+                    if aligned_end > next {
+                        amount = (aligned_end - next) as usize;
+                    }
+                }
                 next += amount as u64;
                 let mut owner = charge.split((if single_buffer { 1 } else { 2 }) * amount);
+                let disk_charge = disk_reserved
+                    .then(|| charge.split(read::disk_coverage(at, next, snapshot.size)));
+                let disk = disk.clone();
+                let node = fill.node().clone();
+                let generation = cache_key.map(|(_, generation)| generation);
+                let deadline = self.config.request_timeout.min(Duration::from_millis(250));
                 let (store, snapshot) = (self.store.clone(), snapshot.clone());
                 let metrics = self.read_metrics.clone();
                 let diagnostics = self.diagnostics.clone();
@@ -1637,9 +1999,30 @@ impl Filesystem {
                     metrics.fill_jobs.inc();
                     let result = async {
                         let local = Budget::new(2 * amount)?;
-                        let output = crate::backend::RangeSink::new(sender, owner.split(amount))
-                            .with_diagnostics(diagnostics);
+                        let output =
+                            crate::backend::RangeSink::new(sender.clone(), owner.split(amount))
+                                .with_diagnostics(diagnostics);
                         if single_buffer {
+                            if let (Some(disk), Some(admission), Some(generation)) =
+                                (disk, disk_charge, generation)
+                            {
+                                return read::load_disk_range(
+                                    &store,
+                                    &snapshot,
+                                    at..at + amount as u64,
+                                    &local,
+                                    &output,
+                                    &sender,
+                                    read::DiskRange {
+                                        disk,
+                                        node,
+                                        generation,
+                                        admission,
+                                        deadline,
+                                    },
+                                )
+                                .await;
+                            }
                             store
                                 .read_range_chunks(
                                     &snapshot.key,
@@ -1697,7 +2080,10 @@ impl Filesystem {
             let Some((at, block)) = completed else {
                 continue;
             };
-            if single_buffer {
+            if block.is_disk_origin() {
+                self.disk_read_bytes
+                    .fetch_add(block.as_slice().len() as u64, Ordering::Relaxed);
+            } else if single_buffer {
                 self.read_metrics
                     .remote_bytes
                     .inc_by(block.as_slice().len() as u64);
@@ -1728,11 +2114,15 @@ impl Filesystem {
             {
                 ready(Ok(result.take().expect("completed requested result")));
             }
-            if let Some((ino, generation)) = cache_key {
+            if let Some((ino, generation)) =
+                cache_key.filter(|(_, generation)| read::current(fill.node(), *generation))
+            {
                 // Publish into the cache followers inspect, including after
                 // pressure reclamation while the GET was in flight.
                 let cache = &self.cache;
-                cache.insert(ino, generation, at, block);
+                cache.insert_with_eviction(ino, generation, at, block, |victim| {
+                    self.demote_capacity(victim)
+                });
                 if right > left {
                     cache.consumed(
                         ino,
@@ -1772,7 +2162,7 @@ impl Filesystem {
         // Pinned borrowers retain their permits; FIFO waiters stay ahead.
         {
             let cache = &self.cache;
-            while self.try_cache_loan(cache) || cache.evict_lru() {
+            while self.try_cache_loan(cache) || self.evict_cache() {
                 if let Ok(reservation) = self.data.try_reserve(size) {
                     return Ok(reservation);
                 }
@@ -1800,7 +2190,7 @@ impl Filesystem {
                     _ = async {
                         let reclaimed = {
                             let cache = &self.cache;
-                            self.try_cache_loan(cache) || cache.evict_lru()
+                            self.try_cache_loan(cache) || self.evict_cache()
                         };
                         if !reclaimed {
                             published.await;
@@ -3303,7 +3693,19 @@ impl Filesystem {
 
     pub async fn shutdown(&self) -> Result<()> {
         self.closing.store(true, Ordering::Release);
+        let cache = self.disk.lock().unwrap().cache.clone();
+        let deadline = self.config.request_timeout;
+        // Teardown is independently owned before the first writer await. A
+        // cancelled/failed flush cannot strand the optional directory lock.
+        let close = cache.map(|cache| tokio::spawn(async move { cache.close(deadline).await }));
         let result = self.flush_all().await;
+        if let Some(close) = close {
+            match close.await {
+                Ok(Ok(())) => (),
+                Ok(Err(error)) => eprintln!("disk cache close failed: {error}"),
+                Err(error) => eprintln!("disk cache close task failed: {error}"),
+            }
+        }
         // Cancelled multipart tasks retain their admission token through abort.
         // Do not tear down the runtime while that bounded cleanup is in flight.
         let _idle = self

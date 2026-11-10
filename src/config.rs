@@ -371,6 +371,14 @@ impl Config {
                 "disk-cache-dir and mountpoint must not overlap".into(),
             ));
         }
+        let lanes = self.payload_budgets()?;
+        let funding = crate::disk_cache::Funding::derive(max_bytes, lanes.data_bytes)
+            .map_err(|error| Error::Config(format!("disk-cache funding: {error}")))?;
+        if lanes.data_bytes.saturating_sub(funding.required_bytes) < 4 * crate::write::MAX_IO {
+            return Err(Error::Config(
+                "disk cache funding leaves insufficient read capacity".into(),
+            ));
+        }
         Ok(Some(DiskCacheConfig {
             directory,
             max_bytes,

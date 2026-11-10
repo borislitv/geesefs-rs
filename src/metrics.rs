@@ -1,6 +1,7 @@
 //! Bounded-cardinality, read-only observations. No paths, credentials or S3 I/O.
 mod allocator;
 mod diagnostics;
+mod disk_cache;
 mod server;
 
 pub use allocator::allocation_stats;
@@ -84,6 +85,11 @@ fn cache_metrics(registry: &mut Registry, cache: &CacheStats) {
         gauge(registry, name, help, value);
     }
     for (name, help, value) in [
+        (
+            "geesefs_read_cache_capacity_evictions",
+            "L1 payload/entry capacity victims; excludes loan reclamation and invalidation; not L2 demotions",
+            cache.capacity_evictions,
+        ),
         (
             "geesefs_read_cache_evictions",
             "Policy and loan-reclamation evictions; excludes replacement and clear",
@@ -312,6 +318,7 @@ fn cpu_metrics(registry: &mut Registry) {
 pub fn render(fs: &Filesystem) -> Option<String> {
     let snapshot = fs.metrics_snapshot();
     let mut registry = Registry::default();
+    disk_cache::register(&mut registry, fs, &snapshot);
     filesystem_metrics(&mut registry, snapshot);
     fs.diagnostics.register(&mut registry);
     memory_metrics(&mut registry);

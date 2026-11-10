@@ -37,6 +37,13 @@ error/cancellation transfers no lookup references, and dot entries acquire none.
 
 ## Namespace and metadata
 
+An optional `--metadata-limit` adds independent lifetime byte admission for
+application metadata. It includes canonical inode/listing/result/writer owners
+and temporary operation plans; payload `--memory-limit` retains its meaning.
+The count guard is additional. Reclamation examines bounded batches and yields
+outside the namespace lock; lookup/open/dirty and in-flight pins remain intact.
+These are admitted logical allocations, not allocator size classes or an RSS cap.
+
 `src/namespace.rs` binds names to stable inodes; `src/inode.rs` owns generation,
 remote object identity, dirty extents and lifetime state. Namespace epochs,
 tombstones and move/delete leases prevent stale responses from resurrecting
@@ -99,6 +106,33 @@ inode, authoritative LIST or resolved HEAD. Publishing a new names page does not
 renew cached permission/xattr freshness. Standard LIST may supply size/ETag but
 cannot revalidate absent user metadata; kernel attribute TTL remains bounded by
 that older observation. Later HEAD/commit generations still override older data.
+
+## Optional persistent payload tier
+
+The three disk-cache flags enable a private, locked, preallocated local container
+through the maintained Foyer Store adapter. Only eligible capacity evictions
+populate it, after releasing the L1 lock; replacements, invalidations and loan
+revocation do not. Demotion funds an exact visible-range copy, promptly releasing
+the original backing. Qualified L2 hits promote into L1 while retaining the disk
+copy. Missing coverage and optional errors use ordinary conditional S3 reads.
+
+Persistent keys include validated backend/access/encryption scope, exact object
+key, opaque ETag, size and coverage. Dirty/sparse/pending namespace states bypass
+the tier. Reads revalidate generation after waits, including after funding a
+window whose file may have changed size. Opaque/rotating credentials explicitly
+bypass persistent reuse rather than guessing a stable principal.
+
+Funding covers bounded index/order state, pools, copies, read/decode work and
+submission credits, reducing effective L1 capacity without taking writer or
+ingress reserves. Recovery is asynchronous with source fallback and no inventory
+reset. Owned jobs retain funding/directory ownership past caller cancellation;
+shutdown starts cache teardown even when writer flushing later fails.
+
+Metrics distinguish admission, actual worker completion and caller delivery.
+Region-reclaim callbacks are not per-record eviction counts; funded metadata is
+not measured index heap, and opening-time filesystem allocation is not a live
+physical-storage gauge. See [the design](disk-cache-design.md) and
+[qualification plan](disk-cache-plan-track.md) for remaining acceptance gates.
 
 ## Payload ownership and progress
 

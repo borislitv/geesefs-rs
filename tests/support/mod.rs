@@ -42,6 +42,7 @@ impl Drop for ActiveHead<'_> {
 }
 #[derive(Default)]
 pub struct MemoryStore {
+    pub cache_namespace: Mutex<Option<[u8; 32]>>,
     pub objects: Mutex<BTreeMap<String, Object>>,
     uploads: Mutex<HashMap<String, Upload>>,
     sequence: AtomicU64,
@@ -234,6 +235,13 @@ impl MemoryStore {
 
 #[async_trait::async_trait]
 impl Store for MemoryStore {
+    fn persistent_cache_scope(&self) -> Result<geesefs_rs::backend::cache_scope::CacheScope> {
+        use geesefs_rs::backend::cache_scope::{CacheBypass, CacheScope};
+        Ok(self.cache_namespace.lock().unwrap().map_or(
+            CacheScope::Bypass(CacheBypass::UnsupportedBackend),
+            CacheScope::Namespace,
+        ))
+    }
     async fn patch(
         &self,
         key: &str,

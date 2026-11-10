@@ -123,15 +123,38 @@ fn rejects_malformed_zero_and_saturated_sizes() {
         let mut args = fixture.args();
         args[6] = size.into();
         assert_eq!(
-            Config::try_parse_from(args)
-                .unwrap()
-                .disk_cache_config()
-                .unwrap()
-                .unwrap()
-                .max_bytes,
-            expected
+            Config::try_parse_from(args).unwrap().disk_cache_max_size,
+            Some(expected)
         );
     }
+}
+
+#[test]
+fn rejects_unfunded_or_invalid_geometry_without_local_side_effects() {
+    let fixture = Fixture::new();
+    for size in [
+        1,
+        8 * 1024 * 1024 - 1,
+        8 * 1024 * 1024 + 1,
+        (1_u64 << 44) + 4096,
+    ] {
+        let mut config = fixture.config();
+        config.disk_cache_max_size = Some(size);
+        assert!(config.validate().is_err(), "size={size}");
+    }
+    let mut config = fixture.config();
+    config.memory_limit = 15;
+    config.disk_cache_max_size = Some(16 * 1024 * 1024);
+    assert!(
+        config.validate().is_err(),
+        "L2 must not spend the read/write minimum"
+    );
+    assert_eq!(
+        std::fs::read_dir(fixture.root.path().join("cache"))
+            .unwrap()
+            .count(),
+        0
+    );
 }
 
 #[test]

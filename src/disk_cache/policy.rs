@@ -6,11 +6,19 @@ use foyer::{
 use lru::LruCache;
 use std::{
     num::NonZeroUsize,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 #[derive(Clone, Debug)]
-pub(crate) struct Recent(Arc<Mutex<References>>);
+pub(crate) struct Recent(Arc<RecentState>);
+#[derive(Debug)]
+struct RecentState {
+    references: Mutex<References>,
+    region_reclaims_started: AtomicU64,
+}
 #[derive(Debug)]
 struct References {
     hints: LruCache<u64, ()>,
@@ -18,16 +26,22 @@ struct References {
 }
 impl Recent {
     pub(crate) fn new(capacity: usize) -> Self {
-        Self(Arc::new(Mutex::new(References {
-            hints: LruCache::new(NonZeroUsize::new(capacity).unwrap()),
-            remaining: 0,
-        })))
+        Self(Arc::new(RecentState {
+            references: Mutex::new(References {
+                hints: LruCache::new(NonZeroUsize::new(capacity).unwrap()),
+                remaining: 0,
+            }),
+            region_reclaims_started: AtomicU64::new(0),
+        }))
     }
     pub(crate) fn touch(&self, hash: u64) {
-        self.0.lock().unwrap().hints.put(hash, ());
+        self.0.references.lock().unwrap().hints.put(hash, ());
     }
     pub(crate) fn len(&self) -> usize {
-        self.0.lock().unwrap().hints.len()
+        self.0.references.lock().unwrap().hints.len()
+    }
+    pub(crate) fn region_reclaims_started(&self) -> u64 {
+        self.0.region_reclaims_started.load(Ordering::Relaxed)
     }
     pub(crate) fn picker(&self) -> impl EvictionPicker {
         CopyBoundedFifo {
@@ -42,7 +56,7 @@ impl StorageFilterCondition for Recent {
         if size == 0 || size > super::key::RECORD_CAP {
             return StorageFilterResult::Reject;
         }
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.0.references.lock().unwrap();
         if state.hints.pop(&hash).is_none() {
             return StorageFilterResult::Reject;
         }
@@ -75,9 +89,13 @@ impl EvictionPicker for CopyBoundedFifo {
         self.fifo.on_block_evictable(info, block);
     }
     fn on_block_evict(&mut self, info: EvictionInfo<'_>, block: u32) {
+        self.recent
+            .0
+            .region_reclaims_started
+            .fetch_add(1, Ordering::Relaxed);
         self.fifo.on_block_evict(info, block);
         // Exactly one engine reclaimer makes this a per-region quota. The shared
         // SubmissionLimits additionally bounds live raw-copy bytes/items.
-        self.recent.0.lock().unwrap().remaining = self.copy_limit;
+        self.recent.0.references.lock().unwrap().remaining = self.copy_limit;
     }
 }

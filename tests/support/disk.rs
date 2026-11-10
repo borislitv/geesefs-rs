@@ -1,4 +1,4 @@
-//! Private harness until the parent wires `pub mod disk_cache` after its checkpoint.
+//! Isolated adapter harness, including crate-private budget ownership checks.
 #![allow(dead_code)]
 
 pub use geesefs_rs::error;
@@ -61,6 +61,7 @@ pub struct IoGate {
     pub payload_written: tokio::sync::Semaphore,
     pub log_written: tokio::sync::Semaphore,
     pub fail_write: AtomicBool,
+    pub fail_read: AtomicBool,
     pub entered: tokio::sync::Semaphore,
     pub release: tokio::sync::Semaphore,
 }
@@ -74,6 +75,7 @@ impl IoGate {
             payload_written: tokio::sync::Semaphore::new(0),
             log_written: tokio::sync::Semaphore::new(0),
             fail_write: AtomicBool::new(false),
+            fail_read: AtomicBool::new(false),
             entered: tokio::sync::Semaphore::new(0),
             release: tokio::sync::Semaphore::new(0),
         })
@@ -107,6 +109,7 @@ impl IoEngine for GateEngine {
         offset: u64,
     ) -> foyer::IoHandle {
         let held = self.gate.hold_reads.load(Ordering::SeqCst);
+        let fail = self.gate.fail_read.swap(false, Ordering::SeqCst);
         let operation = self.real.read(buffer, partition, offset);
         let gate = self.gate.clone();
         foyer::IoHandle::from(Box::pin(async move {
@@ -114,7 +117,17 @@ impl IoEngine for GateEngine {
                 gate.entered.add_permits(1);
                 gate.release.acquire().await.unwrap().forget();
             }
-            operation.await
+            let (buffer, result) = operation.await;
+            (
+                buffer,
+                if fail {
+                    Err(foyer::Error::io_error(std::io::Error::from_raw_os_error(
+                        libc::EIO,
+                    )))
+                } else {
+                    result
+                },
+            )
         }) as futures_util::future::BoxFuture<'static, _>)
     }
     fn write(
@@ -187,4 +200,55 @@ pub async fn child(mode: &str, directory: &Path) {
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
     );
+}
+
+/// Native failure tests never mount in the caller's namespace. All commands are
+/// bounded, and a missing prerequisite is a failure, not a successful skip.
+pub async fn native_command(command: &mut tokio::process::Command) {
+    command.kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .expect("native fixture command could not start");
+    let status = match tokio::time::timeout(Duration::from_secs(120), child.wait()).await {
+        Ok(status) => status.expect("native fixture command wait failed"),
+        Err(_) => {
+            child
+                .start_kill()
+                .expect("cannot stop timed-out native fixture child");
+            tokio::time::timeout(Duration::from_secs(10), child.wait())
+                .await
+                .expect("timed-out native fixture child did not exit")
+                .expect("cannot reap native fixture child");
+            panic!("native fixture command exceeded 120s: {command:?}");
+        }
+    };
+    assert!(
+        status.success(),
+        "{command:?}: status={status} (command output inherited)"
+    );
+}
+
+pub fn assert_private_mount_namespace() {
+    let parent = std::env::var_os("GEESEFS_L2_PARENT_MNT")
+        .expect("run the documented native_filesystem_failure_paths entry point");
+    assert_ne!(
+        std::fs::read_link("/proc/self/ns/mnt").unwrap().as_os_str(),
+        parent,
+        "native fixtures require a separate private mount namespace"
+    );
+}
+
+/// The parent owns the temporary directory until the namespace child exits.
+/// Unmount before any recursive removal. Even on panic, the namespace child must
+/// exit before the owning parent removes the temporary image/directory.
+pub struct NativeMount(pub std::path::PathBuf);
+impl Drop for NativeMount {
+    fn drop(&mut self) {
+        let status = std::process::Command::new("timeout")
+            .args(["--signal=KILL", "30s", "umount", "--"])
+            .arg(&self.0)
+            .status()
+            .expect("cannot run bounded fixture unmount");
+        assert!(status.success(), "owned fixture unmount failed: {status}");
+    }
 }

@@ -9,6 +9,204 @@ use support::{DEADLINE, MIB, block, key, open};
 pub use support::{budget, disk_cache, error};
 
 #[tokio::test]
+async fn adapter_observations_follow_queued_spill_and_completed_reads() {
+    use std::{os::unix::fs::MetadataExt, sync::atomic::Ordering, time::Instant};
+    let dir = support::directory();
+    let resources = Budget::new(32 * MIB).unwrap();
+    let output = Budget::new(3).unwrap();
+    let gate = support::IoGate::new();
+    let cache = support::gated(dir.path(), &resources, gate.clone()).await;
+    gate.hold_writes.store(true, Ordering::SeqCst);
+    assert_eq!(
+        cache.try_demote(key(0, 3), block(b"abc")),
+        Demotion::Admitted
+    );
+    // The current-thread runtime has not polled the detached enqueue task yet.
+    assert_eq!(cache.stats().admitted_demotions, 1);
+    assert_eq!(cache.stats().engine_admitted_demotions, 0);
+    assert_eq!(cache.stats().spill_operations.count, 0);
+    tokio::time::timeout(DEADLINE, gate.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let held = Instant::now();
+    assert_eq!(cache.stats().engine_admitted_demotions, 1);
+    assert_eq!(cache.stats().spill_operations.count, 0);
+    let minimum_spill_ns = held.elapsed().as_nanos() as u64;
+    gate.hold_writes.store(false, Ordering::SeqCst);
+    gate.release.add_permits(16);
+    cache.drain(DEADLINE).await.unwrap();
+    let spill = cache.stats().spill_operations;
+    assert_eq!(spill.count, 1);
+    assert!(spill.total_duration_ns >= minimum_spill_ns);
+    assert!(spill.total_duration_ns > 0);
+    assert_eq!(spill.max_duration_ns, spill.total_duration_ns);
+    assert_eq!(
+        cache
+            .read_block(&key(0, 3), &output)
+            .await
+            .unwrap()
+            .as_slice(),
+        b"abc"
+    );
+    assert_eq!(
+        cache.try_demote(key(0, 3), block(b"abc")),
+        Demotion::IndexedHint
+    );
+    assert!(
+        cache
+            .read_block(&key(0, 3), &Budget::new(2).unwrap())
+            .await
+            .is_none()
+    );
+    assert!(cache.read_block(&key(4, 3), &output).await.is_none());
+    let stats = cache.stats();
+    println!("completed_observations={stats:?}");
+    assert_eq!(
+        stats.admitted_demotions, 1,
+        "IndexedHint is not copy admission"
+    );
+    assert_eq!(stats.engine_admitted_demotions, 1);
+    assert_eq!(stats.spill_operations.count, 1);
+    assert_eq!((stats.spill_no_space, stats.spill_errors), (0, 0));
+    assert_eq!(
+        stats.read_operations.count, 2,
+        "budget rejection is not an admitted read operation"
+    );
+    assert_eq!(
+        (
+            stats.read_operation_hits,
+            stats.read_operation_misses,
+            stats.read_operation_errors
+        ),
+        (1, 1, 0)
+    );
+    assert!(stats.read_operations.total_duration_ns >= stats.read_operations.max_duration_ns);
+    assert!(stats.read_operations.max_duration_ns > 0);
+    assert_eq!(stats.startup.startup.count, 1);
+    assert_eq!(stats.startup.allocation.count, 1);
+    assert_eq!(stats.startup.recovery.count, 1);
+    assert!(
+        stats.startup.startup.total_duration_ns
+            >= stats.startup.allocation.total_duration_ns
+                + stats.startup.recovery.total_duration_ns
+    );
+    assert_eq!(
+        stats.opened_file_allocated_bytes,
+        Some(
+            std::fs::metadata(dir.path().join("payload-v1.cache"))
+                .unwrap()
+                .blocks()
+                * 512
+        )
+    );
+    cache.close(DEADLINE).await.unwrap();
+    std::fs::remove_file(dir.path().join("payload-v1.cache")).unwrap();
+    assert_eq!(
+        cache.stats().opened_file_allocated_bytes,
+        stats.opened_file_allocated_bytes,
+        "the startup observation survives removal of closed owned media; stats must not scrape the path"
+    );
+    assert_eq!(
+        cache.status().opened_file_allocated_bytes(),
+        stats.opened_file_allocated_bytes
+    );
+}
+
+#[tokio::test]
+async fn real_engine_pressure_does_not_count_as_engine_admission_or_io_error() {
+    let dir = support::directory();
+    let resources = Budget::new(32 * MIB).unwrap();
+    let cache = disk_cache::DiskCache::open_test_with_submission_limit(
+        PreparedDiskCache::prepare(dir.path(), (16 * MIB) as u64).unwrap(),
+        &resources,
+        Box::new(support::GateConfig(support::IoGate::new())),
+        std::num::NonZeroUsize::new(1).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        cache.try_demote(key(0, 3), block(b"abc")),
+        Demotion::Admitted
+    );
+    cache.drain(DEADLINE).await.unwrap();
+    let stats = cache.stats();
+    println!("pressure_observations={stats:?}");
+    assert_eq!(
+        (stats.admitted_demotions, stats.engine_admitted_demotions),
+        (1, 0)
+    );
+    assert_eq!(
+        (
+            stats.spill_no_space,
+            stats.spill_errors,
+            stats.drops,
+            stats.errors
+        ),
+        (1, 0, 1, 0)
+    );
+    assert_eq!(stats.spill_operations.count, 1);
+    assert!(stats.spill_operations.total_duration_ns > 0);
+    assert_eq!(stats.state, State::Ready);
+    assert_eq!(
+        (
+            stats.submission_bytes,
+            stats.submission_items,
+            stats.copied_bytes
+        ),
+        (0, 0, 0)
+    );
+    assert!(
+        cache
+            .read_block(&key(0, 3), &Budget::new(3).unwrap())
+            .await
+            .is_none()
+    );
+    cache.close(DEADLINE).await.unwrap();
+}
+
+#[tokio::test]
+async fn read_io_error_is_a_completed_error_not_a_delivered_hit() {
+    use std::sync::atomic::Ordering;
+    let dir = support::directory();
+    let resources = Budget::new(32 * MIB).unwrap();
+    let gate = support::IoGate::new();
+    let cache = support::gated(dir.path(), &resources, gate.clone()).await;
+    assert_eq!(
+        cache.try_demote(key(0, 3), block(b"abc")),
+        Demotion::Admitted
+    );
+    cache.drain(DEADLINE).await.unwrap();
+    gate.fail_read.store(true, Ordering::SeqCst);
+    assert!(
+        cache
+            .read_block(&key(0, 3), &Budget::new(3).unwrap())
+            .await
+            .is_none()
+    );
+    let stats = cache.stats();
+    println!("read_error_observations={stats:?}");
+    assert_eq!(stats.read_operations.count, 1);
+    assert_eq!(
+        (
+            stats.read_operation_hits,
+            stats.read_operation_misses,
+            stats.read_operation_errors
+        ),
+        (0, 0, 1)
+    );
+    assert_eq!((stats.hits, stats.misses), (0, 1));
+    assert_eq!(stats.state, State::Bypass);
+    assert!(stats.read_operations.total_duration_ns > 0);
+    assert_eq!(
+        stats.read_operations.total_duration_ns,
+        stats.read_operations.max_duration_ns
+    );
+    cache.close(DEADLINE).await.unwrap();
+}
+
+#[tokio::test]
 async fn exact_partial_payload_roundtrip_and_full_identity_misses() {
     let dir = support::directory();
     let resources = Budget::new(32 * MIB).unwrap();
@@ -298,6 +496,11 @@ async fn cancelled_read_and_close_keep_admission_and_lock_until_real_io_finishes
     );
     assert_eq!(cache.stats().active_jobs, 4);
     assert!(cache.close(std::time::Duration::ZERO).await.is_err());
+    assert_eq!(
+        cache.stats().read_operations.count,
+        0,
+        "cancelled waiters do not finish owned I/O"
+    );
     assert_eq!(cache.status().state(), State::Closing);
     assert!(PreparedDiskCache::prepare(dir.path(), (16 * MIB) as u64).is_err());
     assert!(resources.used() > 0);
@@ -305,6 +508,10 @@ async fn cancelled_read_and_close_keep_admission_and_lock_until_real_io_finishes
     gate.release.add_permits(4);
     cache.close(DEADLINE).await.unwrap();
     assert_eq!(cache.status().state(), State::Closed);
+    assert_eq!(cache.stats().read_operations.count, 4);
+    assert_eq!(cache.stats().read_operation_hits, 4);
+    assert_eq!(cache.stats().hits, 0, "cancelled callers received no hit");
+    println!("cancelled_read_observations={:?}", cache.stats());
     assert_eq!(output.used(), 0);
     assert!(PreparedDiskCache::prepare(dir.path(), (16 * MIB) as u64).is_ok());
     drop(cache);
@@ -325,6 +532,21 @@ async fn optional_io_failure_bypasses_without_affecting_source_bytes() {
     );
     assert!(cache.drain(DEADLINE).await.is_err());
     assert_eq!(cache.status().state(), State::Bypass);
+    assert_eq!(
+        (
+            cache.stats().admitted_demotions,
+            cache.stats().engine_admitted_demotions
+        ),
+        (1, 1)
+    );
+    assert_eq!(
+        (
+            cache.stats().spill_operations.count,
+            cache.stats().spill_errors,
+            cache.stats().spill_no_space
+        ),
+        (1, 1, 0)
+    );
     assert!(
         cache
             .read_block(&key(0, 3), &Budget::new(3).unwrap())
@@ -365,6 +587,7 @@ async fn optional_read_deadline_returns_miss_without_releasing_live_io_funding()
         .forget();
     assert_eq!(output.used(), 3);
     assert_eq!(cache.stats().active_jobs, 1);
+    assert_eq!(cache.stats().read_operations.count, 0);
     gate.hold_reads.store(false, Ordering::SeqCst);
     gate.release.add_permits(1);
     cache.close(DEADLINE).await.unwrap();
@@ -375,6 +598,8 @@ async fn optional_read_deadline_returns_miss_without_releasing_live_io_funding()
         "a timed-out caller did not receive a cache hit"
     );
     assert_eq!(cache.stats().misses, 1);
+    assert_eq!(cache.stats().read_operations.count, 1);
+    assert_eq!(cache.stats().read_operation_hits, 1);
 }
 
 #[tokio::test]
@@ -433,6 +658,10 @@ async fn bounded_index_and_recent_hints_survive_capacity_pressure_with_hot_paylo
     assert!(
         cache.read_block(&numbered(1), &output).await.is_none(),
         "cold victim must be reclaimed"
+    );
+    assert!(
+        cache.stats().region_reclaims_started > 0,
+        "real capacity pressure invokes region callbacks"
     );
     assert_eq!(
         std::fs::metadata(dir.path().join("payload-v1.cache"))

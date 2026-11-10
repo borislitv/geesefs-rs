@@ -117,6 +117,8 @@ biased observations stay inconclusive; sampled late means do not prove a plateau
 Frozen checkpoints retain favorable and adverse results and executable identities:
 
 - [Integrated metadata/handle measurements](docs/performance-integrated.md).
+- [Canonical metadata allocation diagnostic](docs/performance-metadata-compaction.md).
+- [Persistent L2 local qualification, not passed](docs/performance-disk-cache.md).
 - [Directory batching](docs/performance-directory-remainders.md),
   [metadata observation age](docs/performance-observation-age.md) and
   [reference permission freshness](docs/metadata-expiry-diagnosis.md).

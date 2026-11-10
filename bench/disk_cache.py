@@ -36,6 +36,8 @@ ROOT = integration.ROOT
 MIB = 1024 ** 2
 POPULATION_ROUNDS = 8
 POPULATION_SECONDS = 180
+POPULATION_READ_AHEAD_KIB = 128
+EVICTION_PIPELINE_BYTES = 5 * MIB
 STATES = ['both_cold', 'l1_hot', 'l2_hot_pagecache_hot', 'l2_hot_pagecache_cold_requested']
 WORKLOADS = ['metadata', 'sequential', 'random', 'concurrent', 'eviction', 'mixed', 'writer_fsync']
 READS = ['sequential', 'random', 'concurrent', 'mixed']
@@ -54,6 +56,8 @@ def example_manifest():
                 minimum_active_seconds=1,
                 states=STATES[:], workloads=WORKLOADS[:],
                 disk_metrics=dict(l1_hit_bytes='geesefs_read_cache_hit_bytes_total',
+                                   l1_resident_bytes='geesefs_read_cache_bytes',
+                                   l1_loaned_bytes='geesefs_read_cache_loaned_bytes',
                                   remote_bytes='geesefs_read_remote_bytes_total',
                                   l2_hit_bytes='geesefs_disk_cache_hit_bytes_total',
                                   l2_hits='geesefs_disk_cache_hits_total',
@@ -346,7 +350,7 @@ def native_snapshot(port, config, output, label, require_adapter=True):
         text = response.read(2 * MIB).decode()
     (output / (label + '-metrics.txt')).write_text(text)
     mapping = config['disk_metrics'] if require_adapter else {
-        key: config['disk_metrics'][key] for key in ['l1_hit_bytes', 'remote_bytes']}
+        key: config['disk_metrics'][key] for key in ['l1_hit_bytes', 'remote_bytes', 'l1_resident_bytes', 'l1_loaned_bytes']}
     values = parse_metrics(text, mapping)
     if not require_adapter:
         values.update(parse_metrics(text, dict(state_bypass='geesefs_disk_cache_state{state="bypass"}',
@@ -538,17 +542,29 @@ def verify_startup_fallback(before, after, size):
         raise RuntimeError('startup fault requires actual FUSE source reads and full validated payload bytes')
 
 
+def population_extra(config, arm, cache, stats, port):
+    # Priming only: identical logical windows in every arm. Measurement mounts
+    # retain their ordinary adaptive read-ahead (initially 5 MiB).
+    extra = mount_extra(config, arm, cache, stats, port, read_only=True)
+    for flag in ['--read-ahead', '--read-ahead-small', '--read-ahead-large', '--read-ahead-parallel']:
+        extra += [flag, str(POPULATION_READ_AHEAD_KIB)]
+    return extra
+
+
 def prime(binary, fixture, work, record, config, cache, group, output):
     # A fixed protocol in every baseline/candidate/control arm, not a
     # candidate-only retry-until-hot. Warmup mounts are not measured mount pairs.
     deadline = time.monotonic() + POPULATION_SECONDS
     rounds = record['population_rounds'] = []
+    record['population_policy'] = dict(read_ahead_kib=POPULATION_READ_AHEAD_KIB,
+        measurement_read_ahead='unchanged defaults; initial 5 MiB', fixed_mounts=POPULATION_ROUNDS,
+        eviction_warm_bytes=EVICTION_PIPELINE_BYTES, eviction_requested_probe_bytes=min(MIB, config['l1_hot_bytes']))
     for number in range(POPULATION_ROUNDS):
         if time.monotonic() >= deadline:
             raise RuntimeError('population protocol exceeded its fixed deadline')
         label = record['mount_id'] + f'-prime-{number}'
         port = integration.free_port()
-        extra = mount_extra(config, record['arm'], cache, output / (label + '-stats.jsonl'), port, read_only=True)
+        extra = population_extra(config, record['arm'], cache, output / (label + '-stats.jsonl'), port)
         row = dict(round=number, independent_measured_mount=False)
         rounds.append(row)
         with integration.mount(binary, fixture['bucket'], fixture['prefix'], fixture['endpoint'], fixture['environment'],
@@ -557,7 +573,7 @@ def prime(binary, fixture, work, record, config, cache, group, output):
                 disk_ready(port, config)
             row['before'] = native_snapshot(port, config, output, label + '-before', require_adapter=record['arm'] == 'candidate')
             if record['workload'] == 'eviction':
-                eviction_probe(path, min(MIB, config['l1_hot_bytes']))
+                eviction_probe(path, EVICTION_PIPELINE_BYTES)
             else:
                 native_hash(path / 'payload', fixture['expected_sha'], group, max(1, min(30, deadline - time.monotonic())))
             native_hash(path / 'pressure', fixture['pressure_sha'], group, max(1, min(30, deadline - time.monotonic())))
@@ -580,8 +596,8 @@ def prime(binary, fixture, work, record, config, cache, group, output):
             disk_ready(port, config)
         before = native_snapshot(port, config, output, label + '-before', require_adapter=record['arm'] == 'candidate')
         if record['workload'] == 'eviction':
-            size = min(MIB, config['l1_hot_bytes'])
-            eviction_probe(path, size)
+            size = EVICTION_PIPELINE_BYTES
+            eviction_probe(path, min(MIB, config['l1_hot_bytes']))
         else:
             size = config['dataset_bytes']
             native_hash(path / 'payload', fixture['expected_sha'], group, max(1, min(30, deadline - time.monotonic())))
@@ -594,6 +610,18 @@ def prime(binary, fixture, work, record, config, cache, group, output):
     validation.update(daemon_exit=daemon.returncode, mount_present_after=os.path.ismount(path))
     if time.monotonic() >= deadline:
         raise RuntimeError('population protocol exceeded its fixed deadline')
+
+
+def allocator_snapshot(path, started_ns, finished_ns):
+    # The daemon still appends while the worker is alive. Preserve the original
+    # log and feed the shared accounting reader only newline-terminated frames;
+    # malformed complete frames still fail rather than becoming missing samples.
+    if not path.exists():
+        return compare.allocator_rust(path, started_ns, finished_ns)
+    data = path.read_bytes()
+    snapshot = path.with_name(path.name + '.sampled')
+    snapshot.write_bytes(data[:data.rfind(b'\n') + 1])
+    return compare.allocator_rust(snapshot, started_ns, finished_ns)
 
 
 def measured_run(binary, fixture, work, record, config, group_root, output):
@@ -621,17 +649,18 @@ def measured_run(binary, fixture, work, record, config, group_root, output):
             if record['workload'] == 'eviction':
                 # Outside the timed workload; warm the same prefix in every arm.
                 # The candidate must prove it persisted, not just touched, the seed.
-                seed_before = sample_endpoint(port, config['disk_metrics']) if record['arm'] == 'candidate' else None
+                seed_before = native_snapshot(port, config, output, label + '-eviction-seed-before') if record['arm'] == 'candidate' else None
                 eviction_probe(path, min(MIB, config['l1_hot_bytes']))
                 if seed_before is not None:
-                    seed_after = disk_idle(port, config)
-                    verify_state('l2_hot_pagecache_hot', seed_before, seed_after, 'candidate')
+                    disk_idle(port, config)
+                    seed_after = native_snapshot(port, config, output, label + '-eviction-seed-after')
+                    verify_native_hot(seed_before, seed_after, EVICTION_PIPELINE_BYTES)
                     record['eviction_seed'] = dict(before=seed_before, after=seed_after, byte_correct=True)
             spec = {key: fixture[key] for key in ['bucket', 'prefix', 'endpoint', 'expected_sha']}
             spec.update(path=str(path), name=record['workload'], state=record['state'], config=config)
             with worker(spec, fixture['environment'], group, output / (label + '-client.log')) as consumer:
                 mapping = config['disk_metrics'] if record['arm'] == 'candidate' else {
-                    key: config['disk_metrics'][key] for key in ['l1_hit_bytes', 'remote_bytes']}
+                    key: config['disk_metrics'][key] for key in ['l1_hit_bytes', 'remote_bytes', 'l1_resident_bytes', 'l1_loaned_bytes']}
                 before = sample_endpoint(port, mapping)
                 io_before = io_counters(daemon.pid)
                 with compare.Sampler(daemon.pid, consumer.pid, group, output / (label + '-memory.jsonl')) as sampler:
@@ -653,6 +682,15 @@ def measured_run(binary, fixture, work, record, config, group_root, output):
                     metrics['throughput'] = (metrics['bytes'] or metrics['operations']) / metrics['elapsed_seconds']
                     end_ns = time.time_ns()
                 after = sample_endpoint(port, mapping)
+                metrics.update(cpu_efficiency(sampler.metrics(), transferred=metrics['bytes'], operations=metrics['operations']))
+                allocator_peak, allocator_steady, effective = allocator_snapshot(stats, start_ns, end_ns)
+                metrics.update(allocator_peak_bytes=allocator_peak, allocator_steady_bytes=allocator_steady)
+                # Keep observed resources even when a workload's state gate fails.
+                record.update(metrics=metrics, cache_before=before, cache_after=after,
+                    effective_budgets=effective,
+                    cpu_counters={'before': sampler.cpu.before, 'after': sampler.cpu.after},
+                    effective_cgroup_limits={name: (group / name).read_text().strip() for name in ['cpu.max', 'memory.max']},
+                    l1_residency_scope='pre/post visible retained bytes and idle-flush loan bytes, not peak backing allocation; effective L1 policy is an upper bound including loans; Ready selected victims may exclude the idle flush lane')
                 verify_state(record['state'], before, after, record['arm'])
                 if record['workload'] == 'eviction' and record['arm'] == 'candidate':
                     eviction_probe(path, min(MIB, config['l1_hot_bytes']))
@@ -661,9 +699,6 @@ def measured_run(binary, fixture, work, record, config, group_root, output):
                     record['eviction_evidence']['probe_byte_correct'] = True
                     record['eviction_evidence']['timing_scope'] = 'seed and fallback probes excluded from timed pressure workload'
                     record['eviction_probe_after'] = probe_after
-                metrics.update(cpu_efficiency(sampler.metrics(), transferred=metrics['bytes'], operations=metrics['operations']))
-                allocator_peak, allocator_steady, effective = compare.allocator_rust(stats, start_ns, end_ns)
-                metrics.update(allocator_peak_bytes=allocator_peak, allocator_steady_bytes=allocator_steady)
                 record.update(metrics=metrics, cache_before=before, cache_after=after, effective_budgets=effective,
                               daemon_io_before=io_before, daemon_io_after=io_counters(daemon.pid),
                               cpu_counters={'before': sampler.cpu.before, 'after': sampler.cpu.after},
@@ -784,6 +819,9 @@ def native_read_cache_phase(binary, fixture, package, work, config, group_root, 
                 if time.monotonic() >= deadline:
                     raise RuntimeError('native cache population exceeded 180-second deadline')
                 label, port = f'reader-warm-{number}', integration.free_port()
+                # Keep the established small native-package protocol. Its 1 MiB
+                # object ends before the default 5 MiB window; reducing excluded
+                # pressure windows here only multiplies Moto full-object reads.
                 extra = mount_extra(config, 'candidate', cache, output / (label + '-stats.jsonl'), port, read_only=True)
                 row = dict(round=number, independent_measured_mount=False)
                 receipt['rounds'].append(row)
@@ -1040,7 +1078,7 @@ def nginx_range(path, expected, work, group):
 
 @contextlib.contextmanager
 def evidence_work(output):
-    with tempfile.TemporaryDirectory(prefix='geesefs-l2-native-') as temporary:
+    with tempfile.TemporaryDirectory(prefix='geesefs-l2-native-', dir=output) as temporary:
         work = Path(temporary)
         try:
             yield work
@@ -1049,6 +1087,30 @@ def evidence_work(output):
                 shutil.copyfile(log, output / log.name)
             for directory in work.glob('nginx-*'):
                 shutil.copytree(directory, output / directory.name)
+
+
+def assert_owned_cleanup(group_root, work):
+    groups_remain = any(p.is_dir() and p.name.startswith('geesefs-bench-') for p in Path(group_root).iterdir())
+    mounts_remain = any(p.name.endswith('-mount') and os.path.ismount(p) for p in work.iterdir())
+    if groups_remain or mounts_remain:
+        raise RuntimeError('owned benchmark resource cleanup incomplete')
+
+
+def run_native_preflight(args, report, binary, fixture, work, config, group_root):
+    try:
+        report['native_checks'] = native_checks(binary, fixture, work, config, group_root, args.output)
+        report['native_passed'] = True
+    except compare.BenchmarkDeadline:
+        raise
+    except Exception as error:
+        report['native_passed'] = False
+        report['errors'].append('native preflight failed: ' + str(error))
+        assert_owned_cleanup(group_root, work)
+        if args.native_only:
+            raise
+    finally:
+        (args.output / 'native-preflight.json').write_text(json.dumps(dict(
+            passed=report['native_passed'], checks=report.get('native_checks', []), errors=report['errors']), indent=2) + '\n')
 
 
 def run_matrix_cases(args, config, report, binaries, fixtures, work, group_root):
@@ -1069,15 +1131,22 @@ def run_matrix_cases(args, config, report, binaries, fixtures, work, group_root)
             raise
         except Exception as error:
             record.update(correctness=False, error=str(error))
-            # Continue only after the existing mount/worker/cgroup owners have
-            # completed cleanup. Do not accumulate live failed workloads.
-            groups_remain = any(p.is_dir() and p.name.startswith('geesefs-bench-') for p in Path(group_root).iterdir())
-            mounts_remain = any(p.name.endswith('-mount') and os.path.ismount(p) for p in work.iterdir())
-            if groups_remain or mounts_remain:
-                raise RuntimeError('owned benchmark resource cleanup incomplete') from error
         finally:
-            report['runs'].append(record)
-            (args.output / 'runs.json').write_text(json.dumps(report['runs'], indent=2) + '\n')
+            try:
+                # Continue only after existing mount/worker/cgroup owners have
+                # completed cleanup. Never retain every case's preallocated
+                # cache until the matrix ends (in particular on tmpfs).
+                assert_owned_cleanup(group_root, work)
+                cache = work / (record['mount_id'] + '-cache')
+                if cache.exists():
+                    if 'disk_allocated_bytes' not in record:
+                        record['disk_allocated_bytes'] = sum(p.stat().st_blocks * 512 for p in cache.rglob('*') if p.is_file())
+                        record['disk_allocated_bytes_scope'] = 'owned cache after failed case and clean shutdown, before untimed removal'
+                    shutil.rmtree(cache)
+                    record['owned_cache_removed'] = True
+            finally:
+                report['runs'].append(record)
+                (args.output / 'runs.json').write_text(json.dumps(report['runs'], indent=2) + '\n')
 
 
 def execute(args, config, report):
@@ -1126,12 +1195,13 @@ def execute(args, config, report):
                                       etag=head['ETag'], size=head['ContentLength'])
             report['fixture_generations'] = {size: {key: value[key] for key in ['prefix', 'expected_sha', 'pressure_sha', 'etag', 'size']}
                                              for size, value in fixtures.items()}
-            report['native_checks'] = native_checks(binaries['candidate'], fixtures[config['dataset_bytes']], work, config, group_root, args.output)
+            run_native_preflight(args, report, binaries['candidate'], fixtures[config['dataset_bytes']], work, config, group_root)
             if not args.native_only:
                 run_matrix_cases(args, config, report, binaries, fixtures, work, group_root)
             if not args.native_only:
                 report.update(summarize(report['runs'], config, args.pairs, args.controls))
-            report['native_passed'] = True
+            if not report['native_passed']:
+                report.update(qualified=False, full_matrix_qualified=False)
             if integration.command(['git', 'status', '--porcelain', '--', 'src', 'Cargo.toml', 'Cargo.lock'],
                                    cwd=ROOT, capture_output=True, text=True, timeout=5).stdout:
                 report['native_passed'] = False

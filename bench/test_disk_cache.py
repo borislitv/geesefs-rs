@@ -15,6 +15,36 @@ import disk_cache as disk
 
 
 class Contracts(unittest.TestCase):
+    def test_allocator_snapshot_ignores_only_unfinished_trailing_json_frame(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'stats.jsonl'
+            complete = json.dumps(dict(unix_time_ns=150, allocated_bytes=41,
+                effective_budgets=dict(payload_limit_bytes=64, read_cache_policy_bytes=57))) + '\n'
+            source = complete + '{"unix_time_ns":160,"allocated_bytes"'
+            path.write_text(source)
+            peak, steady, budgets = disk.allocator_snapshot(path, 100, 200)
+            self.assertEqual((peak, steady), (41, 41))
+            self.assertEqual(budgets, dict(payload_limit_bytes=64, read_cache_policy_bytes=57))
+            self.assertEqual(path.read_text(), source)
+            path.write_text(complete + '{malformed complete frame}\n')
+            with self.assertRaises(json.JSONDecodeError):
+                disk.allocator_snapshot(path, 100, 200)
+
+    def test_native_state_failure_is_retained_without_blocking_independent_matrix(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = SimpleNamespace(native_only=False, output=root)
+            report = dict(native_passed=False, errors=[])
+            with patch.object(disk, 'native_checks', side_effect=RuntimeError('seed coverage incomplete')):
+                disk.run_native_preflight(args, report, '/unused', {}, root, disk.example_manifest(), root)
+            self.assertFalse(report['native_passed'])
+            self.assertEqual(report['errors'], ['native preflight failed: seed coverage incomplete'])
+            self.assertEqual(json.loads((root / 'native-preflight.json').read_text())['passed'], False)
+            (root / 'geesefs-bench-owned').mkdir()
+            with patch.object(disk, 'native_checks', side_effect=RuntimeError('cleanup failed')):
+                with self.assertRaisesRegex(RuntimeError, 'owned benchmark resource cleanup incomplete'):
+                    disk.run_native_preflight(args, report, '/unused', {}, root, disk.example_manifest(), root)
+
     def test_matrix_retains_failed_case_and_executes_later_independent_arms(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -26,6 +56,9 @@ class Contracts(unittest.TestCase):
                                                for arm in ['baseline', 'candidate']})
             def measured(*args):
                 record = args[3]
+                cache = root / (record['mount_id'] + '-cache')
+                cache.mkdir()
+                (cache / 'allocated-record').write_bytes(b'cache evidence')
                 if record['arm'] == 'baseline':
                     raise RuntimeError('owned fixture dependency failed')
                 record.update(correctness=True, independent_mount=True, metrics={'throughput': 7})
@@ -40,6 +73,8 @@ class Contracts(unittest.TestCase):
             self.assertTrue(saved[1]['correctness'])
             self.assertTrue(saved[2]['correctness'])
             self.assertEqual(saved[2]['metrics']['throughput'], 7)
+            self.assertTrue(all(row['owned_cache_removed'] for row in saved))
+            self.assertFalse(any(root.glob('*-cache')))
 
     def test_matrix_stops_on_deadline_artifact_change_or_incomplete_cleanup(self):
         for failure in ['deadline', 'artifact', 'cleanup', 'mount-cleanup']:
@@ -105,9 +140,33 @@ class Contracts(unittest.TestCase):
                     self.assertIn('--read-only-direct-io', extra)
                     self.assertEqual(extra[extra.index('-o') + 1], 'ro')
                     self.assertEqual('--disk-cache-dir' in extra, role == 'candidate')
+                for extra in mounts[-9:-1]:
+                    for flag in ['--read-ahead', '--read-ahead-small', '--read-ahead-large', '--read-ahead-parallel']:
+                        self.assertIn(flag, extra)
+                        self.assertEqual(extra[extra.index(flag) + 1], '128')
+                self.assertNotIn('--read-ahead', mounts[-1])
             self.assertEqual(len(mounts), 27)
             writer = disk.mount_extra(disk.example_manifest(), 'candidate', root, root / 'writer-stats', 123)
             self.assertNotIn('--read-only-direct-io', writer)
+
+    def test_eviction_population_covers_entire_five_mib_pipeline_window(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'pressure').write_bytes(b'pressure')
+            fixture = dict(bucket='fixture', prefix='data', endpoint='http://127.0.0.1:9', environment={},
+                           pressure_sha=disk.hashlib.sha256(b'pressure').hexdigest())
+            @contextlib.contextmanager
+            def mount(*args):
+                yield root, SimpleNamespace(returncode=0)
+            record = dict(mount_id='eviction', arm='candidate', workload='eviction')
+            with patch.object(disk.integration, 'mount', mount), patch.object(disk, 'disk_ready'), \
+                 patch.object(disk, 'disk_idle'), patch.object(disk, 'eviction_probe') as probe, \
+                 patch.object(disk, 'native_snapshot', side_effect=[
+                     dict(fuse_reads=n, l2_hit_bytes=5 * disk.MIB * n, remote_bytes=0, source_get_attempts=0)
+                     for _ in range(9) for n in [0, 1]]):
+                disk.prime('/unused', fixture, root, record, disk.example_manifest(), root, None, root)
+            self.assertEqual(probe.call_count, 9)
+            self.assertEqual([call.args[1] for call in probe.call_args_list], [5 * disk.MIB] * 8 + [disk.MIB])
 
     def test_native_hot_gate_requires_full_coverage_get_absence_and_real_fuse_reads(self):
         before = dict(l2_hit_bytes=0, remote_bytes=0, source_get_attempts=0, fuse_reads=0)
@@ -371,6 +430,7 @@ class Contracts(unittest.TestCase):
             output = Path(temporary)
             with self.assertRaisesRegex(RuntimeError, 'injected'):
                 with disk.evidence_work(output) as work:
+                    self.assertEqual(work.parent, output, 'scratch must use the explicitly selected evidence filesystem, not ambient tmpfs')
                     (work / 'daemon.log').write_text('failure evidence\n')
                     raise RuntimeError('injected')
             self.assertEqual((output / 'daemon.log').read_text(), 'failure evidence\n')

@@ -5,6 +5,35 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Metadata compaction and persistent L2 — 2026-11-10
+
+Default and system-allocator configurations pass 480 active tests, with 24
+explicit opt-in native/diagnostic entries, plus denied-warning Clippy. Meaningful
+regressions cover canonical/key owner lifetime, COW baseline/conflict handling,
+postcommit metadata credit, stale-size admission, byte-pressure demotion, genuine
+loan revocation and inherited directory-lock release. The allocation matrix uses
+default jemalloc separately; an all-feature run is not that allocator evidence.
+
+```bash
+timeout 1800s cargo +1.99.1 test --locked --all-targets --all-features --no-fail-fast
+timeout 1800s cargo +1.99.1 clippy --locked --all-targets --all-features -- -D warnings
+timeout 60s cargo +1.99.1 fmt --all -- --check
+timeout 180s python3 -m unittest discover -s bench -p 'test_*.py'
+```
+
+Put the documented Python 3.12 fixture environment on PATH: Rust tests invoke
+Python subprocesses too. The latest benchmark harness has 126 passing tests;
+the project Python suite has 16. The public-source audit checks 388 resolved
+packages, including only the exact approved Foyer fork/revision/package set.
+
+The opt-in disk recovery tests document their isolated ext4 block/inode ENOSPC
+and permission-error command. The mounted harness `bench/disk_cache.py` requires
+frozen binaries/manifest, a delegated cgroup, nginx/rsync and an explicit deadline.
+Unavailable prerequisites fail rather than count as a successful skip. The
+small-object native protocol passes, but the [full 456-case qualification](performance-disk-cache.md)
+does not. [Metadata allocation results](performance-metadata-compaction.md) are
+not substituted for that missing performance acceptance.
+
 ## Bounded subtree listing — 2026-11-09 (unreleased)
 
 `tests/subtree_listing.rs` checks a complete small traversal and marker ownership

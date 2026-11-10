@@ -168,7 +168,7 @@ async fn bounded_directory_chunks_resume_after_names_instead_of_rescanning_old_p
         for entry in entries {
             assert_eq!(entry.kind, fuser::FileType::RegularFile);
             assert_eq!(fs.node(entry.ino).unwrap().attr().size, 1);
-            after = entry.name.clone();
+            after = entry.name.as_str().to_owned();
             names.push(entry.name);
         }
     }
@@ -203,8 +203,8 @@ async fn resuming_after_a_directory_keeps_lexically_adjacent_objects() {
             assert_eq!(entry.kind, fuser::FileType::RegularFile);
             assert_eq!(fs.node(entry.ino).unwrap().attr().size, 8);
         }
-        after = entry.name.clone();
-        names.push(entry.name.clone());
+        after = entry.name.as_str().to_owned();
+        names.push(entry.name.as_str().to_owned());
     }
     assert_eq!(names, ["alpha", "alpha.", "alpha0", "z"]);
 }

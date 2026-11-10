@@ -59,7 +59,7 @@ async fn patch_overwrites_appends_and_persists_metadata_without_losing_newer_wri
     fs.fsync(ino).await.unwrap();
     let fresh = store.filesystem(32);
     let reopened = fresh.lookup(1, "file").await.unwrap();
-    assert_eq!(fresh.xattrs(reopened.ino).unwrap()["user.extra"], b"value");
+    assert_eq!(&fresh.xattrs(reopened.ino).unwrap()["user.extra"], b"value");
     assert_eq!(store.patch_calls.load(Ordering::Relaxed), 3);
 }
 
@@ -177,8 +177,8 @@ async fn retained_conflicts_refresh_the_baseline_and_merge_unmodified_remote_byt
     let fresh = store.filesystem(32);
     let node = fresh.lookup(1, "file").await.unwrap();
     let attrs = fresh.xattrs(node.ino).unwrap();
-    assert_eq!(attrs["user.shared"], b"after");
-    assert_eq!(attrs["user.local"], b"ours");
+    assert_eq!(&attrs["user.shared"], b"after");
+    assert_eq!(&attrs["user.local"], b"ours");
 }
 
 #[tokio::test]

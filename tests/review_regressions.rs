@@ -328,12 +328,15 @@ async fn metadata_head_preserves_cancelled_parent_move_ownership() {
             }
         });
         seen.await.unwrap();
-        let (moving, _finish_move) = store.pause_list();
+        // Persistent ownership starts at a mutating request, not LIST. Pause
+        // COPY before applying it to retain the original source HEAD generation.
+        let (moving, _finish_move) = store.pause_copy();
         let rename = tokio::spawn({
             let fs = fs.clone();
             async move { fs.rename(1, "dir", 1, "moved").await }
         });
         moving.await.unwrap();
+        assert!(store.copy_calls.load(Ordering::Relaxed) > 0);
         rename.abort();
         assert!(rename.await.unwrap_err().is_cancelled());
         release.send(()).unwrap();

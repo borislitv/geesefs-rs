@@ -10,15 +10,24 @@ writer durability. Approximate LRU is accepted; qualify the proposed CLOCK-style
 mechanics and engine. Implementation is authorized with local verification only.
 
 Qualify Foyer 0.22.6 through supported APIs before selecting the disk dependency.
-Stop at the dependency gate if ownership, resource bounds or the accepted eviction
-contract cannot be met; update the design and dependency decision before proceeding.
-Do not silently substitute a custom engine or weaker contract.
+If a candidate fails ownership, resource bounds or the accepted eviction contract,
+fix it in the operator's maintained fork or qualify another engine, then update
+the dependency decision before integration. The operator authorized this continued
+work on 2026-11-09 without another engine-choice approval. Do not weaken the contract
+or silently substitute a custom engine.
 
-Current gate: Foyer 0.22.6 passes isolated persistence, fixed-container recycling
+The working dependency is `borislitv/foyer`. Keep fixes and PR delivery in that
+repository; do not open external upstream PRs/issues without a separate explicit
+operator decision. Return to upstream only after its independently delivered fixes
+pass the required contracts and verification.
+
+Released Foyer 0.22.6 passes isolated persistence, fixed-container recycling
 and live second-chance retention, but fails persistence after reinsertion. See
 the [dependency decision](dependency-decisions.md#selective-disk-payload-cache-qualification--2026-11-09).
-Stage 1 is incomplete; stages 2–8 are blocked. The qualification test deliberately
-asserts the required contract and remains failing on the released dependency.
+The maintained fork now provides guarded admission, bounded index/recovery and
+validated restart/lifecycle APIs for adapter development. Application ownership,
+configuration-specific funding and performance acceptance remain to be established.
+The released dependency's RED remains preserved as evidence.
 
 ## Plan structure
 
@@ -28,9 +37,21 @@ performance and delivery. Each implementation stage starts with a meaningful RED
 behavioral test and finishes GREEN; the following verification stage expands the
 matrix. Keep raw receipts and the action/reason log outside tracked source.
 
+The subsequent operator instruction authorizes parallel subagents. Independent
+CLI/regex work from stages 2–3 may proceed alongside engine qualification; runtime
+adoption and stages 4 onward still require the dependency gate. Keep file ownership
+explicit and let the parent review, integrate and deliver the combined changes.
+
 Commands below are for the future implementation, not checks already run. Use
 Rust 1.99.1 explicitly, with its binary directory and the documented Python
 fixture environment on `PATH`; do not change the global default toolchain.
+
+The subsequent metadata decision adds independent opt-in `--metadata-limit`.
+Preserve the payload limit, canonical inode pins and existing count bound; charge
+variable-sized metadata and retained operation/result owners, reclaim in bounded
+yielding batches, and reject unfunded mutations before remote side effects.
+Verify the metadata change alongside writer/listing regressions; deployment and
+selection of a production byte limit remain separate.
 
 ### Stage 1: Freeze the contract and qualify the storage dependency
 

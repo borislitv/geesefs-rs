@@ -1,7 +1,8 @@
 # Dependency decisions
 
 Use public maintained crates and supported APIs before custom infrastructure.
-Cargo.lock pins exact public registry packages; no internal code is copied,
+Cargo.lock pins exact public registry packages and the explicitly authorized
+public Foyer correction below; no internal code is copied,
 translated, vendored or linked. This package forbids unsafe code in every target.
 License declarations are checked; the complete binary-distribution notice audit
 remains outstanding. See LICENSE and NOTICE for source attribution.
@@ -58,17 +59,101 @@ whereas [recovery stops a region when sequences decrease](https://github.com/foy
 An isolated checkout at that exact revision reproduces the failure. Temporarily
 removing only the decreasing-sequence cutoff makes the same test pass; restoring
 the source restores the same missing-key failure. The checkout was restored.
-This is a causal diagnostic, **not a safe fix**: the cutoff also distinguishes
-old region tails, and simply removing it has not established crash/reuse safety.
-No fork, patched dependency or cache-format workaround is adopted.
+This was a causal diagnostic, **not the adopted fix**: the cutoff also distinguishes
+old region tails. The maintained correction below preserves that distinction.
 
 At inspection, [v0.22.6 remains the latest release](https://github.com/foyer-rs/foyer/releases/tag/v0.22.6).
 The newer [recovery optimization](https://github.com/foyer-rs/foyer/commit/4e5ca058d3552d963cdc47289094bdd118ea4584)
 addresses [large-index costs](https://github.com/foyer-rs/foyer/issues/1295), but retains
 the decreasing-sequence cutoff; it does not resolve this incompatibility.
-Resolve reinsertion/recovery semantics upstream or qualify another maintained
-engine before stage 2. Stalled-I/O ownership, collision/corruption handling,
-terabyte-scale recovery and filesystem/performance acceptance remain unverified.
+The released result is retained independently of the maintained fork's subsequent
+qualification. Filesystem integration and performance acceptance remain separate.
+
+The operator subsequently authorized a maintained fork and other engine trials
+without another decision checkpoint. Development and PR delivery are confined to
+the operator's repositories; external upstream submissions require a separate
+explicit decision. Remain on the maintained fork until equivalent upstream fixes
+are independently verified. The first correction
+will separate physical region incarnation from logical entry sequence: checksum-
+protected blob indexes carry a shared random incarnation for each new region.
+Recovery/reclamation must reject a previous incarnation's tail while allowing old
+logical sequences from valid reinsertions. Preserve legacy decoding and make old
+readers reject the new index format safely. This narrow format correction is
+necessary because the released picker/filter APIs cannot fix recovery's sequence
+assumption; it is not a replacement storage engine. Keep legacy/reuse/corruption
+tests and the unmodified released RED as independent controls.
+
+Select public fork revision `d60dd0462c1de1e0853590791371208b659c90bf`
+for the isolated adapter, maintained in [fork PR 1](https://github.com/borislitv/foyer/pull/1).
+The released crate remains unsuitable. Corrections separate physical region
+incarnation from logical sequence, join shutdown ownership, validate recovered
+record geometry, bound CLOCK index slots and stream recovery. A circular
+tombstone log now persists the maximum sequence whose invalidation history was
+actually overwritten; otherwise completed deletions could resurrect after wrap.
+Unwrapped logs retain old completed records. Unsafe history returns an error,
+without automatically clearing inventory. Older readers must not open upgraded logs.
+
+Guarded callers use `Store::{try_enqueue, try_delete, load, wait_guarded}`.
+Byte/item credits precede index mutation and follow actual I/O; admission failure
+means not accepted, not a completed deletion. Serialized record size is capped
+before read allocation, and the adapter must permit only `Compression::None`.
+HybridCache's automatic writer/eviction paths use legacy void APIs and are **not**
+compatible with guarded mode. Caller backing, bounded codecs, fixed pools and
+index funding remain application responsibilities. No new journal or startup
+dirty-marker inventory reset is used. Process-interruption fixtures preserve
+unrelated completed records; this is not a power-loss durability guarantee.
+
+The exact fork passes 130 affected native tests, three explicitly configured
+doctests, default-feature package checks and all-target Clippy. Tests include
+real-file collision/corruption, queue exhaustion, interrupted child processes,
+tombstone wrap, lifecycle and 30 small geometry fixtures. The audit exception
+permits only the exact public repository, revision and six workspace packages.
+
+Resource qualification of the same bounded CLOCK representation recovered
+8,388,608 tiny records: 1,837.48 MiB requested live memory and up to 1,984.96 MiB
+observed RSS after touches. This supersedes the earlier unbounded-index estimate;
+the order tree must be funded too. A sparse 1-TiB log-enabled open kept scratch
+below 2 MiB but incurred about 3.75 GiB of file-cache residency. These are
+index/geometry experiments, not a populated 1-TiB payload benchmark or a whole-RSS
+bound. Retain raw source hashes, CPU/cgroup accounting and sampling limitations
+outside tracked source. Integration must disclose the resulting L1 reduction and
+test ownership/fallback under its actual configuration before accepting the feature.
+
+For the independent CLI work, reuse maintained public
+[regex 1.13.1](https://github.com/rust-lang/regex) (MIT OR Apache-2.0) with bounded pattern
+and compiled-program sizes, and [bytesize 2.7.0](https://github.com/bytesize-rs/bytesize)
+(Apache-2.0) for human-readable capacity parsing. Cargo.lock pins their selected
+registry releases; do not introduce another regex engine or custom unit parser.
+
+For backend namespace separation, reuse maintained public RustCrypto
+[sha2 0.11.1](https://docs.rs/sha2/0.11.1/sha2/) (MIT OR Apache-2.0), already in the
+SDK dependency graph. Its incremental SHA-256 API hashes length-delimited access
+and encryption context without persisting raw credentials. A digest does not
+prove an opaque credential provider is static: only explicitly known stable or
+anonymous contexts can authorize cross-process reuse. Do not infer a principal
+from profile names or a single non-expiring credential resolution.
+
+## Metadata byte admission — 2026-11-10
+
+The operator chose independent opt-in `--metadata-limit`; payload `--memory-limit`
+retains its existing meaning. Reuse the existing Tokio owned-semaphore `Budget`
+for lifetime charges, and retain Moka 0.12.16 for replaceable listing pages.
+Foyer's weighted memory cache also cannot own canonical inode identity, kernel
+lookup/open pins or an allocation moved out of a cache entry. Replacing L1 with
+another weighted cache would not solve those ownership requirements.
+
+Small application owners carry charges across inode state, returned directory
+names/xattrs, listing snapshots, writer snapshots and namespace-operation plans.
+Reserve variable-length encoding/copy work before construction or remote mutation;
+settlement releases credit rather than assuming late admission cannot fail.
+Namespace pressure examines at most 128 candidates per locked batch and yields
+between batches, preserving canonical pins and surfacing final exhaustion as
+`ENOMEM`. The existing entry count remains an additional bound. Disabled byte
+admission preserves prior defaults and avoids accounting-only HEAD requests.
+
+This is application metadata admission, not allocator accounting or a total-RSS
+limit. SDK/parser allocations, allocator rounding/container slack, runtime and
+kernel memory remain separate measured costs. No production limit is selected.
 
 ## Selected mechanisms
 

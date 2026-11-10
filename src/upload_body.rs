@@ -98,8 +98,14 @@ pub fn stream(
     start: u64,
     length: u64,
     lane: &Budget,
-) -> ByteStream {
-    stream_snapshot(store, Arc::new(snapshot.clone()), start, length, lane)
+) -> Result<ByteStream> {
+    Ok(stream_snapshot(
+        store,
+        Arc::new(snapshot.try_clone()?),
+        start,
+        length,
+        lane,
+    ))
 }
 pub fn stream_snapshot(
     store: &Arc<dyn Store>,

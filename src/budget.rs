@@ -104,6 +104,10 @@ struct Allocation {
 }
 
 impl Reservation {
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.size += other.size;
+        self._permit.merge(other._permit);
+    }
     pub(crate) fn size(&self) -> usize {
         self.size
     }

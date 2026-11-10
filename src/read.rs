@@ -178,7 +178,11 @@ pub fn snapshot(node: &Inode) -> Result<Snapshot> {
     if state.deleted {
         return Err(Error::Fs(libc::ENOENT));
     }
-    Ok(Snapshot {
+    let charge = state
+        .metadata_budget()
+        .charge_with(|| 4 * state.metadata_bytes())?;
+    let mut snapshot = Snapshot {
+        metadata_charge: charge,
         key: state.data_key.as_ref().unwrap_or(&state.key).clone(),
         size: state.size,
         version: state.version,
@@ -186,5 +190,7 @@ pub fn snapshot(node: &Inode) -> Result<Snapshot> {
         visible: state.visible_remote_size,
         extents: state.extents.clone(),
         metadata: HashMap::new(),
-    })
+    };
+    snapshot.settle_metadata()?;
+    Ok(snapshot)
 }

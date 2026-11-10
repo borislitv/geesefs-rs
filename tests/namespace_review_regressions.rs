@@ -22,7 +22,7 @@ async fn older_head_preserves_newer_metadata(getattr: bool) {
     }
     let fs = filesystem(&store);
     let node = fs.lookup(1, "file").await.unwrap();
-    let etag = fs.xattrs(node.ino).unwrap()["s3.etag"].clone();
+    let etag = fs.xattrs(node.ino).unwrap()["s3.etag"].to_vec();
     let (seen, release) = store.pause_head_response();
     let older = tokio::spawn({
         let fs = fs.clone();
@@ -48,13 +48,13 @@ async fn older_head_preserves_newer_metadata(getattr: bool) {
     }
     let newer = fs.refresh_inode_if_expired(node.ino).await.unwrap();
     assert_eq!(newer.attr().perm, 0o600);
-    assert_eq!(fs.xattrs(node.ino).unwrap()["user.label"], b"new");
+    assert_eq!(&fs.xattrs(node.ino).unwrap()["user.label"], b"new");
     assert_eq!(fs.xattrs(node.ino).unwrap()["s3.etag"], etag);
     release.send(()).unwrap();
     let returned = older.await.unwrap().unwrap();
     assert_eq!(returned.ino, node.ino);
     assert_eq!(returned.attr().perm, 0o600);
-    assert_eq!(fs.xattrs(node.ino).unwrap()["user.label"], b"new");
+    assert_eq!(&fs.xattrs(node.ino).unwrap()["user.label"], b"new");
     assert_eq!(store.bytes("file"), b"unchanged bytes");
     assert_eq!(store.put_calls.load(Ordering::Relaxed), 0);
 }
@@ -103,7 +103,7 @@ async fn implicit_directory_discovers_marker_metadata_unless_directory_objects_a
                 refreshed.attr().mtime,
                 std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
             );
-            assert_eq!(fs.xattrs(dir.ino).unwrap()["user.label"], b"marker");
+            assert_eq!(&fs.xattrs(dir.ino).unwrap()["user.label"], b"marker");
             assert_eq!(*store.head_keys.lock().unwrap(), ["dir/"]);
         }
         assert_eq!(store.bytes("dir/file"), b"payload");

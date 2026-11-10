@@ -47,6 +47,12 @@ pub fn insert_extent(state: &mut State, offset: u64, block: Block) -> Result<()>
     if state.extents.len() >= 65536 {
         return Err(Error::Fs(libc::ENOMEM));
     }
+    state.admit_metadata(
+        3 * (std::mem::size_of::<(u64, Extent)>() + crate::metadata_budget::LINKS),
+    )?;
+    let _temporary = state
+        .metadata_budget()
+        .charge(2 * state.extents.len() * std::mem::size_of::<(u64, Extent)>())?;
     let overlaps: Vec<_> = state
         .extents
         .range(..end)
@@ -86,6 +92,7 @@ pub fn insert_extent(state: &mut State, offset: u64, block: Block) -> Result<()>
     );
     state.size = state.size.max(end);
     state.mtime = std::time::SystemTime::now();
+    state.settle_metadata();
     Ok(())
 }
 
@@ -93,6 +100,10 @@ pub fn truncate(state: &mut State, size: u64) -> Result<()> {
     if state.deleted {
         return Err(Error::Fs(libc::ENOENT));
     }
+    if size < state.size && state.cuts.len() >= 65536 {
+        return Err(Error::Fs(libc::ENOMEM));
+    }
+    state.admit_metadata(std::mem::size_of::<(u64, u64)>() + crate::metadata_budget::LINKS)?;
     state.version += 1;
     if size < state.size {
         if state.cuts.len() >= 65536 {
@@ -108,30 +119,112 @@ pub fn truncate(state: &mut State, size: u64) -> Result<()> {
     }
     state.size = size;
     state.mtime = std::time::SystemTime::now();
+    state.settle_metadata();
     Ok(())
 }
 
-#[derive(Clone)]
 pub struct Snapshot {
-    pub key: String,
-    pub size: u64,
-    pub version: u64,
-    pub remote: Option<ObjectHead>,
-    pub visible: u64,
-    pub extents: BTreeMap<u64, Extent>,
-    pub metadata: HashMap<String, String>,
+    pub(crate) metadata_charge: crate::metadata_budget::MetadataCharge,
+    pub(crate) key: String,
+    pub(crate) size: u64,
+    pub(crate) version: u64,
+    pub(crate) remote: Option<ObjectHead>,
+    pub(crate) visible: u64,
+    pub(crate) extents: BTreeMap<u64, Extent>,
+    pub(crate) metadata: HashMap<String, String>,
+}
+
+impl Snapshot {
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+    pub fn remote(&self) -> Option<&ObjectHead> {
+        self.remote.as_ref()
+    }
+    fn admit_remote(&mut self, head: &ObjectHead) -> Result<()> {
+        if !self.metadata_charge.budget().enabled() {
+            return Ok(());
+        }
+        self.metadata_charge
+            .resize(self.metadata_bytes() + crate::metadata_budget::head_bytes(head))
+    }
+    fn metadata_bytes(&self) -> usize {
+        use crate::metadata_budget::{LINKS, head_bytes};
+        std::mem::size_of::<Self>()
+            + self.key.capacity()
+            + self.remote.as_ref().map_or(0, head_bytes)
+            + self.extents.len() * (std::mem::size_of::<(u64, Extent)>() + LINKS)
+            + self.metadata.capacity() * (std::mem::size_of::<(String, String)>() + LINKS)
+            + self
+                .metadata
+                .iter()
+                .map(|(key, value)| key.capacity() + value.capacity())
+                .sum::<usize>()
+    }
+    pub(crate) fn settle_metadata(&mut self) -> Result<()> {
+        if !self.metadata_charge.budget().enabled() {
+            return Ok(());
+        }
+        let bytes = self.metadata_bytes();
+        if bytes > self.metadata_charge.bytes() {
+            return Err(Error::Fs(libc::ENOMEM));
+        }
+        // Settlement never attempts late admission after a copy was built.
+        self.metadata_charge.resize(bytes)
+    }
+    pub(crate) fn try_clone(&self) -> Result<Self> {
+        let charge = self
+            .metadata_charge
+            .budget()
+            .charge_with(|| 2 * self.metadata_bytes())?;
+        let mut snapshot = Self {
+            metadata_charge: charge,
+            key: self.key.clone(),
+            size: self.size,
+            version: self.version,
+            remote: self.remote.clone(),
+            visible: self.visible,
+            extents: self.extents.clone(),
+            metadata: self.metadata.clone(),
+        };
+        snapshot.settle_metadata()?;
+        Ok(snapshot)
+    }
 }
 
 /// Small in-memory receipt; dirty payload stays with the inode's normal extents.
-#[derive(Clone)]
 pub(crate) struct PendingUpload {
+    _metadata_charge: crate::metadata_budget::MetadataCharge,
     key: String,
     size: u64,
     version: u64,
     receipt: String,
 }
 
-pub(crate) fn prepare_metadata(config: &Config, state: &mut State) {
+pub(crate) fn metadata_growth(config: &Config) -> usize {
+    [
+        &config.uid_attr,
+        &config.gid_attr,
+        &config.mode_attr,
+        &config.rdev_attr,
+        &config.mtime_attr,
+    ]
+    .into_iter()
+    .map(|key| {
+        key.len() + 32 + std::mem::size_of::<(String, Vec<u8>)>() + crate::metadata_budget::LINKS
+    })
+    .sum()
+}
+
+pub(crate) fn prepare_metadata(config: &Config, state: &mut State) -> Result<()> {
+    let growth = state.metadata_budget().estimate(|| metadata_growth(config));
+    state.admit_metadata(growth)?;
     if config.enable_perms {
         state
             .metadata
@@ -168,6 +261,8 @@ pub(crate) fn prepare_metadata(config: &Config, state: &mut State) {
                 .into_bytes(),
         );
     }
+    state.settle_metadata();
+    Ok(())
 }
 
 pub fn snapshot(node: &Inode, config: &Config) -> Result<Option<Snapshot>> {
@@ -180,7 +275,7 @@ pub fn snapshot(node: &Inode, config: &Config) -> Result<Option<Snapshot>> {
     }
     // Admission may have waited while writes changed both version and mtime.
     // Generated attributes and payload must describe the same locked generation.
-    prepare_metadata(config, &mut state);
+    prepare_metadata(config, &mut state)?;
     if state
         .metadata
         .keys()
@@ -190,7 +285,11 @@ pub fn snapshot(node: &Inode, config: &Config) -> Result<Option<Snapshot>> {
             "geesefs-upload-receipt is reserved for upload provenance".into(),
         ));
     }
-    Ok(Some(Snapshot {
+    let charge = state.metadata_budget().charge_with(|| {
+        2 * state.metadata_bytes() + crate::metadata_budget::encoding_bytes(&state.metadata)
+    })?;
+    let mut snapshot = Snapshot {
+        metadata_charge: charge,
         key: if state.mode & libc::S_IFMT == libc::S_IFDIR && !state.key.is_empty() {
             format!("{}/", state.data_key.as_ref().unwrap_or(&state.key))
         } else {
@@ -206,7 +305,9 @@ pub fn snapshot(node: &Inode, config: &Config) -> Result<Option<Snapshot>> {
         visible: state.visible_remote_size,
         extents: state.extents.clone(),
         metadata: encode_metadata(&state.metadata)?.into_iter().collect(),
-    }))
+    };
+    snapshot.settle_metadata()?;
+    Ok(Some(snapshot))
 }
 
 pub fn overlay(snapshot: &Snapshot, start: u64, data: &mut [u8]) {
@@ -233,6 +334,29 @@ pub async fn flush_locked(
     config: &Config,
     admission: &UploadAdmission,
 ) -> Result<()> {
+    flush_locked_before(store, node, lane, flusher, config, admission, None).await
+}
+
+pub(crate) type BeforeMutation<'a> = dyn FnMut() -> Result<()> + Send + 'a;
+
+fn will_mutate(before: &mut Option<&mut BeforeMutation<'_>>) -> Result<()> {
+    if let Some(before) = before {
+        before()?;
+    }
+    Ok(())
+}
+
+/// The callback publishes namespace intent only after first-request metadata
+/// and body admission, immediately before a possibly applied remote mutation.
+pub(crate) async fn flush_locked_before(
+    store: &Arc<dyn Store>,
+    node: &Inode,
+    lane: &Budget,
+    flusher: tokio::sync::OwnedSemaphorePermit,
+    config: &Config,
+    admission: &UploadAdmission,
+    mut before: Option<&mut BeforeMutation<'_>>,
+) -> Result<()> {
     let mut flusher = Some(flusher);
     reconcile_upload(store, node).await?;
     let Some(mut snapshot) = snapshot(node, config)? else {
@@ -243,7 +367,8 @@ pub async fn flush_locked(
     }
     if config.enable_patch
         && patchable(&snapshot, config)
-        && let Some(head) = patch_snapshot(store, node, &mut snapshot, lane, config, 0).await?
+        && let Some(head) =
+            patch_snapshot(store, node, &mut snapshot, lane, config, 0, &mut before).await?
     {
         return retire(node, &snapshot, head);
     }
@@ -257,6 +382,12 @@ pub async fn flush_locked(
         && snapshot.size > prefix
         && snapshot.size > single_limit;
     loop {
+        // Keep request-map copies charged until the operation completes or is
+        // cancelled. The durable receipt has its own, longer-lived owner.
+        let _request_metadata = snapshot
+            .metadata_charge
+            .budget()
+            .charge_with(|| 3 * snapshot.metadata_bytes() + 1024)?;
         let upload_size = if bootstrap { prefix } else { snapshot.size };
         let mut random = [0u8; 16];
         getrandom::fill(&mut random).map_err(|_| Error::Fs(libc::EIO))?;
@@ -266,22 +397,28 @@ pub async fn flush_locked(
             .collect::<String>();
         let mut metadata = snapshot.metadata.clone();
         metadata.insert(UPLOAD_RECEIPT.into(), receipt.clone());
-        let pending = PendingUpload {
+        let pending_charge = snapshot.metadata_charge.budget().charge(
+            std::mem::size_of::<PendingUpload>() + snapshot.key.len() + receipt.capacity(),
+        )?;
+        let pending = Arc::new(PendingUpload {
+            _metadata_charge: pending_charge,
             key: snapshot.key.clone(),
             size: upload_size,
             version: snapshot.version,
             receipt,
-        };
+        });
         let committed = if !bootstrap && upload_size <= single_limit {
             let _part =
                 tokio::time::timeout(config.http_timeout, admission.parts.clone().acquire_owned())
                     .await
                     .map_err(|_| Error::Timeout("PUT admission"))?
                     .map_err(|_| Error::Cancelled)?;
-            let body = crate::upload_body::stream(store, &snapshot, 0, snapshot.size, lane);
+            let body = crate::upload_body::stream(store, &snapshot, 0, snapshot.size, lane)?;
+            will_mutate(&mut before)?;
             node.state.lock().unwrap().pending_upload = Some(pending);
             store.put(&snapshot.key, body, metadata.clone()).await?
         } else {
+            will_mutate(&mut before)?;
             let upload = store
                 .begin_upload(&snapshot.key, metadata.clone(), snapshot.size)
                 .await?;
@@ -296,7 +433,7 @@ pub async fn flush_locked(
             let tasks = guard.tasks.as_mut().expect("owned part tasks");
             let result: Result<String> = async {
                 let mut parts = BTreeMap::new();
-                let snapshot = Arc::new(snapshot.clone());
+                let snapshot = Arc::new(snapshot.try_clone()?);
                 let per_file = Arc::new(tokio::sync::Semaphore::new(config.max_parallel_parts));
                 let mut offset = 0;
                 let mut number = 0u32;
@@ -434,7 +571,7 @@ pub async fn flush_locked(
                 metadata,
                 ..Default::default()
             },
-        );
+        )?;
         node.state.lock().unwrap().pending_upload = None;
         let head = store.head(&snapshot.key).await?;
         if head.size != upload_size || head.etag != committed {
@@ -445,11 +582,21 @@ pub async fn flush_locked(
         if !bootstrap {
             return retire(node, &snapshot, head);
         }
-        progress(node, &snapshot, &head);
+        progress(node, &snapshot, &head)?;
         snapshot.visible = head.size;
+        snapshot.admit_remote(&head)?;
         snapshot.remote = Some(head);
-        if let Some(head) =
-            patch_snapshot(store, node, &mut snapshot, lane, config, upload_size).await?
+        snapshot.settle_metadata()?;
+        if let Some(head) = patch_snapshot(
+            store,
+            node,
+            &mut snapshot,
+            lane,
+            config,
+            upload_size,
+            &mut before,
+        )
+        .await?
         {
             return retire(node, &snapshot, head);
         }
@@ -463,6 +610,10 @@ fn retire(node: &Inode, snapshot: &Snapshot, head: ObjectHead) -> Result<()> {
     if state.deleted {
         return Err(Error::Fs(libc::ENOENT));
     }
+    let growth = state
+        .metadata_budget()
+        .estimate(|| crate::metadata_budget::head_bytes(&head));
+    state.admit_metadata(growth)?;
     state.remote = Some(head);
     state.visible_remote_size = state
         .cuts
@@ -477,6 +628,7 @@ fn retire(node: &Inode, snapshot: &Snapshot, head: ObjectHead) -> Result<()> {
     // A verified commit is a newer authoritative observation than a LIST that
     // was already in flight. Its metadata must not replace this generation.
     state.fetched = std::time::Instant::now();
+    state.settle_metadata();
     Ok(())
 }
 
@@ -495,12 +647,16 @@ fn conflict(error: &Error) -> bool {
         || matches!(error,Error::Backend{code,..} if matches!(code.as_str(),"PreconditionFailed"|"ConditionalRequestConflict"|"OperationAborted"|"Conflict"|"HTTP409"|"HTTP412"))
 }
 
-fn progress(node: &Inode, snapshot: &Snapshot, head: &ObjectHead) {
-    progress_version(node, snapshot.version, head);
+fn progress(node: &Inode, snapshot: &Snapshot, head: &ObjectHead) -> Result<()> {
+    progress_version(node, snapshot.version, head)
 }
 
-fn progress_version(node: &Inode, version: u64, head: &ObjectHead) {
+fn progress_version(node: &Inode, version: u64, head: &ObjectHead) -> Result<()> {
     let mut state = node.state.lock().unwrap();
+    let growth = state
+        .metadata_budget()
+        .estimate(|| crate::metadata_budget::head_bytes(head));
+    state.admit_metadata(growth)?;
     state.remote = Some(head.clone());
     state.visible_remote_size = state
         .cuts
@@ -509,32 +665,53 @@ fn progress_version(node: &Inode, version: u64, head: &ObjectHead) {
         .min()
         .unwrap_or(head.size)
         .min(head.size);
+    state.settle_metadata();
+    Ok(())
 }
 
 async fn reconcile_upload(store: &Arc<dyn Store>, node: &Inode) -> Result<()> {
-    let (pending, previous) = {
+    let (pending, previous, budget, _previous_charge) = {
         let state = node.state.lock().unwrap();
-        (state.pending_upload.clone(), state.remote.clone())
+        let budget = state.metadata_budget().clone();
+        let charge = budget.charge_with(|| {
+            state
+                .remote
+                .as_ref()
+                .map_or(0, crate::metadata_budget::head_bytes)
+        })?;
+        (
+            state.pending_upload.clone(),
+            state.remote.clone(),
+            budget,
+            charge,
+        )
     };
     let Some(pending) = pending else {
         return Ok(());
     };
     match store.head(&pending.key).await {
-        Ok(head)
+        Ok(head) => {
+            let _comparison_charge = budget.charge_with(|| {
+                4 * (crate::metadata_budget::head_bytes(&head)
+                    + previous
+                        .as_ref()
+                        .map_or(0, crate::metadata_budget::head_bytes))
+            })?;
             if head.size == pending.size
-                && head.metadata.get(UPLOAD_RECEIPT) == Some(&pending.receipt) =>
-        {
-            // Provenance permits using these bytes as the new conditional base,
-            // NOT acknowledging durability. Re-upload all retained dirty data,
-            // including newer writes and truncate cuts, before retiring anything.
-            progress_version(node, pending.version, &head);
+                && head.metadata.get(UPLOAD_RECEIPT) == Some(&pending.receipt)
+            {
+                // Provenance permits using these bytes as the new conditional base,
+                // NOT acknowledging durability. Re-upload all retained dirty data,
+                // including newer writes and truncate cuts, before retiring anything.
+                progress_version(node, pending.version, &head)?;
+            } else if !unchanged_base(previous.as_ref(), &head) {
+                return Err(Error::Fs(libc::ESTALE));
+            }
         }
-        Ok(head) if unchanged_base(previous.as_ref(), &head) => {}
         Err(Error::Fs(libc::ENOENT)) if previous.is_none() => {}
         Err(Error::Backend { code, .. })
             if previous.is_none() && matches!(code.as_str(), "NoSuchKey" | "NotFound") => {}
         Err(error) => return Err(error),
-        Ok(_) => return Err(Error::Fs(libc::ESTALE)),
     }
     node.state.lock().unwrap().pending_upload = None;
     Ok(())
@@ -567,6 +744,22 @@ async fn refresh_conflict(
 ) -> Result<()> {
     let head = store.head(&snapshot.key).await?;
     let mut state = node.state.lock().unwrap();
+    let incoming = state
+        .metadata_budget()
+        .estimate(|| Inode::metadata_estimate(&state.key, Some(&head)));
+    let previous_bytes = state.metadata_budget().estimate(|| {
+        snapshot
+            .remote
+            .as_ref()
+            .map_or(0, crate::metadata_budget::head_bytes)
+    });
+    let _temporary = state.metadata_budget().charge(
+        4 * (incoming + previous_bytes)
+            + state.extents.len() * std::mem::size_of::<(u64, Extent)>(),
+    )?;
+    state.admit_metadata(
+        incoming + 2 * (std::mem::size_of::<(u64, Extent)>() + crate::metadata_budget::LINKS),
+    )?;
     // Adopt remote changes only for metadata keys not modified locally. This
     // also preserves writes/xattrs newer than the failed snapshot.
     let previous = crate::backend::metadata::decode_metadata(
@@ -632,6 +825,7 @@ async fn refresh_conflict(
         .unwrap_or(head.size)
         .min(head.size);
     state.remote = Some(head);
+    state.settle_metadata();
     Ok(())
 }
 
@@ -642,7 +836,12 @@ async fn patch_snapshot(
     lane: &Budget,
     config: &Config,
     skip_before: u64,
+    before: &mut Option<&mut BeforeMutation<'_>>,
 ) -> Result<Option<ObjectHead>> {
+    let _patch_metadata = snapshot
+        .metadata_charge
+        .budget()
+        .charge_with(|| 3 * snapshot.metadata_bytes())?;
     let remote = snapshot.remote.as_ref().expect("PATCH eligibility").clone();
     // Dirty extents and a growing zero tail are the only requested mutations.
     // Keep each request within a fixed payload lane; never materialize an object.
@@ -683,10 +882,16 @@ async fn patch_snapshot(
             let length = (end - offset)
                 .min(part.end - offset)
                 .min(crate::upload_body::CHUNK_SIZE as u64) as usize;
-            let current = snapshot.remote.as_ref().expect("PATCH baseline").clone();
+            let remote = snapshot.remote.as_ref().expect("PATCH baseline");
+            let _current_charge = snapshot
+                .metadata_charge
+                .budget()
+                .charge_with(|| crate::metadata_budget::head_bytes(remote))?;
+            let current = remote.clone();
             let result = async {
                 let body =
                     crate::upload_body::admitted(store, snapshot, offset, length, lane).await?;
+                will_mutate(before)?;
                 store
                     .patch(&snapshot.key, offset, body, &current.etag, Some(part_size))
                     .await
@@ -723,15 +928,18 @@ async fn patch_snapshot(
                 last_modified: std::time::SystemTime::try_from(result.last_modified).ok(),
                 properties: current.properties,
             };
-            progress(node, snapshot, &head);
+            progress(node, snapshot, &head)?;
             snapshot.visible = head.size;
+            snapshot.admit_remote(&head)?;
             snapshot.remote = Some(head);
+            snapshot.settle_metadata()?;
             offset += length as u64;
         }
     }
     let current = snapshot.remote.as_ref().expect("PATCH baseline");
     let metadata_changed = current.metadata != snapshot.metadata;
     let result = if metadata_changed {
+        will_mutate(before)?;
         store
             .replace_metadata(&snapshot.key, &current.etag, snapshot.metadata.clone())
             .await

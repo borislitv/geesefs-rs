@@ -144,7 +144,7 @@ async fn paged_implicit_directories_symlinks_and_metadata() {
     let loaded = fresh.lookup(1, "link").await.unwrap();
     assert_eq!(loaded.attr().kind, fuser::FileType::Symlink);
     assert_eq!(
-        fresh.xattrs(loaded.ino).unwrap()["user.custom"],
+        &fresh.xattrs(loaded.ino).unwrap()["user.custom"],
         b"value%\n"
     );
 }

@@ -1,3 +1,4 @@
+pub mod cache_scope;
 pub mod content_type;
 pub mod extended_list;
 pub mod metadata;
@@ -72,6 +73,13 @@ impl RangeSink {
 /// in-memory stores. Filesystem state, generation barriers and overlays are never mocked.
 #[async_trait::async_trait]
 pub trait Store: Send + Sync + 'static {
+    /// Persistent caching is opt-in at the backend boundary. Fake and opaque
+    /// stores keep their existing behavior without claiming a shared identity.
+    fn persistent_cache_scope(&self) -> Result<cache_scope::CacheScope> {
+        Ok(cache_scope::CacheScope::Bypass(
+            cache_scope::CacheBypass::UnsupportedBackend,
+        ))
+    }
     /// Share the real backend's observations with its owning filesystem.
     fn diagnostics(&self) -> Option<crate::metrics::Diagnostics> {
         None
@@ -176,6 +184,9 @@ pub trait Store: Send + Sync + 'static {
 
 #[async_trait::async_trait]
 impl Store for s3::S3 {
+    fn persistent_cache_scope(&self) -> Result<cache_scope::CacheScope> {
+        self.persistent_cache_scope()
+    }
     fn diagnostics(&self) -> Option<crate::metrics::Diagnostics> {
         Some(self.diagnostics.clone())
     }

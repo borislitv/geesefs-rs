@@ -337,7 +337,7 @@ async fn local_pages_seek_past_subtrees_without_skipping_lexical_neighbours() {
             break;
         }
         assert!(page.len() <= 2);
-        after = page.last().unwrap().name.clone();
+        after = page.last().unwrap().name.as_str().to_owned();
         names.extend(page.into_iter().map(|entry| entry.name));
     }
     assert_eq!(names, ["a", "a!", "a.", "a0", "aa", "β", "😀"]);

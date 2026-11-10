@@ -21,6 +21,7 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 
+use super::cache_scope::{CacheBypass, CacheScope, NamespaceHash, encryption_context};
 use super::extended_list::{ListPage, ListedObject, MAX_PAGE_ENTRIES};
 use crate::{
     budget::{Block, Budget, Reservation},
@@ -67,6 +68,10 @@ pub struct S3 {
     try_anonymous: bool,
     no_detect: bool,
     regional_aws_endpoint: bool,
+    cache_access: std::result::Result<[u8; 32], CacheBypass>,
+    cache_encryption: [u8; 32],
+    cache_opaque_auth: bool,
+    cache_scope: Option<CacheScope>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -209,6 +214,92 @@ fn request_failure_kind(error: &reqwest::Error) -> &'static str {
 }
 
 impl S3 {
+    /// Available only after startup discovery has selected the effective client.
+    pub fn persistent_cache_scope(&self) -> Result<super::cache_scope::CacheScope> {
+        self.cache_scope.ok_or_else(|| {
+            Error::Config("persistent cache scope requires S3 initialization".into())
+        })
+    }
+
+    /// Install known immutable credentials rather than infer provider provenance
+    /// from a single resolved value. Arbitrary providers remain opaque. As with
+    /// `new`, callers supplying custom SDK endpoint/auth/request middleware must
+    /// ensure it does not change the target or access context between operations.
+    pub fn with_static_credentials(mut self, credentials: aws_sdk_s3::config::Credentials) -> Self {
+        self.cache_scope = None;
+        self.cache_access =
+            if credentials.expiry().is_some() || credentials.session_token().is_some() {
+                Err(CacheBypass::TemporaryCredentials)
+            } else {
+                let mut hash = NamespaceHash::new(b"geesefs-static-access-v1");
+                // The access-key identifier selects the authorization context. The
+                // signing secret is not an identity and must not enter cache keys.
+                hash.field(credentials.access_key_id().as_bytes());
+                Ok(hash.finish())
+            };
+        self.client = Client::from_conf(
+            self.client
+                .config()
+                .to_builder()
+                .credentials_provider(credentials)
+                .build(),
+        );
+        self
+    }
+
+    async fn initialized_cache_scope(&self) -> Result<CacheScope> {
+        if self.cache_opaque_auth {
+            return Ok(CacheScope::Bypass(CacheBypass::OpaqueAuthentication));
+        }
+        let access = if self.signature == SignatureVersion::Anonymous {
+            NamespaceHash::new(b"geesefs-anonymous-access-v1").finish()
+        } else {
+            match self.cache_access {
+                Ok(access) => access,
+                Err(reason) => return Ok(CacheScope::Bypass(reason)),
+            }
+        };
+        let mut hash = NamespaceHash::new(b"geesefs-s3-namespace-v1");
+        // Let the SDK resolve its effective endpoint, including addressing and
+        // partition flags. Anonymous presigning serializes a request locally:
+        // no network, credential resolution or STS lookup is performed.
+        let anonymous = Client::from_conf(
+            self.client
+                .config()
+                .to_builder()
+                .allow_no_auth()
+                .auth_scheme_resolver(super::signature::AnonymousResolver)
+                .build(),
+        );
+        let resolved = anonymous
+            .head_object()
+            .bucket(&self.bucket)
+            .key(self.key("__geesefs_cache_scope__")?)
+            .presigned(
+                aws_sdk_s3::presigning::PresigningConfig::expires_in(Duration::from_secs(60))
+                    .map_err(|_| Error::Config("cache scope resolution duration".into()))?,
+            )
+            .await
+            .map_err(|_| Error::Config("cache scope endpoint resolution failed".into()))?;
+        hash.field(resolved.uri().as_bytes());
+        hash.field(
+            self.client
+                .config()
+                .region()
+                .map_or("", |region| region.as_ref())
+                .as_bytes(),
+        );
+        hash.field(self.bucket.as_bytes());
+        hash.field(self.prefix.as_bytes());
+        hash.field(&access);
+        hash.field(match self.signature {
+            SignatureVersion::V2 => b"sigv2",
+            SignatureVersion::Anonymous => b"anonymous",
+            SignatureVersion::Auto | SignatureVersion::V4 => b"sigv4",
+        });
+        hash.field(&self.cache_encryption);
+        Ok(CacheScope::Namespace(hash.finish()))
+    }
     // LIST includes response bodies and extension fallback. GET stops this
     // budget at headers: the existing payload/admission timeout stays separate.
     fn metadata_timeout(&self) -> Duration {
@@ -243,9 +334,18 @@ impl S3 {
     /// and --no-detect skip it; no failure silently downgrades a mounted client.
     pub async fn initialize(self) -> Result<Self> {
         let deadline = self.read_timeout.saturating_mul(4);
-        tokio::time::timeout(deadline, self.initialize_inner())
+        let mut initialized = tokio::time::timeout(deadline, self.initialize_inner())
             .await
-            .map_err(|_| Error::Timeout("S3 initialization"))?
+            .map_err(|_| Error::Timeout("S3 initialization"))??;
+        // Identity is optional cache policy. Failure to resolve it must not
+        // change ordinary no-detect/authentication startup semantics.
+        initialized.cache_scope = Some(
+            match tokio::time::timeout(deadline, initialized.initialized_cache_scope()).await {
+                Ok(Ok(scope)) => scope,
+                _ => CacheScope::Bypass(CacheBypass::UnresolvedEndpoint),
+            },
+        );
+        Ok(initialized)
     }
     async fn initialize_inner(mut self) -> Result<Self> {
         if self.no_detect || self.signature != SignatureVersion::Auto {
@@ -582,6 +682,24 @@ impl S3 {
     }
     pub async fn from_config(config: &Config) -> Result<Self> {
         config.validate()?;
+        // This source is known to be local/static; do not classify arbitrary
+        // providers by a resolved expiry or provider-name string. Explicit
+        // profiles, IAM, session credentials and the default chain stay opaque.
+        use aws_sdk_s3::config::ProvideCredentials;
+        let static_credentials = if !config.iam
+            && config.profile.is_none()
+            && config.signature_version != SignatureVersion::Anonymous
+        {
+            aws_config::environment::EnvironmentVariableCredentialsProvider::new()
+                .provide_credentials()
+                .await
+                .ok()
+                .filter(|credentials| {
+                    credentials.session_token().is_none() && credentials.expiry().is_none()
+                })
+        } else {
+            None
+        };
         let mut loader = aws_config::defaults(BehaviorVersion::latest())
             .region(Region::new(config.effective_region().to_owned()))
             .timeout_config(
@@ -597,6 +715,10 @@ impl S3 {
         }
         if config.iam || config.signature_version == SignatureVersion::Anonymous {
             loader = loader.no_credentials();
+        } else if let Some(credentials) = &static_credentials {
+            // Pin the same known static value used for the namespace, rather
+            // than resolve the environment again after configuration load.
+            loader = loader.credentials_provider(credentials.clone());
         }
         let mut profile_files = None;
         if !config.shared_config.is_empty() {
@@ -653,12 +775,15 @@ impl S3 {
             )
             .build();
         let (bucket, prefix) = config.bucket_and_prefix();
-        Self::new(
+        let mut store = Self::new(
             Client::from_conf(client_config),
             bucket.into(),
             prefix.into(),
-        )?
-        .with_options(config)
+        )?;
+        if let Some(credentials) = static_credentials {
+            store = store.with_static_credentials(credentials);
+        }
+        store.with_options(config)
     }
 
     /// Accept an explicitly configured client for deterministic disposable tests.
@@ -718,6 +843,10 @@ impl S3 {
             try_anonymous: false,
             no_detect: true,
             regional_aws_endpoint: false,
+            cache_access: Err(CacheBypass::OpaqueCredentials),
+            cache_encryption: encryption_context(false, false, None, None),
+            cache_opaque_auth: false,
+            cache_scope: None,
             extension_attempts,
             extension_http: reqwest::Client::builder()
                 .timeout(read_timeout)
@@ -731,6 +860,31 @@ impl S3 {
     /// Also used with an explicit disposable SDK client by contract tests.
     pub fn with_options(mut self, config: &Config) -> Result<Self> {
         config.validate()?;
+        self.cache_scope = None;
+        // Options do not remove previously installed custom auth schemes or
+        // resolvers. Reconfiguration away from one cannot claim a plain SigV4
+        // context; keep persistence conservative without changing auth behavior.
+        self.cache_opaque_auth |= config.iam
+            || matches!(
+                self.signature,
+                SignatureVersion::V2 | SignatureVersion::Anonymous
+            ) && self.signature != config.signature_version;
+        let customer_key = config
+            .sse_c
+            .as_ref()
+            .map(|customer| {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD
+                    .decode(&customer.encoded)
+                    .map_err(|_| Error::Config("invalid SSE-C cache context".into()))
+            })
+            .transpose()?;
+        self.cache_encryption = encryption_context(
+            config.sse,
+            config.requester_pays,
+            config.sse_kms.as_deref(),
+            customer_key.as_deref(),
+        );
         self.diagnostics = crate::metrics::Diagnostics::new(
             config.metrics_listen.is_some() && !config.no_diagnostics,
             config.diagnostic_log_level,

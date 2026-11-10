@@ -131,16 +131,17 @@ struct File {
     _permit: OwnedSemaphorePermit,
 }
 struct Directory {
-    last: String,
-    page_after: String,
+    _metadata_charge: crate::metadata_budget::MetadataCharge,
+    last: crate::metadata_budget::MetadataString,
+    page_after: crate::metadata_budget::MetadataString,
     cookie: u64,
 }
 
 impl Directory {
     fn seek(&mut self, offset: u64) {
         if offset != self.cookie {
-            self.last.clear();
-            self.page_after.clear();
+            self.last = Default::default();
+            self.page_after = Default::default();
             self.cookie = 0;
         }
     }
@@ -197,13 +198,21 @@ impl Directory {
         let Some(next_after) = page.next_after else {
             return Ok(false);
         };
-        if let DirectoryReply::Basic(reply) = reply {
+        if let DirectoryReply::Basic(reply, charges) = reply {
             for entry in page.entries {
+                let charge = if self.cookie >= offset {
+                    DirectoryReply::entry_charge(fs, &entry.name)?
+                } else {
+                    None
+                };
                 let next = self.cookie + 1;
                 if self.cookie >= offset
-                    && reply.add(INodeNo(entry.ino), next, entry.kind, &entry.name)
+                    && reply.add(INodeNo(entry.ino), next, entry.kind, entry.name.as_str())
                 {
                     return Ok(false);
+                }
+                if let Some(charge) = charge {
+                    charges.push(charge);
                 }
                 self.cookie = next;
                 self.last = entry.name;
@@ -236,7 +245,7 @@ impl Directory {
                         INodeNo(entry.ino),
                         next,
                         entry.kind,
-                        &entry.name,
+                        entry.name.as_str(),
                         Some(prepared),
                     )
                     .await?
@@ -254,11 +263,27 @@ impl Directory {
 }
 
 enum DirectoryReply {
-    Basic(ReplyDirectory),
-    Plus(ReplyDirectoryPlus, Vec<Arc<crate::inode::Inode>>),
+    Basic(ReplyDirectory, Vec<crate::metadata_budget::MetadataCharge>),
+    Plus(
+        ReplyDirectoryPlus,
+        Vec<Arc<crate::inode::Inode>>,
+        Vec<crate::metadata_budget::MetadataCharge>,
+    ),
 }
 
 impl DirectoryReply {
+    fn entry_charge(
+        fs: &Core,
+        name: &str,
+    ) -> crate::error::Result<Option<crate::metadata_budget::MetadataCharge>> {
+        // Includes aligned wire record, plus attributes, lookup owner and
+        // geometrically grown bookkeeping vectors until the reply is sent.
+        if fs.metadata_enabled() {
+            fs.charge_metadata(2 * name.len() + 1024).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
     async fn add(
         &mut self,
         fs: &Core,
@@ -269,14 +294,25 @@ impl DirectoryReply {
         prepared: Option<Arc<crate::inode::Inode>>,
     ) -> crate::error::Result<bool> {
         match self {
-            Self::Basic(reply) => Ok(reply.add(ino, offset, kind, name)),
-            Self::Plus(reply, entries) => {
+            Self::Basic(reply, charges) => {
+                let charge = Self::entry_charge(fs, name)?;
+                let full = reply.add(ino, offset, kind, name);
+                if !full && let Some(charge) = charge {
+                    charges.push(charge);
+                }
+                Ok(full)
+            }
+            Self::Plus(reply, entries, charges) => {
+                let charge = Self::entry_charge(fs, name)?;
                 let node = match prepared {
                     Some(node) => node,
                     None => fs.refresh_inode_if_expired(ino.0).await?,
                 };
                 let (attr, ttl) = node.cached_attr(fs.config.stat_cache_ttl);
                 let full = reply.add(ino, offset, name, &ttl, &attr, Generation(0));
+                if !full && let Some(charge) = charge {
+                    charges.push(charge);
+                }
                 // Linux does not acquire lookup references for dot entries.
                 // Hold accepted inodes, but transfer references only when the
                 // complete buffer is sent, not on error or cancellation.
@@ -290,8 +326,8 @@ impl DirectoryReply {
 
     fn ok(self, fs: &Core) {
         match self {
-            Self::Basic(reply) => reply.ok(),
-            Self::Plus(reply, entries) => {
+            Self::Basic(reply, _charges) => reply.ok(),
+            Self::Plus(reply, entries, _charges) => {
                 for node in &entries {
                     fs.reference(node);
                 }
@@ -302,8 +338,8 @@ impl DirectoryReply {
 
     fn error(self, error: Errno) {
         match self {
-            Self::Basic(reply) => reply.error(error),
-            Self::Plus(reply, _) => reply.error(error),
+            Self::Basic(reply, _charges) => reply.error(error),
+            Self::Plus(reply, _, _charges) => reply.error(error),
         }
     }
 }
@@ -1165,12 +1201,26 @@ impl fuser::Filesystem for Fuse {
             reply.error(Errno::EMFILE);
             return;
         }
+        let charge = match self.fs.charge_metadata(
+            std::mem::size_of::<tokio::sync::Mutex<Directory>>()
+                + std::mem::size_of::<(u64, Arc<tokio::sync::Mutex<Directory>>)>()
+                + 2 * crate::metadata_budget::LINKS,
+        ) {
+            Ok(charge) => charge,
+            Err(error) => {
+                drop(directories);
+                self.fs.release(ino.0);
+                reply.error(errno(error));
+                return;
+            }
+        };
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
         directories.insert(
             handle,
             Arc::new(tokio::sync::Mutex::new(Directory {
-                last: String::new(),
-                page_after: String::new(),
+                _metadata_charge: charge,
+                last: Default::default(),
+                page_after: Default::default(),
                 cookie: 0,
             })),
         );
@@ -1194,7 +1244,7 @@ impl fuser::Filesystem for Fuse {
                 request,
                 ino,
                 (offset, 0),
-                DirectoryReply::Basic(reply),
+                DirectoryReply::Basic(reply, Vec::new()),
             ),
         );
     }
@@ -1215,7 +1265,7 @@ impl fuser::Filesystem for Fuse {
                 request,
                 ino,
                 (offset, 0),
-                DirectoryReply::Plus(reply, Vec::new()),
+                DirectoryReply::Plus(reply, Vec::new(), Vec::new()),
             ),
         );
     }
@@ -1258,7 +1308,15 @@ impl fuser::Filesystem for Fuse {
     fn listxattr(&self, _: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
         match self.fs.xattrs(ino.0) {
             Ok(attrs) => {
-                let mut names = Vec::new();
+                let length = attrs.keys().map(|name| name.len() + 1).sum();
+                let _charge = match self.fs.charge_metadata(length) {
+                    Ok(charge) => charge,
+                    Err(error) => {
+                        reply.error(errno(error));
+                        return;
+                    }
+                };
+                let mut names = Vec::with_capacity(length);
                 for name in attrs.keys() {
                     names.extend_from_slice(name.as_bytes());
                     names.push(0);

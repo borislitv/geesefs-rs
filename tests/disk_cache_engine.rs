@@ -2,10 +2,12 @@
 
 //! Qualification of the released storage API, before selecting a runtime dependency.
 use foyer::{
-    BlockEngineConfig, DeviceBuilder, FileDeviceBuilder, HybridCache, HybridCacheBuilder,
-    InvalidRatioPicker, RecoverMode, StorageFilter,
+    BlockEngineConfig, Code, DeviceBuilder, FileDeviceBuilder, HybridCache, HybridCacheBuilder,
+    InvalidRatioPicker, RecoverMode, StorageFilter, StorageValue,
 };
-use std::{hash::BuildHasher, num::NonZeroUsize, path::Path, time::Duration};
+use foyer_storage::test_utils::Switch;
+use geesefs_rs::budget::{Block, Budget};
+use std::{hash::BuildHasher, num::NonZeroUsize, path::Path, sync::Arc, time::Duration};
 
 #[path = "support/disk_cache_policy.rs"]
 mod disk_cache_policy;
@@ -22,6 +24,14 @@ async fn engine_with_recency(
     directory: &Path,
     recent: Option<Recent>,
 ) -> HybridCache<u64, Vec<u8>> {
+    engine_with_options(directory, recent, Switch::default()).await
+}
+
+async fn engine_with_options<V: StorageValue>(
+    directory: &Path,
+    recent: Option<Recent>,
+    flush_switch: Switch,
+) -> HybridCache<u64, V> {
     let device = FileDeviceBuilder::new(directory.join("payload.cache"))
         .with_capacity(16 * MIB)
         .build()
@@ -33,7 +43,8 @@ async fn engine_with_recency(
         .with_indexer_shards(4)
         .with_recover_concurrency(1)
         .with_flushers(1)
-        .with_reclaimers(1);
+        .with_reclaimers(1)
+        .with_flush_switch(flush_switch);
     if let Some(recent) = recent {
         config = config
             .with_eviction_pickers(vec![
@@ -196,4 +207,117 @@ async fn reinserted_records_survive_reopen() {
     })
     .await
     .expect("recovery of reinserted records must finish");
+}
+
+enum ChargedValue {
+    Charged(Block),
+    Decoded(Vec<u8>),
+}
+
+impl ChargedValue {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Charged(block) => block.as_slice(),
+            Self::Decoded(bytes) => bytes,
+        }
+    }
+}
+
+impl Code for ChargedValue {
+    fn encode(&self, writer: &mut impl std::io::Write) -> foyer::Result<()> {
+        (self.bytes().len() as u64).encode(writer)?;
+        writer
+            .write_all(self.bytes())
+            .map_err(foyer::Error::io_error)
+    }
+
+    fn decode(reader: &mut impl std::io::Read) -> foyer::Result<Self> {
+        let size = u64::decode(reader)?;
+        if size > (128 * KIB) as u64 {
+            return Err(foyer::Error::new(
+                foyer::ErrorKind::OutOfRange,
+                "oversized test record",
+            ));
+        }
+        let mut bytes = vec![0; size as usize];
+        reader
+            .read_exact(&mut bytes)
+            .map_err(foyer::Error::io_error)?;
+        Ok(Self::Decoded(bytes))
+    }
+
+    fn estimated_size(&self) -> usize {
+        8 + self.bytes().len()
+    }
+}
+
+#[tokio::test]
+async fn a_stalled_flusher_retains_backing_charges_after_waiter_cancellation() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let directory = tempfile::tempdir().unwrap();
+        let flush = Switch::default();
+        flush.on();
+        let cache = engine_with_options(directory.path(), None, flush.clone()).await;
+        let budget = Budget::new(256 * KIB).unwrap();
+        let backing = budget.try_reserve(256 * KIB).unwrap().zeroed();
+        let view = backing.slice(0..128 * KIB);
+        drop(backing);
+        drop(
+            cache
+                .writer(1)
+                .storage()
+                .insert(ChargedValue::Charged(view))
+                .unwrap(),
+        );
+        assert!(cache.storage().may_contains(&1));
+
+        let mut waiting = Box::pin(cache.storage().wait());
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(waiting.as_mut(), &mut context).is_pending());
+        drop(waiting);
+        assert_eq!(
+            budget.used(),
+            256 * KIB,
+            "a slice retains the entire backing, not its encoded length"
+        );
+        assert!(
+            budget.try_reserve(1).is_err(),
+            "cancelling the waiter does not release the writer owner"
+        );
+
+        flush.off();
+        cache.storage().wait().await;
+        assert_eq!(
+            budget.used(),
+            0,
+            "completed I/O releases the original backing"
+        );
+        assert!(budget.try_reserve(256 * KIB).is_ok());
+        let (_, decoded, _) = cache.storage().load(&1).await.unwrap().entry().unwrap();
+        assert_eq!(decoded.bytes().len(), 128 * KIB);
+        assert!(decoded.bytes().iter().all(|byte| *byte == 0));
+        cache.close().await.unwrap();
+    })
+    .await
+    .expect("stalled-owner qualification must finish after releasing the gate");
+}
+
+#[tokio::test]
+async fn closing_and_dropping_a_cache_releases_its_partitions() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = engine(directory.path()).await;
+        let partition = cache.storage().device().unwrap().partition(0);
+        let owner = Arc::downgrade(&partition);
+        drop(partition);
+        drop(cache.writer(1).storage().insert(b"completed".to_vec()));
+        cache.close().await.unwrap();
+        drop(cache);
+        assert!(
+            owner.upgrade().is_none(),
+            "a closed cache must release its idle workers and file owners"
+        );
+    })
+    .await
+    .expect("cache close must join its workers");
 }

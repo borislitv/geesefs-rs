@@ -5,10 +5,10 @@ acceptance are separate later work.
 
 ## Execution stages
 
-[ ] Stage 1: Qualify the storage dependency and freeze resource contracts
-[ ] Stage 2: Add CLI configuration and regex policy
-[ ] Stage 3: Verify CLI and policy boundaries
-[ ] Stage 4: Implement the isolated L2 adapter
+[X] Stage 1: Qualify the storage dependency and freeze resource contracts
+[X] Stage 2: Add CLI configuration and regex policy
+[X] Stage 3: Verify CLI and policy boundaries
+[X] Stage 4: Implement the isolated L2 adapter
 [ ] Stage 5: Verify capacity eviction, failures and recovery
 [ ] Stage 6: Integrate demotion, reads, lifecycle and metrics
 [ ] Stage 7: Verify cross-tier correctness and resource progress
@@ -28,3 +28,36 @@ acceptance are separate later work.
 - No storage dependency is accepted. Stages 2–8 wait for compatible
   reinsertion/recovery semantics or qualification of another maintained engine.
   Stalled-I/O, corruption/collision and large-inventory resource checks remain open.
+- Operator follow-up authorizes continued dependency work and parallel subagents,
+  including other maintained candidates and a maintained Foyer fork/fix. Continue
+  autonomously; engine-choice approval is no longer a stopping point.
+- Subsequent clarification: fixes and PRs belong only in `borislitv/foyer` and
+  `borislitv/geesefs-rs`. Premature upstream submissions were withdrawn. Stay on
+  the maintained fork until equivalent upstream corrections are verified; any
+  external submission requires a separate explicit operator decision.
+- 2026-11-10: the historical released-engine blocker above is corrected in fork
+  `d60dd0462c1de1e0853590791371208b659c90bf`. Guarded admission, bounded CLOCK,
+  streaming recovery, tombstone wrap and geometry/lifecycle checks pass 130 native
+  tests, three doctests, default-feature build and all-target Clippy. No automatic
+  reset is permitted on interrupted recovery. Application funding remains explicit.
+- CLI/policy stages are implemented with an intentional enabled-runtime startup
+  guard. Mark completion only after final application-pin verification.
+- Separate opt-in metadata byte admission was added after the operator's choice.
+  Independent review exposed and corrected retained-result, encoding, rename
+  pre-admission and listing progress defects. Full mounted/performance acceptance
+  remains pending; no serving settings were changed.
+- 2026-11-10 checkpoint: application tests on the exact new pin pass, including
+  engine ownership/integrity and CLI boundaries. The isolated adapter uses guarded
+  Store APIs, owns directory/funding through cancellation, and reuses completed
+  records across child-process interruption. Stage 5 still needs native quota/
+  inode-exhaustion coverage; stages 6–8 remain outstanding.
+- Backend scope is stable only for explicit known static credentials and anonymous
+  access. Opaque/rotating/profile/IAM providers explicitly bypass persistence;
+  one resolved non-expiring credential does not prove a stable access context.
+- Metadata review closed seven reproduced defects, including pre-remote rename
+  cancellation; 31 focused metadata tests pass. Synthetic variable-name/metadata
+  pressure stays under the configured ledger ceiling while preserving pins.
+- The full all-feature application suite passes with the fixture venv on PATH.
+  The initial default run's performance harness failed because the system Python
+  lacked psutil; this environment failure is retained separately. Neither this
+  suite nor synthetic ledger checks establish mounted/performance acceptance.

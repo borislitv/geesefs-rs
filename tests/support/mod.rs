@@ -84,6 +84,7 @@ pub struct MemoryStore {
     head_response_pause: Mutex<Pause>,
     delete_pause: Mutex<Pause>,
     delete_response_pause: Mutex<Pause>,
+    copy_pause: Mutex<Pause>,
     pub delete_calls: AtomicUsize,
     pub fail_head_after_put_once: AtomicBool,
     pub fail_head_after_complete_once: AtomicBool,
@@ -173,6 +174,12 @@ impl MemoryStore {
         let (entered, seen) = oneshot::channel();
         let (release, wait) = oneshot::channel();
         *self.list_pause.lock().unwrap() = Some((entered, wait));
+        (seen, release)
+    }
+    pub fn pause_copy(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, seen) = oneshot::channel();
+        let (release, wait) = oneshot::channel();
+        *self.copy_pause.lock().unwrap() = Some((entered, wait));
         (seen, release)
     }
     async fn barrier(pause: &Mutex<Pause>) {
@@ -562,6 +569,7 @@ impl Store for MemoryStore {
         {
             return Err(Self::failure("copy"));
         }
+        Self::barrier(&self.copy_pause).await;
         let mut objects = self.objects.lock().unwrap();
         let mut object = objects.get(source).ok_or(Error::Fs(libc::ENOENT))?.clone();
         if object.etag != etag {

@@ -127,6 +127,11 @@ fn spawn_flush(
 fn configuration() -> Result<Config, Box<dyn std::error::Error>> {
     let config = Config::parse_from(normalize_fstab(std::env::args_os().collect()));
     config.validate()?;
+    // Configuration/policy can be qualified independently of the storage engine.
+    // Never silently accept an enabled cache while serving RAM-only.
+    if config.disk_cache_dir.is_some() {
+        return Err("disk cache runtime is not implemented; omit the three disk-cache flags for RAM-only operation".into());
+    }
     if !config.foreground {
         return Err("background daemonization is unsupported; specify -f".into());
     }

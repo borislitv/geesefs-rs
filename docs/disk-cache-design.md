@@ -1,7 +1,9 @@
 # Selective disk payload cache: design proposal
 
-Status: operator-selected scope; runtime not implemented. Dependency qualification
-is blocked by Foyer 0.22.6 reinsertion/recovery incompatibility; see the
+Status: isolated adapter implemented; runtime integration not implemented. The maintained
+Foyer fork supplies qualified guarded Store APIs for the isolated adapter; application
+funding, cross-tier correctness and performance acceptance remain separate gates.
+See the
 [decision and reproduction](dependency-decisions.md#selective-disk-payload-cache-qualification--2026-11-09).
 Inspected source: `a5aa9c003d219d7e683cc2053f8e32c653173742`.
 The new request supersedes the earlier disk-cache deferral. FUSE passthrough is
@@ -63,9 +65,11 @@ an integration or performance qualification.
 | [cacache 13.1.0](https://docs.rs/cacache/13.1.0/cacache/) (Apache-2.0) | Maintained content-addressed disk storage, streaming and integrity checking | No complete bounded LRU manager. Removing an index key leaves its content; physical reclamation needs explicit ownership/GC. |
 | [sqlite-cache](https://github.com/losfair/sqlite-cache) | TTL key/value storage and per-key update locking | The reviewed interface stores byte values in SQLite; it does not establish a bounded streaming/Range payload tier. Not selected from its microbenchmarks. |
 
-Foyer is the first candidate, not an accepted runtime dependency. Qualification
-reproduces loss of completed reinserted records after reopen. The test-only
-second-chance adapter solves live hot/cold retention but does not solve persistence.
+Released Foyer 0.22.6 loses completed reinserted records after reopen. The operator's
+maintained fork is selected for adapter development after guarded admission,
+recovery and lifecycle qualification. This is not acceptance of the full feature.
+Development remains in the operator's repositories; returning to upstream requires
+equivalent verified fixes and a separate dependency decision.
 Inspect
 the released [policy API](https://docs.rs/foyer/0.22.6/foyer/enum.HybridCachePolicy.html)
 and [storage source](https://github.com/foyer-rs/foyer/blob/v0.22.6/foyer-storage/src/store.rs).
@@ -98,10 +102,11 @@ Important concrete gaps:
   structures before returning. Measure startup peak memory and duration at the
   target record count; do not claim a lazy nginx-like loader from this API.
 
-Qualify supported safe APIs without replacing L1. Record measured memory,
-recovery and hit-retention results in `docs/dependency-decisions.md`. If the
-engine cannot satisfy the accepted contract, stop at that decision gate and
-document the unmet requirement before proposing a different storage adapter.
+Use the fork's fallible guarded Store APIs without replacing L1; its automatic
+HybridCache write/eviction API is incompatible with guarded admission. Record
+measured memory, recovery and hit-retention results in `docs/dependency-decisions.md`.
+Continue correcting reproduced dependency defects in the maintained fork or
+qualify another maintained engine without weakening the accepted contract.
 Do not start a custom storage engine merely because its API is unfamiliar.
 
 Use maintained [regex](https://github.com/rust-lang/regex) (MIT OR Apache-2.0)
@@ -141,6 +146,12 @@ discard paths, not asynchronous spill opportunities.
 Report any reduction of effective L1 capacity needed to fund spill/engine buffers;
 do not hide it behind the unchanged total or add an unaccounted second memory pool.
 Disabled mode retains its existing partition and cache capacity.
+
+An independent opt-in `--metadata-limit` controls application metadata ownership.
+It does not redefine `--memory-limit` or fund a second uncharged payload cache.
+Metadata charges follow retained inode/listing/returned/writer owners, including
+copies and operation plans; canonical lookup/open/dirty pins remain authoritative.
+Neither limit alone promises a process RSS or cgroup bound.
 
 On L2 hit, retain the disk copy and promote only a bounded requested/read-ahead
 range to L1. Do not repeatedly rewrite the same generation on promotion/demotion.

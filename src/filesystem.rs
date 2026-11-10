@@ -34,6 +34,7 @@ pub struct Filesystem {
     pub namespace: Mutex<Namespace>,
     inodes: Arc<crate::namespace::InodeIndex>,
     pub ingress: Budget,
+    metadata: crate::metadata_budget::MetadataBudget,
     data: Budget,
     cache: crate::cache::ReadCache,
     cache_published: Notify,
@@ -44,13 +45,15 @@ pub struct Filesystem {
     metadata_slots: Arc<Semaphore>,
     directory_pages: moka::sync::Cache<(u64, u64, String, usize), Arc<DirectoryPage>>,
     subtree_pages: moka::sync::Cache<(u64, String), Arc<SubtreePage>>,
-    preloaded_directories: moka::sync::Cache<u64, std::time::Instant>,
+    preloaded_directories:
+        moka::sync::Cache<u64, Arc<(std::time::Instant, crate::metadata_budget::MetadataCharge)>>,
     closing: AtomicBool,
     read_metrics: crate::metrics::ReadMetrics,
     pub(crate) diagnostics: crate::metrics::Diagnostics,
 }
 
 struct DirectoryPage {
+    metadata_charge: crate::metadata_budget::MetadataCharge,
     fetched: std::time::Instant,
     entries: Vec<DirEntry>,
 }
@@ -58,6 +61,7 @@ struct DirectoryPage {
 // One bounded flat response, shared by the complete directories it covers.
 // The namespace epoch invalidates speculative ranges on local name changes.
 struct SubtreePage {
+    _metadata_charge: crate::metadata_budget::MetadataCharge,
     fetched: Instant,
     page: crate::backend::extended_list::ListPage,
 }
@@ -70,18 +74,31 @@ impl DirectoryPage {
         &self.entries[start..]
     }
 
-    fn remainder(&self, after: &str) -> DirectoryRemainder {
-        DirectoryRemainder {
-            entries: self.remaining(after).to_vec(),
+    fn remainder(&self, after: &str) -> Result<DirectoryRemainder> {
+        Ok(DirectoryRemainder {
+            entries: self
+                .remaining(after)
+                .iter()
+                .map(|entry| entry.try_clone(self.metadata_charge.budget()))
+                .collect::<Result<_>>()?,
             next_after: self
                 .entries
                 .last()
-                .map(|entry| entry.name.as_str().max(after).to_owned()),
-        }
+                .map(|entry| {
+                    let name = entry.name.as_str().max(after);
+                    let charge = self.metadata_charge.budget().charge(name.len())?;
+                    Ok(crate::metadata_budget::MetadataString::new(
+                        name.to_owned(),
+                        charge,
+                    ))
+                })
+                .transpose()?,
+        })
     }
 }
 
 struct DirectoryMetadata {
+    _metadata_charge: crate::metadata_budget::MetadataCharge,
     directory: bool,
     head: Option<ObjectHead>,
     known: bool,
@@ -101,6 +118,55 @@ fn direct_directory_name(name: &str) -> bool {
     !name.is_empty() && !name.contains('/')
 }
 
+fn same_copy_metadata(expected: &ObjectHead, actual: &ObjectHead) -> bool {
+    let left = &expected.properties;
+    let right = &actual.properties;
+    expected.size == actual.size
+        && expected.metadata == actual.metadata
+        && left.expires == right.expires
+        && [
+            &left.content_type,
+            &left.content_encoding,
+            &left.content_disposition,
+            &left.content_language,
+            &left.cache_control,
+            &left.website_redirect_location,
+        ] == [
+            &right.content_type,
+            &right.content_encoding,
+            &right.content_disposition,
+            &right.content_language,
+            &right.cache_control,
+            &right.website_redirect_location,
+        ]
+}
+
+fn compact_copy_head(head: &mut ObjectHead) {
+    // A response's spare parser capacity is not part of the copied generation.
+    // Normalize it inside the pre-admitted COPY working set before retention.
+    let mut metadata = std::collections::HashMap::with_capacity(head.metadata.len());
+    for (mut key, mut value) in head.metadata.drain() {
+        key.shrink_to_fit();
+        value.shrink_to_fit();
+        metadata.insert(key, value);
+    }
+    head.metadata = metadata;
+    head.etag.shrink_to_fit();
+    for value in [
+        &mut head.properties.content_type,
+        &mut head.properties.content_encoding,
+        &mut head.properties.content_disposition,
+        &mut head.properties.content_language,
+        &mut head.properties.cache_control,
+        &mut head.properties.website_redirect_location,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        value.shrink_to_fit();
+    }
+}
+
 fn trim_directory_selection(selected: &mut DirectorySelection, limit: usize) {
     if selected.len() > limit {
         selected.pop_last();
@@ -108,20 +174,32 @@ fn trim_directory_selection(selected: &mut DirectorySelection, limit: usize) {
 }
 
 fn listed_object(
-    object: crate::backend::extended_list::ListedObject,
+    object: &crate::backend::extended_list::ListedObject,
     fetched: std::time::Instant,
-) -> (String, DirectoryMetadata) {
+    budget: &crate::metadata_budget::MetadataBudget,
+) -> Result<(String, DirectoryMetadata)> {
+    let charge = budget.charge_with(|| {
+        std::mem::size_of::<DirectoryMetadata>()
+            + 2 * object.key.capacity()
+            + std::mem::size_of::<ObjectHead>()
+            + object.etag.as_ref().map_or(0, String::capacity)
+            + object
+                .metadata
+                .as_ref()
+                .map_or(0, crate::metadata_budget::encoding_bytes)
+    })?;
     let known =
         object.metadata.is_some() && object.etag.as_ref().is_some_and(|etag| !etag.is_empty());
     let metadata = object
         .metadata
-        .and_then(|metadata| crate::backend::metadata::encode_metadata(&metadata).ok())
+        .as_ref()
+        .and_then(|metadata| crate::backend::metadata::encode_metadata(metadata).ok())
         .unwrap_or_default()
         .into_iter()
         .collect();
     let head = ObjectHead {
         size: object.size,
-        etag: object.etag.unwrap_or_default(),
+        etag: object.etag.clone().unwrap_or_default(),
         metadata,
         last_modified: object
             .last_modified
@@ -129,28 +207,43 @@ fn listed_object(
         ..Default::default()
     };
     let directory = object.key.ends_with('/');
-    (
-        object.key,
+    Ok((
+        object.key.clone(),
         DirectoryMetadata {
+            _metadata_charge: charge,
             directory,
             head: Some(head),
             known,
             fetched,
         },
-    )
+    ))
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct DirEntry {
     pub ino: u64,
-    pub name: String,
+    pub name: crate::metadata_budget::MetadataString,
     pub kind: FileType,
+}
+
+impl DirEntry {
+    fn try_clone(&self, budget: &crate::metadata_budget::MetadataBudget) -> Result<Self> {
+        let charge = budget.charge(4 * std::mem::size_of::<Self>() + self.name.len())?;
+        Ok(Self {
+            ino: self.ino,
+            name: crate::metadata_budget::MetadataString::new(
+                self.name.as_str().to_owned(),
+                charge,
+            ),
+            kind: self.kind,
+        })
+    }
 }
 
 pub struct DirectoryRemainder {
     pub entries: Vec<DirEntry>,
     /// An exhausted page still advances; only a backend EOF has no next name.
-    pub next_after: Option<String>,
+    pub next_after: Option<crate::metadata_budget::MetadataString>,
 }
 
 /// An open file retains its inode until the last admitted user releases it.
@@ -314,6 +407,65 @@ impl Filesystem {
                 - self.metadata_slots.available_permits(),
         }
     }
+
+    pub fn metadata_usage(&self) -> crate::metadata_budget::MetadataUsage {
+        self.metadata.usage()
+    }
+    pub(crate) fn charge_metadata(
+        &self,
+        bytes: usize,
+    ) -> Result<crate::metadata_budget::MetadataCharge> {
+        self.metadata.charge(bytes)
+    }
+    pub(crate) fn metadata_enabled(&self) -> bool {
+        self.metadata.enabled()
+    }
+
+    async fn admit_metadata(
+        &self,
+        bytes: usize,
+        new_inode: bool,
+    ) -> Result<crate::metadata_budget::MetadataCharge> {
+        let mut cleared = false;
+        let deadline = Instant::now() + self.config.request_timeout;
+        loop {
+            if Instant::now() >= deadline {
+                return Err(Error::Timeout("metadata admission"));
+            }
+            if (!new_inode || !self.lock_namespace().count_full())
+                && let Ok(charge) = self.metadata.charge(bytes)
+            {
+                return Ok(charge);
+            }
+            if !cleared && self.metadata.usage().limit.is_some() {
+                self.directory_pages.invalidate_all();
+                self.subtree_pages.invalidate_all();
+                self.preloaded_directories.invalidate_all();
+                self.directory_pages.run_pending_tasks();
+                self.subtree_pages.run_pending_tasks();
+                self.preloaded_directories.run_pending_tasks();
+                cleared = true;
+                continue;
+            }
+            let reclaimed = {
+                let mut ns = self.lock_namespace();
+                let reclaimed = ns.reclaim_batch();
+                if matches!(reclaimed, crate::namespace::Reclaim::Exhausted)
+                    && new_inode
+                    && ns.count_full()
+                {
+                    ns.capacity_failures += 1;
+                }
+                reclaimed
+            };
+            match reclaimed {
+                crate::namespace::Reclaim::Exhausted => return Err(Error::Fs(libc::ENOMEM)),
+                crate::namespace::Reclaim::More | crate::namespace::Reclaim::Removed => {
+                    tokio::task::yield_now().await
+                }
+            }
+        }
+    }
     // A failed/cancelled directory move may already have drained source keys.
     // Keep mutators from resurrecting them until that bounded move is retried.
     fn pending_rename(ns: &Namespace, key: &str, except: Option<u64>) -> bool {
@@ -334,7 +486,8 @@ impl Filesystem {
             flush_bytes,
         } = config.payload_budgets()?;
         let config = Arc::new(config);
-        let root = Inode::new(1, "".into(), true, None, &config);
+        let metadata = crate::metadata_budget::MetadataBudget::new(config.metadata_limit)?;
+        let root = Inode::try_new(1, "".into(), true, None, &config, &metadata)?;
         root.state.lock().unwrap().lookups = 1;
         let namespace = Namespace::new(root, config.entry_limit as usize);
         let diagnostics = store
@@ -350,6 +503,7 @@ impl Filesystem {
             inodes: namespace.inodes.clone(),
             namespace: Mutex::new(namespace),
             ingress: Budget::new(ingress_bytes)?,
+            metadata,
             data: Budget::new(data_bytes)?,
             cache: crate::cache::ReadCache::with_entry_limit(
                 (data_bytes + flush_bytes) as u64,
@@ -514,6 +668,16 @@ impl Filesystem {
             }
             Err(error) => return Err(error),
         };
+        let charge = self
+            .admit_metadata(
+                if self.metadata.enabled() {
+                    Inode::metadata_estimate(&key, head.as_ref())
+                } else {
+                    0
+                },
+                observed.is_none(),
+            )
+            .await?;
         let mut ns = self.lock_namespace();
         {
             let parent = ns.get(parent)?;
@@ -526,10 +690,11 @@ impl Filesystem {
             return Err(self.again("lookup_binding_busy"));
         }
         if let Some(node) = ns.named(&key) {
-            let mut fresh = Inode::new(node.ino, key.clone(), directory, head, &self.config)
-                .state
-                .into_inner()
-                .unwrap();
+            let mut fresh =
+                Inode::new_admitted(node.ino, key.clone(), directory, head, &self.config, charge)
+                    .state
+                    .into_inner()
+                    .unwrap();
             fresh.fetched = started;
             let mut state = node.state.lock().unwrap();
             if observed.as_ref()
@@ -542,7 +707,7 @@ impl Filesystem {
                 return Err(self.again("lookup_generation_changed"));
             }
             if state.can_replace_metadata(started) {
-                state.replace_metadata(fresh);
+                state.replace_metadata(fresh)?;
             }
             drop(state);
             return Ok(node);
@@ -551,7 +716,7 @@ impl Filesystem {
             return Err(self.again("lookup_binding_removed"));
         }
         ns.install(&key, |ino| {
-            let node = Inode::new(ino, key.clone(), directory, head, &self.config);
+            let node = Inode::new_admitted(ino, key.clone(), directory, head, &self.config, charge);
             node.state.lock().unwrap().fetched = started;
             node
         })
@@ -565,7 +730,7 @@ impl Filesystem {
             if self
                 .preloaded_directories
                 .get(&parent)
-                .is_some_and(|fetched| fetched.elapsed() < self.config.stat_cache_ttl)
+                .is_some_and(|fetched| fetched.0.elapsed() < self.config.stat_cache_ttl)
             {
                 return Ok(());
             }
@@ -587,8 +752,13 @@ impl Filesystem {
             return Err(self.again("preload_epoch_changed"));
         }
         // This records an attempt, not an authoritative negative listing.
-        self.preloaded_directories.insert(parent, fetched);
-        self.preloaded_directories.run_pending_tasks();
+        if let Ok(charge) = self
+            .metadata
+            .charge(std::mem::size_of::<(u64, Instant)>() + crate::metadata_budget::LINKS)
+        {
+            self.preloaded_directories
+                .insert(parent, Arc::new((fetched, charge)));
+        }
         ns.hidden("");
         for object in page?
             .objects
@@ -613,6 +783,9 @@ impl Filesystem {
             else {
                 continue;
             };
+            let _encoding_charge = self
+                .metadata
+                .charge_with(|| crate::metadata_budget::encoding_bytes(&metadata))?;
             let head = ObjectHead {
                 size: object.size,
                 etag,
@@ -624,10 +797,17 @@ impl Filesystem {
                     .and_then(|date| SystemTime::try_from(date).ok()),
                 ..Default::default()
             };
-            ns.install(&object.key, |ino| {
-                let node = Inode::new(ino, object.key.clone(), false, Some(head), &self.config);
+            ns.try_install(&object.key, |ino| {
+                let node = Inode::try_new(
+                    ino,
+                    object.key.clone(),
+                    false,
+                    Some(head),
+                    &self.config,
+                    &self.metadata,
+                )?;
                 node.state.lock().unwrap().fetched = fetched;
-                node
+                Ok(node)
             })?;
         }
         Ok(())
@@ -655,7 +835,7 @@ impl Filesystem {
     ) -> Result<impl Future<Output = Result<Arc<Inode>>> + Send + '_> {
         let started = std::time::Instant::now();
         let node = self.node(ino)?;
-        let (key, directory, remote, version, epoch, list_only) = {
+        let (key, directory, remote, version, epoch, list_only, snapshot_charge) = {
             let ns = self.lock_namespace();
             let s = node.state.lock().unwrap();
             if s.deleted {
@@ -678,18 +858,23 @@ impl Filesystem {
             if directory && ns.has_dirty_descendants(&s.key) {
                 return Ok(Either::Left(ready(Ok(node.clone()))));
             }
+            let snapshot_charge = self
+                .metadata
+                .charge(s.key.len() + s.remote.as_ref().map_or(0, |head| head.etag.len()))?;
             (
                 s.key.clone(),
                 directory,
-                s.remote.clone(),
+                s.remote.as_ref().map(|head| head.etag.clone()),
                 s.version,
                 ns.epoch,
                 directory && self.config.no_dir_object,
+                snapshot_charge,
             )
         };
         let permit = self.metadata_permit().await?;
         Ok(Either::Right(async move {
             let _permit = permit;
+            let _snapshot_charge = snapshot_charge;
             // An implicit directory may acquire a marker with authoritative metadata.
             // Skip its HEAD only when directory objects are explicitly disabled.
             let fetched = if list_only {
@@ -728,6 +913,21 @@ impl Filesystem {
                     Err(e) => Err(e),
                 }
             };
+            let charge = if let Ok(head) = &fetched {
+                Some(
+                    self.admit_metadata(
+                        if self.metadata.enabled() {
+                            Inode::metadata_estimate(&key, head.as_ref())
+                        } else {
+                            0
+                        },
+                        false,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
             let mut ns = self.lock_namespace();
             let mut s = node.state.lock().unwrap();
             if s.deleted
@@ -739,7 +939,7 @@ impl Filesystem {
                 return Err(self.again("refresh_binding_changed"));
             }
             if s.version != version
-                || s.remote.as_ref().map(|h| &h.etag) != remote.as_ref().map(|h| &h.etag)
+                || s.remote.as_ref().map(|h| &h.etag) != remote.as_ref()
                 || !s.can_replace_metadata(started)
                 || directory && ns.has_dirty_descendants(&key)
             {
@@ -750,12 +950,19 @@ impl Filesystem {
             }
             match fetched {
                 Ok(head) => {
-                    let mut fresh = Inode::new(ino, key, directory, head, &self.config)
-                        .state
-                        .into_inner()
-                        .unwrap();
+                    let mut fresh = Inode::new_admitted(
+                        ino,
+                        key,
+                        directory,
+                        head,
+                        &self.config,
+                        charge.expect("successful refresh admission"),
+                    )
+                    .state
+                    .into_inner()
+                    .unwrap();
                     fresh.fetched = started;
-                    s.replace_metadata(fresh);
+                    s.replace_metadata(fresh)?;
                 }
                 Err(error) if not_found(&error) => {
                     s.deleted = true;
@@ -818,7 +1025,16 @@ impl Filesystem {
             {
                 state.negative_lookups.remove(&oldest);
             }
-            state.negative_lookups.insert(name.into(), started);
+            state.settle_metadata();
+            let growth = name.len()
+                + std::mem::size_of::<(String, std::time::Instant)>()
+                + crate::metadata_budget::LINKS;
+            // Negative caching is optional: lack of cache space must not turn
+            // an authoritative ENOENT into an admission failure.
+            if state.admit_metadata(growth).is_ok() {
+                state.negative_lookups.insert(name.into(), started);
+                state.settle_metadata();
+            }
         }
         Ok(Error::Fs(libc::ENOENT))
     }
@@ -882,6 +1098,19 @@ impl Filesystem {
         target: Option<&[u8]>,
         rdev: u32,
     ) -> Result<Arc<Inode>> {
+        self.create_inner(parent, name, mode, target, rdev, None)
+            .await
+    }
+
+    async fn create_inner(
+        &self,
+        parent: u64,
+        name: &str,
+        mode: u32,
+        target: Option<&[u8]>,
+        rdev: u32,
+        identity: Option<(u32, u32)>,
+    ) -> Result<Arc<Inode>> {
         self.check_write()?;
         let key = self.child_key(parent, name)?;
         match self.lookup(parent, name).await {
@@ -890,6 +1119,37 @@ impl Filesystem {
             Err(error) => return Err(error),
         }
         let directory = mode & libc::S_IFMT == libc::S_IFDIR;
+        let charge = self
+            .admit_metadata(Inode::metadata_estimate(&key, None), true)
+            .await?;
+        let mut candidate =
+            Inode::new_admitted(0, key.clone(), directory, None, &self.config, charge);
+        {
+            let mut state = candidate.state.lock().unwrap();
+            state.admit_metadata(target.map_or(0, |value| {
+                value.len()
+                    + self.config.symlink_attr.len()
+                    + std::mem::size_of::<(String, Vec<u8>)>()
+                    + crate::metadata_budget::LINKS
+            }))?;
+            state.mode = mode;
+            state.rdev = rdev;
+            state.version = 1;
+            if self.config.enable_perms
+                && let Some((uid, gid)) = identity
+            {
+                state.uid = uid;
+                state.gid = gid;
+                state.version += 1;
+            }
+            if let Some(target) = target {
+                state
+                    .metadata
+                    .insert(self.config.symlink_attr.clone(), target.to_vec());
+            }
+            state.settle_metadata();
+            self.prepare_metadata(&mut state)?;
+        }
         let mut ns = self.lock_namespace();
         {
             let p = ns.get(parent)?;
@@ -908,11 +1168,12 @@ impl Filesystem {
         if ns.named(&key).is_some() {
             return Err(Error::Fs(libc::EEXIST));
         }
-        ns.tombstones.remove(&key);
-        ns.changed(&key);
         let node = ns.install(&key, |ino| {
-            Inode::new(ino, key.clone(), directory, None, &self.config)
+            candidate.ino = ino;
+            candidate
         })?;
+        ns.remove_tombstone(&key);
+        ns.changed(&key);
         ns.get(parent)?
             .state
             .lock()
@@ -920,16 +1181,7 @@ impl Filesystem {
             .negative_lookups
             .remove(name);
         {
-            let mut state = node.state.lock().unwrap();
-            state.mode = mode;
-            state.rdev = rdev;
-            state.version = 1;
-            if let Some(target) = target {
-                state
-                    .metadata
-                    .insert(self.config.symlink_attr.clone(), target.to_vec());
-            }
-            self.prepare_metadata(&mut state);
+            let state = node.state.lock().unwrap();
             ns.track_dirty(node.ino, &state);
         }
         Ok(node)
@@ -947,11 +1199,8 @@ impl Filesystem {
         rdev: u32,
         identity: (u32, u32),
     ) -> Result<Arc<Inode>> {
-        let node = self.create(parent, name, mode, target, rdev).await?;
-        if self.config.enable_perms {
-            self.setattr(node.ino, None, Some(identity.0), Some(identity.1), None)?;
-        }
-        Ok(node)
+        self.create_inner(parent, name, mode, target, rdev, Some(identity))
+            .await
     }
 
     /// Publish the requested result while retaining the caller-owned load future.
@@ -1618,8 +1867,8 @@ impl Filesystem {
         result
     }
 
-    fn prepare_metadata(&self, state: &mut State) {
-        write::prepare_metadata(&self.config, state);
+    fn prepare_metadata(&self, state: &mut State) -> Result<()> {
+        write::prepare_metadata(&self.config, state)
     }
 
     pub async fn fsync(&self, ino: u64) -> Result<()> {
@@ -1637,14 +1886,26 @@ impl Filesystem {
     }
 
     async fn flush_node_locked(&self, node: &Inode) -> Result<()> {
-        let result = self.commit_node_locked(node).await;
+        self.flush_node_locked_before(node, None).await
+    }
+
+    async fn flush_node_locked_before(
+        &self,
+        node: &Inode,
+        before: Option<&mut write::BeforeMutation<'_>>,
+    ) -> Result<()> {
+        let result = self.commit_node_locked(node, before).await;
         let mut ns = self.lock_namespace();
         let state = node.state.lock().unwrap();
         ns.track_dirty(node.ino, &state);
         result
     }
 
-    async fn commit_node_locked(&self, node: &Inode) -> Result<()> {
+    async fn commit_node_locked(
+        &self,
+        node: &Inode,
+        before: Option<&mut write::BeforeMutation<'_>>,
+    ) -> Result<()> {
         {
             let mut state = node.state.lock().unwrap();
             if state.deleted {
@@ -1672,13 +1933,14 @@ impl Filesystem {
             .flush_lane
             .with_activity(self.flush_activity.clone().read_owned().await);
         self.cache.reclaim_loans();
-        write::flush_locked(
+        write::flush_locked_before(
             &self.store,
             node,
             &lane,
             flusher,
             &self.config,
             &self.upload_admission,
+            before,
         )
         .await
     }
@@ -1720,39 +1982,44 @@ impl Filesystem {
         &self,
         ns: &mut Namespace,
         key: &str,
-        directory: bool,
-        head: Option<ObjectHead>,
-        known: bool,
-        fetched: std::time::Instant,
+        entry: &mut DirectoryMetadata,
+        charge: crate::metadata_budget::MetadataCharge,
     ) -> Result<Arc<Inode>> {
         let make = |ino| {
-            let node = Inode::new(ino, key.into(), directory, head, &self.config);
+            let node = Inode::new_admitted(
+                ino,
+                key.into(),
+                entry.directory,
+                entry.head.take(),
+                &self.config,
+                charge,
+            );
             {
                 let mut state = node.state.lock().unwrap();
-                state.metadata_known = known;
-                state.fetched = fetched;
+                state.metadata_known = entry.known;
+                state.fetched = entry.fetched;
             }
-            node
+            Ok(node)
         };
         if let Some(node) = ns.named(key) {
-            let dirty_descendants = directory && ns.has_dirty_descendants(key);
+            let dirty_descendants = entry.directory && ns.has_dirty_descendants(key);
             let mut state = node.state.lock().unwrap();
-            if !dirty_descendants && state.can_replace_metadata(fetched) {
-                if known {
-                    state.replace_metadata(make(node.ino).state.into_inner().unwrap());
-                } else if directory
+            if !dirty_descendants && state.can_replace_metadata(entry.fetched) {
+                if entry.known {
+                    state.replace_metadata(make(node.ino)?.state.into_inner().unwrap())?;
+                } else if entry.directory
                     && state.remote.is_none()
                     && file_type(state.mode) == FileType::Directory
                 {
                     // A common prefix validates an implicit directory's presence,
                     // not authoritative user metadata for a marker object.
-                    state.fetched = fetched;
+                    state.fetched = entry.fetched;
                 }
             }
             drop(state);
             return Ok(node);
         }
-        ns.install(key, make)
+        ns.try_install(key, make)
     }
 
     async fn directory_chunk_inner(
@@ -1771,13 +2038,13 @@ impl Filesystem {
                 && let Some(page) =
                     self.cached_directory_page(&ns, &snapshot, after, limit, resume_after)
             {
-                return Ok(page.remainder(resume_after));
+                return page.remainder(resume_after);
             }
             snapshot
         };
         let mut selected = self
             .local_directory_entries(&snapshot.prefix, after, limit)
-            .await;
+            .await?;
         let slurped = if resolve_types && !self.config.stat_cache_ttl.is_zero() && limit > 0 {
             self.subtree_directory_entries(&snapshot.prefix, after, limit, &mut selected)
                 .await?
@@ -1795,9 +2062,9 @@ impl Filesystem {
         if resolve_types {
             self.resolve_directory_types(ino, &mut selected).await?;
         }
-        Ok(self
-            .publish_directory_page(snapshot, after, limit, selected, resolve_types)?
-            .remainder(resume_after))
+        self.publish_directory_page(snapshot, after, limit, selected, resolve_types)
+            .await?
+            .remainder(resume_after)
     }
 
     fn directory_snapshot(
@@ -1865,23 +2132,39 @@ impl Filesystem {
         })
     }
 
-    fn fresh_local_directory_entry(&self, ns: &Namespace, name: &str) -> Option<DirectoryMetadata> {
+    fn fresh_local_directory_entry(
+        &self,
+        ns: &Namespace,
+        name: &str,
+    ) -> Result<Option<DirectoryMetadata>> {
         let node = ns.named(name).unwrap();
         let state = node.state.lock().unwrap();
         if state.deleted {
-            return None;
+            return Ok(None);
         }
         let fresh = state.version > state.durable
             || state.rename_target.is_some()
             || state.data_key.is_some()
             || state.fetched.elapsed() < self.config.stat_cache_ttl
             || file_type(state.mode) == FileType::Directory && ns.has_dirty_descendants(name);
-        fresh.then(|| DirectoryMetadata {
+        if !fresh {
+            return Ok(None);
+        }
+        let charge = self.metadata.charge_with(|| {
+            std::mem::size_of::<DirectoryMetadata>()
+                + name.len()
+                + state
+                    .remote
+                    .as_ref()
+                    .map_or(0, crate::metadata_budget::head_bytes)
+        })?;
+        Ok(Some(DirectoryMetadata {
+            _metadata_charge: charge,
             directory: file_type(state.mode) == FileType::Directory,
             head: state.remote.clone(),
             known: state.metadata_known,
             fetched: state.fetched,
-        })
+        }))
     }
 
     async fn local_directory_entries(
@@ -1889,10 +2172,10 @@ impl Filesystem {
         prefix: &str,
         after: &str,
         limit: usize,
-    ) -> DirectorySelection {
+    ) -> Result<DirectorySelection> {
         let mut selected = DirectorySelection::new();
         if limit == 0 {
-            return selected;
+            return Ok(selected);
         }
         let mut cursor = Excluded(format!("{prefix}{after}"));
         loop {
@@ -1902,10 +2185,10 @@ impl Filesystem {
                 // expired. Descendants are skipped by ordered seek, not visited.
                 for _ in 0..128 {
                     let Some((name, _)) = ns.names.range((cursor.clone(), Unbounded)).next() else {
-                        return selected;
+                        return Ok(selected);
                     };
                     let Some(relative) = name.strip_prefix(prefix) else {
-                        return selected;
+                        return Ok(selected);
                     };
                     if let Some((directory, _)) = relative.split_once('/') {
                         // '/' is immediately before '0' in UTF-8 byte ordering.
@@ -1918,11 +2201,11 @@ impl Filesystem {
                         .tombstones
                         .get(name)
                         .is_none_or(|until| *until <= Instant::now())
-                        && let Some(entry) = self.fresh_local_directory_entry(&ns, name)
+                        && let Some(entry) = self.fresh_local_directory_entry(&ns, name)?
                     {
                         selected.insert(relative.into(), entry);
                         if selected.len() >= limit {
-                            return selected;
+                            return Ok(selected);
                         }
                     }
                 }
@@ -1985,6 +2268,27 @@ impl Filesystem {
                 .map(|object| object.key.as_str())
                 .max()
                 .unwrap_or("");
+            let charge = self.metadata.charge_with(|| {
+                let index_bytes = page
+                    .objects
+                    .iter()
+                    .map(|object| {
+                        object
+                            .key
+                            .match_indices('/')
+                            .map(|(slash, _)| {
+                                slash
+                                    + 1
+                                    + std::mem::size_of::<(u64, String)>()
+                                    + crate::metadata_budget::LINKS
+                            })
+                            .sum::<usize>()
+                    })
+                    .sum::<usize>()
+                    + prefix.len()
+                    + std::mem::size_of::<SubtreePage>();
+                crate::metadata_budget::page_bytes(&page) + index_bytes
+            })?;
             let mut directories = std::collections::BTreeSet::from([prefix.to_owned()]);
             'objects: for object in &page.objects {
                 for (slash, _) in object.key.match_indices('/') {
@@ -2000,7 +2304,11 @@ impl Filesystem {
                         || !directory.is_empty()
                             && format!("{}0", directory.trim_end_matches('/')).as_str() <= last)
             });
-            let page = Arc::new(SubtreePage { fetched, page });
+            let page = Arc::new(SubtreePage {
+                _metadata_charge: charge,
+                fetched,
+                page,
+            });
             // Do not publish speculative siblings across a concurrent mutation.
             if self.lock_namespace().epoch == epoch {
                 for directory in &directories {
@@ -2025,9 +2333,12 @@ impl Filesystem {
                 }
                 let marker = format!("{prefix}{directory}/");
                 let metadata = if object.key == marker {
-                    listed_object(object.clone(), page.fetched).1
+                    listed_object(object, page.fetched, &self.metadata)?.1
                 } else {
                     DirectoryMetadata {
+                        _metadata_charge: self
+                            .metadata
+                            .charge(std::mem::size_of::<DirectoryMetadata>() + relative.len())?,
                         directory: true,
                         head: None,
                         known: true,
@@ -2036,7 +2347,10 @@ impl Filesystem {
                 };
                 (directory, metadata)
             } else {
-                (relative, listed_object(object.clone(), page.fetched).1)
+                (
+                    relative,
+                    listed_object(object, page.fetched, &self.metadata)?.1,
+                )
             };
             if direct_directory_name(name) && name > after {
                 remote.entry(name.to_owned()).or_insert(metadata);
@@ -2092,23 +2406,28 @@ impl Filesystem {
         selected: &mut DirectorySelection,
     ) -> Result<(String, Option<String>)> {
         let mut page_last = String::new();
-        for (name, entry) in page
+        for entry in page
             .objects
             .into_iter()
             .filter(|o| o.key != prefix)
-            .map(|object| listed_object(object, fetched))
+            .map(|object| listed_object(&object, fetched, &self.metadata))
             .chain(page.common_prefixes.into_iter().map(|p| {
-                (
+                let charge = self
+                    .metadata
+                    .charge(std::mem::size_of::<DirectoryMetadata>() + p.len())?;
+                Ok((
                     p,
                     DirectoryMetadata {
+                        _metadata_charge: charge,
                         directory: true,
                         head: None,
                         known: false,
                         fetched,
                     },
-                )
+                ))
             }))
         {
+            let (name, entry) = entry?;
             let Some(name) = name.strip_prefix(prefix) else {
                 return Err(Error::InvalidResponse("directory prefix escape".into()));
             };
@@ -2184,7 +2503,15 @@ impl Filesystem {
             .await
             .map_err(|_| Error::Timeout("directory metadata lookup"))??;
         let state = resolved.state.lock().unwrap();
+        let charge = self.metadata.charge_with(|| {
+            std::mem::size_of::<DirectoryMetadata>()
+                + state
+                    .remote
+                    .as_ref()
+                    .map_or(0, crate::metadata_budget::head_bytes)
+        })?;
         *entry = DirectoryMetadata {
+            _metadata_charge: charge,
             directory: file_type(state.mode) == FileType::Directory,
             head: state.remote.clone(),
             known: state.metadata_known,
@@ -2193,7 +2520,7 @@ impl Filesystem {
         Ok(())
     }
 
-    fn publish_directory_page(
+    async fn publish_directory_page(
         &self,
         snapshot: DirectorySnapshot,
         after: &str,
@@ -2201,34 +2528,66 @@ impl Filesystem {
         selected: DirectorySelection,
         resolve_types: bool,
     ) -> Result<Arc<DirectoryPage>> {
-        let mut ns = self.lock_namespace();
+        let page_charge = self.metadata.charge(
+            std::mem::size_of::<DirectoryPage>()
+                + std::mem::size_of::<(u64, u64, String, usize)>()
+                + after.len()
+                + crate::metadata_budget::LINKS,
+        )?;
         let ino = snapshot.node.ino;
+        let mut entries = Vec::with_capacity(selected.len());
+        let deadline = Instant::now() + self.config.request_timeout;
+        for (name, mut entry) in selected {
+            let entry_charge = self
+                .metadata
+                .charge(4 * std::mem::size_of::<DirEntry>() + name.capacity())?;
+            let full = child(snapshot.prefix.trim_end_matches('/'), &name)?;
+            let node = loop {
+                if Instant::now() >= deadline {
+                    return Err(Error::Timeout("directory metadata admission"));
+                }
+                let new_inode = self.lock_namespace().named(&full).is_none();
+                let charge = self
+                    .admit_metadata(
+                        if self.metadata.enabled() {
+                            Inode::metadata_estimate(&full, entry.head.as_ref())
+                        } else {
+                            0
+                        },
+                        new_inode,
+                    )
+                    .await?;
+                let result = {
+                    let mut ns = self.lock_namespace();
+                    if snapshot.node.directory_epoch.load(Ordering::Relaxed) != snapshot.epoch
+                        || ns.names.get(snapshot.prefix.trim_end_matches('/')) != Some(&ino)
+                    {
+                        return Err(self.again("directory_generation_changed"));
+                    }
+                    self.listed_node(&mut ns, &full, &mut entry, charge)
+                };
+                match result {
+                    Err(Error::Fs(libc::EAGAIN)) => tokio::task::yield_now().await,
+                    other => break other?,
+                }
+            };
+            entries.push(DirEntry {
+                ino: node.ino,
+                name: crate::metadata_budget::MetadataString::new(name, entry_charge),
+                kind: node.attr().kind,
+            });
+        }
+        let page = Arc::new(DirectoryPage {
+            metadata_charge: page_charge,
+            fetched: snapshot.fetched,
+            entries,
+        });
+        let ns = self.lock_namespace();
         if snapshot.node.directory_epoch.load(Ordering::Relaxed) != snapshot.epoch
             || ns.names.get(snapshot.prefix.trim_end_matches('/')) != Some(&ino)
         {
             return Err(self.again("directory_generation_changed"));
         }
-        let mut entries = Vec::with_capacity(selected.len());
-        for (name, entry) in selected {
-            let full = child(snapshot.prefix.trim_end_matches('/'), &name)?;
-            let node = self.listed_node(
-                &mut ns,
-                &full,
-                entry.directory,
-                entry.head,
-                entry.known,
-                entry.fetched,
-            )?;
-            entries.push(DirEntry {
-                ino: node.ino,
-                name,
-                kind: node.attr().kind,
-            });
-        }
-        let page = Arc::new(DirectoryPage {
-            fetched: snapshot.fetched,
-            entries,
-        });
         if resolve_types {
             self.directory_pages
                 .insert((ino, snapshot.epoch, after.into(), limit), page.clone());
@@ -2326,8 +2685,7 @@ impl Filesystem {
         }
         {
             let mut ns = self.lock_namespace();
-            ns.tombstone(&key)?;
-            ns.pending_deletes.insert(key.clone(), node.ino);
+            ns.begin_pending_delete(&key, node.ino)?;
         }
         let remote_key = if directory {
             format!("{key}/")
@@ -2343,14 +2701,14 @@ impl Filesystem {
             if matches!(&error,Error::Backend{code,..} if matches!(code.as_str(),"AccessDenied"|"InvalidAccessKeyId"|"SignatureDoesNotMatch"|"InvalidArgument"|"InvalidRequest"))
             {
                 let mut ns = self.lock_namespace();
-                ns.pending_deletes.remove(&key);
-                ns.tombstones.remove(&key);
+                ns.remove_pending_delete(&key);
+                ns.remove_tombstone(&key);
                 ns.changed(&key);
             }
             return Err(error);
         }
         let mut ns = self.lock_namespace();
-        ns.pending_deletes.remove(&key);
+        ns.remove_pending_delete(&key);
         ns.names.remove(&key);
         ns.changed(&key);
         let mut state = node.state.lock().unwrap();
@@ -2415,11 +2773,15 @@ impl Filesystem {
             Err(error) => return Err(error),
         };
         let _moving = MoveLease::begin(&self.namespace, vec![old.clone(), destination.clone()])?;
+        let bindings = self.lock_namespace().bindings(&old, directory)?;
+        let _pin_charge = self
+            .metadata
+            .charge_with(|| (bindings.len() + 1) * (std::mem::size_of::<Arc<Inode>>() * 4 + 128))?;
         let mut pinned: Vec<_> = {
             let ns = self.lock_namespace();
-            ns.bindings(&old, directory)
-                .into_iter()
-                .map(|(_, ino)| ns.nodes[&ino].clone())
+            bindings
+                .iter()
+                .map(|(_, ino)| ns.nodes[ino].clone())
                 .collect()
         };
         if let Some(target) = &target {
@@ -2431,7 +2793,98 @@ impl Filesystem {
         for node in &pinned {
             gates.push(node.flush.clone().lock_owned().await);
         }
-        {
+        // Metadata can change externally without changing the content ETag, and
+        // an implicit cached directory can acquire a marker. Discover the COPY
+        // generation's actual metadata before committing a byte plan, not after
+        // creating a destination. The disabled path retains its old I/O shape.
+        let mut copy_heads = BTreeMap::new();
+        let source_was_dirty = {
+            let state = source.state.lock().unwrap();
+            state.version > state.durable
+        };
+        if self.metadata.enabled() {
+            for node in &pinned {
+                let (key, has_remote, dirty, _key_charge) = {
+                    let state = node.state.lock().unwrap();
+                    if state.key != old && !state.key.starts_with(&format!("{old}/")) {
+                        continue;
+                    }
+                    let backing = state.data_key.as_ref().unwrap_or(&state.key);
+                    let charge = self.metadata.charge(backing.len() + 1)?;
+                    let mut key = String::with_capacity(backing.len() + 1);
+                    key.push_str(backing);
+                    if file_type(state.mode) == FileType::Directory {
+                        key.push('/');
+                    }
+                    (
+                        key,
+                        state.remote.is_some(),
+                        state.version > state.durable,
+                        charge,
+                    )
+                };
+                if !has_remote && dirty {
+                    continue;
+                }
+                let head = match self.store.head(&key).await {
+                    Ok(head) => head,
+                    Err(error) if !has_remote && not_found(&error) => continue,
+                    Err(error) => return Err(error),
+                };
+                let charge = self.metadata.charge_with(|| {
+                    crate::metadata_budget::head_bytes(&head)
+                        + std::mem::size_of::<(u64, ObjectHead)>()
+                        + crate::metadata_budget::LINKS
+                })?;
+                copy_heads.insert(
+                    node.ino,
+                    crate::metadata_budget::MetadataOwner::new(head, charge),
+                );
+            }
+        }
+        // Reserve the complete bounded COPY/publication working set before any
+        // remote mutation. Credit transfers into canonical owners without a
+        // release/reacquire race; unused credit is released on every exit.
+        let mut move_credit = self.metadata.charge_with(|| {
+            pinned
+                .iter()
+                .map(|node| {
+                    let state = node.state.lock().unwrap();
+                    let observed_head = copy_heads
+                        .get(&node.ino)
+                        .map(|head| crate::metadata_budget::head_bytes(head));
+                    let mut head = 2 * observed_head.unwrap_or_else(|| {
+                        state
+                            .remote
+                            .as_ref()
+                            .map_or(0, crate::metadata_budget::head_bytes)
+                    }) + 1024;
+                    if state.version > state.durable {
+                        // A preceding flush can replace a small raw HEAD with
+                        // percent-encoded local attributes. Include that known
+                        // generation before allowing the flush or any COPY.
+                        head = head.max(
+                            crate::metadata_budget::encoding_bytes(&state.metadata)
+                                + 16 * write::metadata_growth(&self.config)
+                                + std::mem::size_of::<ObjectHead>()
+                                + 1024,
+                        );
+                    }
+                    let new_len = destination.len() + state.key.len().saturating_sub(old.len());
+                    4 * head
+                        + 12 * new_len
+                        + 2 * state.metadata_bytes()
+                        + 4 * crate::metadata_budget::LINKS
+                })
+                .sum()
+        })?;
+        let tombstone_credit = self.lock_namespace().reserve_tombstone(&old)?;
+        let mut published = false;
+        let mut publish_move = |move_credit: &mut crate::metadata_budget::MetadataCharge| {
+            if published {
+                return Ok(());
+            }
+            let mut ns = self.lock_namespace();
             let mut state = source.state.lock().unwrap();
             if state.deleted || state.key != old {
                 return Err(Error::Fs(libc::ENOENT));
@@ -2443,22 +2896,39 @@ impl Filesystem {
             {
                 return Err(Error::Fs(libc::EBUSY));
             }
+            state.admit_metadata_from(move_credit, destination.len())?;
+            if let Err(error) = ns.begin_pending_move(&old, &destination, source.ino) {
+                state.settle_metadata();
+                return Err(error);
+            }
             state.rename_target = Some(destination.clone());
-        }
-        {
-            let mut ns = self.lock_namespace();
-            ns.pending_moves.insert(old.clone(), source.ino);
-            ns.pending_moves.insert(destination.clone(), source.ino);
-        }
-        self.flush_node_locked(&source).await?;
-        let mut renamed_head = None;
+            state.settle_metadata();
+            published = true;
+            Ok(())
+        };
+        // A failed dirty-flush admission has not started a rename. Publish its
+        // persistent intent at the first mutating request instead; the scoped
+        // MoveLease already excludes local writers during preparation. Existing
+        // retry intent is never removed, and possibly applied requests retain it.
+        self.flush_node_locked_before(&source, Some(&mut || publish_move(&mut move_credit)))
+            .await?;
+        // A clean/no-directory-object flush sends no request. Keep only the
+        // scoped lease during read-only discovery; persistent intent starts at
+        // COPY, after its fallible preparation, not before LIST or ETag HEAD.
         if directory {
             // Drain paged source objects incrementally; never materialize a subtree.
             let prefix = format!("{old}/");
-            let cached: BTreeMap<_, _> = pinned
-                .iter()
-                .map(|node| (node.state.lock().unwrap().key.clone(), node.clone()))
-                .collect();
+            let _index_charge = move_credit.take(
+                bindings.len()
+                    * (std::mem::size_of::<(&str, Arc<Inode>)>() + crate::metadata_budget::LINKS),
+            )?;
+            let cached: BTreeMap<_, _> = {
+                let ns = self.lock_namespace();
+                bindings
+                    .iter()
+                    .map(|(key, ino)| (key.as_str(), ns.nodes[ino].clone()))
+                    .collect()
+            };
             let mut last_drained = None;
             loop {
                 let page = self.store.list(&prefix, None, None).await?;
@@ -2477,19 +2947,54 @@ impl Filesystem {
                         .strip_prefix(&prefix)
                         .ok_or_else(|| Error::InvalidResponse("rename prefix escape".into()))?;
                     let target = format!("{destination}/{suffix}");
+                    if self.metadata.enabled()
+                        && cached.contains_key(object.key.trim_end_matches('/'))
+                    {
+                        let node = &cached[object.key.trim_end_matches('/')];
+                        if !copy_heads.contains_key(&node.ino)
+                            && !(node.ino == source.ino && source_was_dirty)
+                        {
+                            return Err(Error::Fs(libc::ESTALE));
+                        }
+                    }
                     let etag = match object.etag {
                         Some(etag) => etag,
                         None => self.store.head(&object.key).await?.etag,
                     };
+                    publish_move(&mut move_credit)?;
                     let copied = self.store.copy(&object.key, &target, &etag).await?;
                     if let Some(node) = cached.get(object.key.trim_end_matches('/')) {
-                        let head = self.store.head(&target).await?;
+                        let mut head = self.store.head(&target).await?;
                         if head.etag != copied {
                             return Err(Error::Fs(libc::ESTALE));
                         }
                         let mut state = node.state.lock().unwrap();
+                        let mut _normalization = None;
+                        if self.metadata.enabled() {
+                            let expected = if node.ino == source.ino && source_was_dirty {
+                                state.remote.as_ref()
+                            } else {
+                                copy_heads.get(&node.ino).map(|head| &**head)
+                            };
+                            if expected.is_none_or(|expected| !same_copy_metadata(expected, &head))
+                            {
+                                return Err(Error::Fs(libc::ESTALE));
+                            }
+                            _normalization =
+                                Some(move_credit.take(
+                                    2 * crate::metadata_budget::head_bytes(expected.unwrap()),
+                                )?);
+                            compact_copy_head(&mut head);
+                        }
+                        state.admit_metadata_from(
+                            &mut move_credit,
+                            self.metadata.estimate(|| {
+                                crate::metadata_budget::head_bytes(&head) + target.len()
+                            }),
+                        )?;
                         state.remote = Some(head);
                         state.data_key = Some(target.trim_end_matches('/').into());
+                        state.settle_metadata();
                     }
                     self.store.delete(&object.key).await?;
                     last_drained = Some(object.key);
@@ -2499,21 +3004,35 @@ impl Filesystem {
             let needs_copy =
                 source.state.lock().unwrap().data_key.as_deref() != Some(destination.as_str());
             if needs_copy {
-                let mut head = source
-                    .state
-                    .lock()
-                    .unwrap()
-                    .remote
-                    .clone()
+                let (mut head, _copy_charge) = {
+                    let state = source.state.lock().unwrap();
+                    let remote = if self.metadata.enabled() && !source_was_dirty {
+                        copy_heads.get(&source.ino).map(|head| &**head)
+                    } else {
+                        state.remote.as_ref()
+                    }
                     .ok_or(Error::Fs(libc::EIO))?;
+                    let charge = move_credit.take(
+                        self.metadata
+                            .estimate(|| crate::metadata_budget::head_bytes(remote)),
+                    )?;
+                    (remote.clone(), charge)
+                };
+                publish_move(&mut move_credit)?;
                 head.etag = self.store.copy(&old, &destination, &head.etag).await?;
                 // Publish the backing key before DELETE can remove the old
                 // source, including cancellation or a lost DELETE response.
                 let mut state = source.state.lock().unwrap();
+                state.admit_metadata_from(
+                    &mut move_credit,
+                    self.metadata
+                        .estimate(|| crate::metadata_budget::head_bytes(&head) + destination.len()),
+                )?;
                 state.remote = Some(head);
                 state.data_key = Some(destination.clone());
+                state.settle_metadata();
             }
-            let head = self.store.head(&destination).await?;
+            let mut head = self.store.head(&destination).await?;
             if source
                 .state
                 .lock()
@@ -2524,12 +3043,35 @@ impl Filesystem {
             {
                 return Err(Error::Fs(libc::ESTALE));
             }
-            renamed_head = Some(head);
+            {
+                let mut state = source.state.lock().unwrap();
+                let mut _normalization = None;
+                if self.metadata.enabled()
+                    && state
+                        .remote
+                        .as_ref()
+                        .is_none_or(|expected| !same_copy_metadata(expected, &head))
+                {
+                    return Err(Error::Fs(libc::ESTALE));
+                }
+                if self.metadata.enabled() {
+                    _normalization = Some(move_credit.take(
+                        2 * crate::metadata_budget::head_bytes(state.remote.as_ref().unwrap()),
+                    )?);
+                    compact_copy_head(&mut head);
+                }
+                state.admit_metadata_from(
+                    &mut move_credit,
+                    self.metadata
+                        .estimate(|| crate::metadata_budget::head_bytes(&head)),
+                )?;
+                state.remote = Some(head);
+                state.settle_metadata();
+            }
             self.store.delete(&old).await?;
         }
         // Copy can change ETags, including for cached descendants. Refresh those
         // generations while their per-inode commit gates remain held.
-        let mut refreshed = BTreeMap::new();
         if directory {
             for node in &pinned {
                 let info = {
@@ -2546,13 +3088,48 @@ impl Filesystem {
                         &info.0[old.len()..],
                         if info.2 { "/" } else { "" }
                     );
-                    refreshed.insert(node.ino, self.store.head(&new).await?);
+                    let mut head = self.store.head(&new).await?;
+                    let mut state = node.state.lock().unwrap();
+                    let mut _normalization = None;
+                    if self.metadata.enabled()
+                        && state
+                            .remote
+                            .as_ref()
+                            .is_none_or(|expected| !same_copy_metadata(expected, &head))
+                    {
+                        return Err(Error::Fs(libc::ESTALE));
+                    }
+                    if self.metadata.enabled() {
+                        _normalization = Some(move_credit.take(
+                            2 * crate::metadata_budget::head_bytes(state.remote.as_ref().unwrap()),
+                        )?);
+                        compact_copy_head(&mut head);
+                    }
+                    state.admit_metadata_from(
+                        &mut move_credit,
+                        self.metadata
+                            .estimate(|| crate::metadata_budget::head_bytes(&head)),
+                    )?;
+                    state.remote = Some(head);
+                    state.settle_metadata();
                 }
             }
         }
+        // Reserve the complete publication before changing any name binding.
+        // Failed admission leaves the retryable move markers and old live names.
+        for node in &pinned {
+            let mut state = node.state.lock().unwrap();
+            if state.key == old || directory && state.key.starts_with(&format!("{old}/")) {
+                let new_len = destination.len() + state.key.len() - old.len();
+                state.admit_metadata_from(&mut move_credit, 3 * new_len)?;
+            }
+        }
         let mut ns = self.lock_namespace();
-        ns.tombstone(&old)?;
-        ns.tombstones.remove(&destination);
+        // Empty/pure-local directories reach this synchronous namespace commit
+        // without remote mutation: the scoped lease suffices, so no persistent
+        // retry intent is needed. There is no await during this publication.
+        ns.tombstone_reserved(&old, tombstone_credit)?;
+        ns.remove_tombstone(&destination);
         if let Some(ino) = ns.names.remove(&destination)
             && let Some(target) = ns.nodes.get(&ino)
         {
@@ -2562,34 +3139,28 @@ impl Filesystem {
             state.durable = state.version;
         }
         ns.forget_dirty(&destination);
-        let changed = ns.bindings(&old, directory);
-        for (key, ino) in changed {
-            let new = format!("{destination}{}", &key[old.len()..]);
-            ns.names.remove(&key);
+        for (key, &ino) in bindings.iter().map(|(key, ino)| (key, ino)) {
+            let mut new = String::with_capacity(destination.len() + key.len() - old.len());
+            new.push_str(&destination);
+            new.push_str(&key[old.len()..]);
+            ns.names.remove(key);
             ns.names.insert(new.clone(), ino);
-            ns.forget_dirty(&key);
+            ns.forget_dirty(key);
             if let Ok(node) = ns.get(ino) {
                 let mut state = node.state.lock().unwrap();
                 state.key = new;
                 state.data_key = None;
                 state.negative_lookups.clear();
-                if let Some(head) = refreshed.remove(&ino) {
-                    state.remote = Some(head);
-                }
                 if ino == source.ino {
                     state.rename_target = None;
                 }
-                if ino == source.ino
-                    && let Some(head) = renamed_head.take()
-                {
-                    state.remote = Some(head);
-                }
                 ns.track_dirty(ino, &state);
+                state.settle_metadata();
             }
         }
         ns.changed(&destination);
-        ns.pending_moves.remove(&old);
-        ns.pending_moves.remove(&destination);
+        ns.remove_pending_move(&old);
+        ns.remove_pending_move(&destination);
         ns.get(newparent)?
             .state
             .lock()
@@ -2621,6 +3192,10 @@ impl Filesystem {
             if state.deleted {
                 return Err(Error::Fs(libc::ENOENT));
             }
+            state.admit_metadata(
+                self.metadata
+                    .estimate(|| write::metadata_growth(&self.config)),
+            )?;
             if self.config.enable_perms {
                 if let Some(mode) = mode {
                     state.mode = (state.mode & libc::S_IFMT) | (mode & 0o7777);
@@ -2636,18 +3211,26 @@ impl Filesystem {
                 state.mtime = mtime;
             }
             state.version += 1;
-            self.prepare_metadata(&mut state);
+            self.prepare_metadata(&mut state)?;
             ns.track_dirty(node.ino, &state);
         }
         Ok(node.attr())
     }
 
-    pub fn xattrs(&self, ino: u64) -> Result<BTreeMap<String, Vec<u8>>> {
+    pub fn xattrs(&self, ino: u64) -> Result<crate::metadata_budget::Xattrs> {
         if self.config.disable_xattr {
             return Err(Error::Fs(libc::ENOSYS));
         }
         let node = self.node(ino)?;
         let state = node.state.lock().unwrap();
+        let charge = self.metadata.charge_with(|| {
+            2 * crate::metadata_budget::map_bytes(&state.metadata)
+                + state.metadata.len() * 5
+                + state
+                    .remote
+                    .as_ref()
+                    .map_or(0, |head| head.etag.len() + 128)
+        })?;
         let mut attrs: BTreeMap<_, _> = state
             .metadata
             .iter()
@@ -2656,7 +3239,7 @@ impl Filesystem {
         if let Some(remote) = &state.remote {
             attrs.insert("s3.etag".into(), remote.etag.as_bytes().to_vec());
         }
-        Ok(attrs)
+        Ok(crate::metadata_budget::Xattrs::new(attrs, charge))
     }
 
     pub fn setxattr(&self, ino: u64, name: &str, value: Option<&[u8]>, flags: i32) -> Result<()> {
@@ -2701,12 +3284,19 @@ impl Filesystem {
         if size + name.len() + value.map_or(0, <[u8]>::len) > 65536 {
             return Err(Error::Fs(libc::E2BIG));
         }
+        state.admit_metadata(
+            name.len()
+                + value.map_or(0, <[u8]>::len)
+                + std::mem::size_of::<(String, Vec<u8>)>()
+                + crate::metadata_budget::LINKS,
+        )?;
         if let Some(value) = value {
             state.metadata.insert(name.into(), value.to_vec());
         } else {
             state.metadata.remove(name);
         }
         state.version += 1;
+        state.settle_metadata();
         ns.track_dirty(node.ino, &state);
         Ok(())
     }

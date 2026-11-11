@@ -1032,6 +1032,7 @@ impl Filesystem {
         new_inode: bool,
     ) -> Result<crate::metadata_budget::MetadataCharge> {
         let mut cleared = false;
+        let mut reclaim_scan = crate::namespace::ReclaimScan::default();
         let deadline = Instant::now() + self.config.request_timeout;
         loop {
             if Instant::now() >= deadline {
@@ -1054,7 +1055,7 @@ impl Filesystem {
             }
             let reclaimed = {
                 let mut ns = self.lock_namespace();
-                let reclaimed = ns.reclaim_batch();
+                let reclaimed = ns.reclaim_batch(&mut reclaim_scan);
                 if matches!(reclaimed, crate::namespace::Reclaim::Exhausted)
                     && new_inode
                     && ns.count_full()
@@ -1424,7 +1425,7 @@ impl Filesystem {
             let charge = self
                 .metadata
                 .charge_with(|| Inode::metadata_estimate(&key, None))?;
-            ns.try_install(&key, |ino| {
+            ns.try_install_reclaiming(&key, |ino| {
                 let node = Inode::cached_admitted(
                     ino,
                     key.clone(),
@@ -1796,9 +1797,9 @@ impl Filesystem {
         if ns.named(&key).is_some() {
             return Err(Error::Fs(libc::EEXIST));
         }
-        let node = ns.install(&key, |ino| {
+        let node = ns.try_install(&key, |ino| {
             candidate.ino = ino;
-            candidate
+            Ok(candidate)
         })?;
         ns.remove_tombstone(&key);
         ns.changed(&key);

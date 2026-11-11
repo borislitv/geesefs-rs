@@ -147,6 +147,14 @@ async fn a_full_gap_queue_does_not_hold_its_already_verified_disk_hit() {
     )
     .await;
     let stalled = f.store.read_ranges.lock().unwrap().clone();
+    // Discovery is blocked sending the third gap descriptor after publishing
+    // block 5. Blocks 6/7 have not been looked up yet. Time spent waiting for
+    // the unrelated source prefix must not consume their own disk allowance.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(350), std::future::pending::<()>())
+            .await
+            .is_err()
+    );
     f.prefix.add_permits(1);
     f.second.add_permits(1);
     let data = tokio::time::timeout(DEADLINE, reader)

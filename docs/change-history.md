@@ -5,6 +5,45 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-11: correct two independently falsified admission/progress defects
+
+Five independent WOOF roles and a separate falsifier reviewed the full PR at
+`8d91571dffb22ff2560b7cba21817ce2caa050d9`. Of 21 deduplicated candidates,
+two P2 defects survived: a namespace cursor inherited from an earlier admission
+could skip a newly released prefix inode and return false ENOMEM; repeated disk
+timeouts could defer the first source GET of one producer range.
+
+Make reclamation continuation local to each admission, start at the beginning,
+and cap each batch plus the initial inode high-water mark. Stop remaining disk
+attempts for the current range after timeout/saturation, without expiring healthy
+lookups after source waits or releasing actual-worker funding early. Public
+filesystem regressions fail on the original code. Independent post-fix review
+also caught lost synchronous install progress after EAGAIN: retain its finite
+local scan through completion, including speculative preload, while keeping
+async publication bounded. Public tail-victim/exhaustion/released-prefix and
+preload tests distinguish this path. Ten isolated faults are rejected.
+Direct-tree default/all-features suites pass 518 tests each, with
+24 opt-in entries. This does not attribute historical matrix failures to either
+defect or close qualification. Target/recovery acceptance and KMS cached-copy
+revocation semantics remain explicit questions; unrelated optional recommendations
+and pre-existing traversal costs are retained separately.
+
+## 2026-11-11: overlap bounded source gaps and transfer decoded payload ownership
+
+Gap discovery previously waited for each source miss run before inspecting later
+disk hits. Use one capacity-one scalar descriptor channel and one source consumer
+per existing range task; publish verified hits before waiting on a full queue.
+Deduct its additional ownership from the existing window budget. Move the
+validated decoded payload Box into its exact existing reservation instead of
+copying it, retaining identity/CRC/generation and actual-worker lifetime checks.
+
+Source-matched local qualification at `8d91571` completes 456 attempts with
+449 byte/state passes and seven timeout-related zero-source failures. A separate
+96/96 Rust-relative comparison shows scoped eviction throughput improvement;
+CPU/memory and absolute L2/RAM regressions remain in the
+[frozen checkpoint](performance-disk-cache-followup.md#combined-pipeline-checkpoint).
+Neither measurement describes the later WOOF repairs or production acceptance.
+
 ## 2026-11-11: retain validated disk coverage in L1
 
 A fixed warm-random workload repeatedly demoted 212 fragments of already resident

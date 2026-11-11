@@ -33,10 +33,19 @@ failed and remains open**. No deployment or production acceptance is implied.
 - The later loan-first starvation correction retains disabled/excluded loan
   behavior while demoting Ready eligible victims before borrowing. Policy ceilings
   include revocable loans; actual selected residency can differ and is reported.
-- The contention/lazy/max-record/backing follow-up passes 502 tests in default and
+- The contention/lazy/max-record/backing/pipeline and WOOF follow-up passes 518 tests in default and
   system-allocator configurations, with 24 explicit opt-in entries.
   Clippy, format and source audit pass. Native ext4 block/inode ENOSPC and EACCES
   checks run separately; they do not establish EDQUOT or power-loss durability.
+- Full-PR WOOF at `8d91571` completes five independent roles plus a falsifier:
+  29 source IDs map to 21 candidates; two P2 defects are repaired with meaningful
+  regressions and ten fault controls. Admission-local namespace scanning avoids
+  false ENOMEM after FORGET; range-local stop after disk timeout avoids renewing
+  optional waits while actual workers keep their funding. Focused post-fix review
+  additionally exposed lost synchronous install progress; public install/preload
+  now complete a finite local scan, distinct from bounded async publication.
+  Target acceptance and
+  KMS cached-copy revocation semantics remain unresolved questions.
 
 ## Stage 8 outcome and remaining gate
 
@@ -64,8 +73,14 @@ The validated-backing correction removes repeated fragment demotion and improves
 warm-random throughput/CPU in eight Rust-relative pairs plus eight A/A controls.
 All 48 candidate mounts in its six-group comparison pass, but two baseline
 timeouts leave concurrent comparison incomplete. This is not absolute L2/RAM or
-Go acceptance. Next: attribute actual timeout delay and investigate fragmented
-source GETs under eviction, preserving all measurements.
+Go acceptance. The combined bounded-gap/decoded-ownership checkpoint at `8d91571`
+completes a further 456 attempts with 449 byte/state passes and seven advisory-cold
+zero-source timeout failures. Its separate 96/96 Rust-relative comparison has
+eight pairs and eight A/A per group and a scoped eviction throughput improvement;
+absolute L2/RAM CPU/throughput/cgroup costs remain adverse. These measurements
+predate the WOOF repairs, which have no new paired acceptance result.
+Next: attribute actual timeout delay and remaining CPU/residency costs while
+preserving every failed observation and fixed-work budget.
 Controlled media-cold, ongoing postallocation I/O errors, Go-relative and target
 acceptance remain open. All owned completed-run resources were cleaned up;
 serving settings were not changed.

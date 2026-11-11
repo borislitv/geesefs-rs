@@ -7,7 +7,7 @@ served mounts or production credentials. Use finite subprocess/operation deadlin
 
 ## Metadata compaction and persistent L2 — 2026-11-11
 
-Default and system-allocator configurations pass 502 active tests, with 24
+Default and system-allocator configurations pass 518 active tests, with 24
 explicit opt-in native/diagnostic entries, plus denied-warning Clippy. Meaningful
 regressions cover canonical/key owner lifetime, COW baseline/conflict handling,
 postcommit metadata credit, stale-size admission, byte-pressure demotion, genuine
@@ -22,6 +22,17 @@ Validated disk-backing tests additionally reject redundant fragment writes,
 incorrect retained offsets, invented partial coverage and a blanket disk-origin
 demotion skip. The refill control proves live-index removal and persisted
 readmission; it does not claim physical target-region recycling.
+The combined pipeline overlaps bounded source gaps with healthy disk discovery
+and transfers a decoded payload into its existing reservation without another
+payload copy. Post-WOOF regressions cover an admission-local bounded namespace
+scan after FORGET, finite exhaustion with interleaved admissions, and a recovered
+32-block range whose first disk read times out. Source delivery completes while
+that actual worker retains its slot/output/credit; healthy later lookups still
+receive their own deadline after slow source backpressure. The engine gate exists
+only in test builds. Public synchronous Namespace installation and speculative
+preload finish their own finite scan; async publication remains bounded after
+yielding pre-admission. New regressions first fail for the reproduced defects;
+ten targeted injected faults are rejected before restoring the correct source.
 
 ```bash
 timeout 1800s cargo +1.99.1 test --locked --all-targets --no-fail-fast
@@ -35,7 +46,10 @@ Put the documented Python 3.12 fixture environment on PATH: Rust tests invoke
 Python subprocesses too. The benchmark suite has 161 tests: two require an
 explicit locally verified `GEESEFS_WEED_BINARY` and otherwise skip. The native
 enabled run passes all 161 without skips. The project Python suite has 16 tests.
-The public-source audit checks 388 resolved
+Keep the native provider opt-in out of the Rust process environment: its embedded
+Python gate has a separate finite deadline. Run the verified native-enabled Python
+suite standalone. Use an owned disk-backed TMPDIR for real-engine tests rather
+than relying on space in shared tmpfs. The public-source audit checks 388 resolved
 packages, including only the exact approved Foyer fork/revision/package set.
 
 The opt-in disk recovery tests document their isolated ext4 block/inode ENOSPC
@@ -49,9 +63,21 @@ Final source/hash errors invalidate success and exit nonzero while preserving ro
 Unavailable prerequisites fail rather than count as a successful skip. The
 small-object protocol and 16 corrected large-read/eviction/writer representatives
 pass, but the [earlier full 456-case qualification](performance-disk-cache.md)
-failed. Representative passes do not supersede a new frozen paired matrix.
+failed. Later source-matched matrices are preserved in the
+[follow-up report](performance-disk-cache-followup.md#combined-pipeline-checkpoint):
+449/456 absolute L2/RAM byte/state passes and 96/96 Rust-relative passes. The
+post-WOOF repairs have correctness verification, not a new paired qualification.
 [Metadata allocation results](performance-metadata-compaction.md) are
 not substituted for that missing performance acceptance.
+
+Final direct-tree quality checks run `crapper --no-coverage` and
+`dryer --threshold 0.8` on the four changed runtime files. Matching source
+coverage is unavailable, so CRAP is N/A; complexity includes `load_disk_range`
+25, `reclaim_batch` 16 and `admit_metadata` 12. Dryer reports three score-1.00
+pairs in the existing namespace operation-marker bookkeeping, not zero
+duplication. `mutator --scan` is discovery only; the ten executed fault
+controls above are separate, source-addressed mutation evidence. Tool success
+does not establish compatibility or performance acceptance.
 
 ## Bounded subtree listing — 2026-11-09 (unreleased)
 

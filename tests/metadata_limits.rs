@@ -270,6 +270,132 @@ async fn count_pressure_resumes_beyond_a_pinned_reclamation_batch() {
 }
 
 #[tokio::test]
+async fn count_pressure_revisits_a_previously_pinned_prefix_on_the_first_lookup() {
+    for prefix_len in [1, 127, 128, 129, 255, 256, 257] {
+        let store = MemoryStore::new();
+        for index in 0..prefix_len {
+            store.seed(&format!("pinned-{index}"), b"payload");
+        }
+        for name in ["victim", "replacement", "next"] {
+            store.seed(name, b"payload");
+        }
+        let mut config = MemoryStore::config(32);
+        config.entry_limit = prefix_len + 2; // Root, pinned prefix and one victim.
+        let fs = Filesystem::new(config, store).unwrap();
+        let mut pinned = Vec::new();
+        for index in 0..prefix_len {
+            let node = fs.lookup(1, &format!("pinned-{index}")).await.unwrap();
+            fs.reference(&node);
+            pinned.push(node.ino);
+        }
+        let victim = fs.lookup(1, "victim").await.unwrap().ino;
+        let replacement = fs.lookup(1, "replacement").await.unwrap();
+        fs.reference(&replacement);
+        let replacement_ino = replacement.ino;
+        drop(replacement);
+        assert!(fs.node(victim).is_err());
+
+        fs.forget(pinned[0], 1);
+        let next = tokio::time::timeout(std::time::Duration::from_secs(5), fs.lookup(1, "next"))
+            .await
+            .expect("a full scan must terminate")
+            .unwrap_or_else(|error| {
+                panic!(
+                    "first lookup must reclaim the released prefix ({prefix_len} pins): {error:?}"
+                )
+            });
+        assert_eq!(next.attr().size, 7);
+        assert!(fs.node(pinned[0]).is_err());
+        for ino in pinned.into_iter().skip(1).chain([replacement_ino]) {
+            assert_eq!(fs.node(ino).unwrap().ino, ino);
+        }
+        assert_eq!(fs.namespace.lock().unwrap().evictions, 2);
+        assert_eq!(fs.metadata_usage().limit, None);
+    }
+}
+
+#[tokio::test]
+async fn count_pressure_with_all_inodes_pinned_terminates_for_interleaved_admissions() {
+    let store = MemoryStore::new();
+    for index in 0..385 {
+        store.seed(&format!("pinned-{index}"), b"payload");
+    }
+    for name in ["first", "second"] {
+        store.seed(name, b"payload");
+    }
+    let mut config = MemoryStore::config(32);
+    config.entry_limit = 386;
+    let fs = Filesystem::new(config, store).unwrap();
+    let mut pinned = Vec::new();
+    for index in 0..385 {
+        let node = fs.lookup(1, &format!("pinned-{index}")).await.unwrap();
+        fs.reference(&node);
+        pinned.push(node.ino);
+    }
+    let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(fs.lookup(1, "first"), fs.lookup(1, "second"))
+    })
+    .await
+    .expect("each admission must finish its own finite scan even when interleaved");
+    for result in [first, second] {
+        assert!(matches!(result, Err(Error::Fs(libc::ENOMEM))));
+    }
+    for ino in pinned {
+        assert_eq!(fs.node(ino).unwrap().ino, ino);
+    }
+    let ns = fs.namespace.lock().unwrap();
+    assert_eq!(ns.nodes.len(), 386);
+    assert_eq!(ns.evictions, 0);
+    assert_eq!(ns.capacity_failures, 2);
+    assert!(ns.named("first").is_none());
+    assert!(ns.named("second").is_none());
+}
+
+#[tokio::test]
+async fn synchronous_preload_reclaims_a_tail_beyond_the_pinned_prefix_without_head_fallback() {
+    let store = MemoryStore::new();
+    store.seed("target", b"payload");
+    let mut config = MemoryStore::config(32);
+    config.list_type = Some(geesefs_rs::config::ListType::Extended);
+    config.entry_limit = 131;
+    let fs = Filesystem::new(config, store.clone()).unwrap();
+    let victim = {
+        let mut namespace = fs.namespace.lock().unwrap();
+        for index in 0..129 {
+            let name = format!("pinned-{index}");
+            let node = namespace
+                .install(&name, |ino| {
+                    geesefs_rs::inode::Inode::new(ino, name.clone(), false, None, &fs.config)
+                })
+                .unwrap();
+            fs.reference(&node);
+        }
+        namespace
+            .install("victim", |ino| {
+                geesefs_rs::inode::Inode::new(ino, "victim".into(), false, None, &fs.config)
+            })
+            .unwrap()
+            .ino
+    };
+    let target = fs.lookup(1, "target").await.unwrap();
+    assert_eq!(target.attr().size, 7);
+    assert!(fs.node(victim).is_err());
+    assert_eq!(
+        store.list_calls.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert!(
+        store.head_keys.lock().unwrap().is_empty(),
+        "the complete synchronous preload must publish the listed metadata, not fall back to HEAD"
+    );
+    let namespace = fs.namespace.lock().unwrap();
+    assert_eq!(namespace.evictions, 1);
+    for index in 0..129 {
+        assert!(namespace.named(&format!("pinned-{index}")).is_some());
+    }
+}
+
+#[tokio::test]
 async fn a_read_snapshot_keeps_its_charge_after_its_inode_is_reclaimed() {
     let store = MemoryStore::new();
     metadata_object(&store, "first", 8 * 1024);

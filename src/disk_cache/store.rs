@@ -174,6 +174,8 @@ pub struct PreparedDiskCache {
     _lock: DirectoryLock,
     status: DiskCacheStatus,
     inventory: Option<(u64, u64)>,
+    #[cfg(test)]
+    test_io: Option<Box<dyn foyer::IoEngineConfig>>,
 }
 
 /// The original shared-lane credit follows preparation into owned startup;
@@ -216,7 +218,17 @@ impl PreparedDiskCache {
             _lock: lock,
             status: DiskCacheStatus(Arc::new(Startup::default())),
             inventory,
+            #[cfg(test)]
+            test_io: None,
         })
+    }
+
+    /// Inject only the I/O boundary; filesystem qualification and owned startup
+    /// still use their production path. Absent from non-test builds.
+    #[cfg(test)]
+    pub(crate) fn with_test_io(mut self, io: Box<dyn foyer::IoEngineConfig>) -> Self {
+        self.test_io = Some(io);
+        self
     }
 
     fn prepare_directory(directory: &Path) -> Result<PathBuf> {
@@ -679,7 +691,13 @@ impl DiskCache {
     /// Transfer pre-admitted credit without reopening an admission gap. An owned
     /// startup completes even if a caller cancels its bounded observation.
     pub async fn open_funded(prepared: FundedPreparedDiskCache) -> Result<Self> {
-        Self::start_funded(prepared, None, None).await
+        #[cfg(test)]
+        let mut prepared = prepared;
+        #[cfg(test)]
+        let io = prepared.prepared.test_io.take();
+        #[cfg(not(test))]
+        let io = None;
+        Self::start_funded(prepared, io, None).await
     }
     #[cfg(test)]
     pub async fn open_test(

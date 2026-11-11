@@ -7,6 +7,10 @@ use crate::{
 };
 use std::{ops::Range, sync::Arc};
 
+#[cfg(test)]
+#[path = "../tests/support/disk_cache_timeout_pipeline.rs"]
+mod timeout_pipeline;
+
 /// Logical payload unit shared by L1/L2 and streamed S3 delivery.
 pub const READ_BLOCK_BYTES: usize = 128 * 1024;
 const _: () = assert!(READ_BLOCK_BYTES == crate::disk_cache::MAX_PAYLOAD_BYTES);
@@ -287,6 +291,15 @@ pub(crate) async fn load_disk_range(
                     }
                     Err(reason) => {
                         debug_disk_fallback(&range.disk.cache, reason);
+                        if matches!(
+                            reason,
+                            crate::disk_cache::ReadFallback::Timeout
+                                | crate::disk_cache::ReadFallback::Jobs
+                        ) {
+                            // Optional-tier saturation must not renew a full
+                            // wait for every remaining block before source GET.
+                            break;
+                        }
                         None
                     }
                 }
@@ -340,6 +353,9 @@ pub(crate) async fn load_disk_range(
                 let result = slot.read_owned(key, block_admission.split(coverage)).await;
                 if let Err(reason) = result.as_ref() {
                     debug_disk_fallback(&range.disk.cache, *reason);
+                    if matches!(reason, crate::disk_cache::ReadFallback::Timeout) {
+                        break; // The actual I/O retains its slot and funding.
+                    }
                 }
                 result.ok()
             } else {

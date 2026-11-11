@@ -27,8 +27,16 @@ pub struct Namespace {
     pub capacity_failures: u64,
     next_ino: u64,
     limit: usize,
-    reclaim_cursor: u64,
     operation_charge: MetadataCharge,
+}
+
+/// Admission-local continuation: concurrent admissions must not advance each
+/// other's scan. The initial high-water mark keeps the scan finite even while
+/// other callers install new inodes between batches.
+#[derive(Default)]
+pub(crate) struct ReclaimScan {
+    cursor: u64,
+    end: Option<u64>,
 }
 
 pub(crate) enum Reclaim {
@@ -64,7 +72,6 @@ impl Namespace {
             capacity_failures: 0,
             next_ino: 2,
             limit,
-            reclaim_cursor: 0,
             operation_charge,
         }
     }
@@ -327,27 +334,28 @@ impl Namespace {
     }
 
     pub fn install(&mut self, key: &str, make: impl FnOnce(u64) -> Inode) -> Result<Arc<Inode>> {
-        self.try_install(key, |ino| Ok(make(ino)))
+        self.try_install_reclaiming(key, |ino| Ok(make(ino)))
     }
 
     pub(crate) fn count_full(&self) -> bool {
         self.nodes.len() >= self.limit
     }
 
-    /// Examine a bounded ordered slice. Never wait on an inode or retain a
-    /// resolver pin; the next caller resumes beyond this slice.
-    pub(crate) fn reclaim_batch(&mut self) -> Reclaim {
-        use std::ops::Bound::{Excluded, Unbounded};
+    /// Examine at most 128 inodes. The caller retains its scan across yields,
+    /// starting at the beginning for each admission, not at a prior scan's tail.
+    /// Never wait on an inode or retain a resolver pin between batches.
+    pub(crate) fn reclaim_batch(&mut self, scan: &mut ReclaimScan) -> Reclaim {
+        use std::ops::Bound::{Excluded, Included};
+        let end = *scan.end.get_or_insert(self.next_ino - 1);
         for _ in 0..128 {
             let Some((&ino, node)) = self
                 .nodes
-                .range((Excluded(self.reclaim_cursor), Unbounded))
+                .range((Excluded(scan.cursor), Included(end)))
                 .next()
             else {
-                self.reclaim_cursor = 0;
                 return Reclaim::Exhausted;
             };
-            self.reclaim_cursor = ino;
+            scan.cursor = ino;
             if ino == 1 || Arc::strong_count(node) != 1 {
                 continue;
             }
@@ -386,6 +394,34 @@ impl Namespace {
         Reclaim::More
     }
 
+    /// Synchronous callers have no continuation across EAGAIN. Finish one
+    /// finite local scan here, including all batches, before reporting ENOMEM.
+    pub(crate) fn try_install_reclaiming(
+        &mut self,
+        key: &str,
+        make: impl FnOnce(u64) -> Result<Inode>,
+    ) -> Result<Arc<Inode>> {
+        if let Some(node) = self.named(key) {
+            return Ok(node);
+        }
+        if self.count_full() {
+            let mut scan = ReclaimScan::default();
+            loop {
+                match self.reclaim_batch(&mut scan) {
+                    Reclaim::Removed => break,
+                    Reclaim::More => continue,
+                    Reclaim::Exhausted => {
+                        self.capacity_failures += 1;
+                        return Err(Error::Fs(libc::ENOMEM));
+                    }
+                }
+            }
+        }
+        self.try_install(key, make)
+    }
+
+    /// Async callers already performed yielding admission. Keep this final
+    /// publication attempt bounded if another admission consumed the free slot.
     pub(crate) fn try_install(
         &mut self,
         key: &str,
@@ -395,7 +431,7 @@ impl Namespace {
             return Ok(node);
         }
         if self.nodes.len() >= self.limit {
-            match self.reclaim_batch() {
+            match self.reclaim_batch(&mut ReclaimScan::default()) {
                 Reclaim::Removed => {}
                 Reclaim::More => return Err(Error::Fs(libc::EAGAIN)),
                 Reclaim::Exhausted => {

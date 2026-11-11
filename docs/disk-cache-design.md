@@ -204,6 +204,16 @@ before using its payload. Do not perform HEAD or GET for every cached block at
 startup. Recovery restores cache inventory, not authoritative filesystem attrs.
 Source failures do not authorize stale data beyond the existing contract.
 
+Operator decision, 2026-11-11: the scoped deployment is single-user and accepts
+ordinary downloaded-copy semantics. A cache hit does not perform an additional
+source GET solely to reauthorize KMS decryption. Revoking remote decrypt access
+does not retroactively remove an already downloaded local copy. This resolves
+that deployment-contract question without relaxing normal namespace/permission
+or ETag/size validation, changing credential-scope separation, or claiming
+multi-tenant isolation. Payload-cache speed need not exceed RAM on every access;
+the separately authorized HDD trial is a functional/resource check, not a waiver
+of returned-byte correctness or bounded ownership.
+
 ### Choosing what to evict at capacity
 
 Use approximate recency, with **CLOCK/second chance** as the proposed policy:

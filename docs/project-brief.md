@@ -94,6 +94,16 @@ is accepted; do not require immediate external-create visibility beyond Go's
 behavior. Use the existing explicit Rust negative-cache configuration in read-only
 comparisons. More granular cache TTL controls are future work, not a prerequisite.
 
+Operator disk-cache clarification, 2026-11-11: the scoped deployment has one
+trusted user and accepts ordinary downloaded-copy semantics. Do not add a source
+GET solely to reauthorize KMS access on each L2 hit. Normal namespace, permission
+and object-generation validation remain required; this decision does not promise
+retroactive revocation of already downloaded bytes or multi-tenant isolation.
+Occasional disk-cache slowdowns are accepted. The authorized HDD trial checks
+functionality, persistence and resource use, not superiority over RAM for every
+access pattern. Retain adverse measurements and keep the broader Go-relative
+acceptance decision separate.
+
 ## Working boundaries
 
 Use dedicated disposable fixtures for writes and failure injection. Existing
@@ -111,6 +121,13 @@ These exceptions do not authorize broader rollout or production
 failure injection, and do not close acceptance. The user confirmed
 the public repository: source and reproducible fixtures are public; credentials,
 deployment identities and private operational evidence are not project artifacts.
+
+On 2026-11-11 the operator separately authorized a withdrawn-reader HDD trial with
+a 2-TiB configured payload file, another reader's hourly HTTP log and independent
+rsync/HTTP controls. Existing payload/entry limits remain fixed. Keep raw failures
+and resource observations private, distinguish allocation from populated capacity,
+and verify restart on the existing inventory. Traffic admission must remain
+withdrawn until a separate operator decision, including after cleanup or failure.
 
 Use public upstream code and public crates only. Do not export internal Arcadia
 libraries, translated internal code or internal-only dependencies without
@@ -155,5 +172,8 @@ larger-cache benefit is implied by the implementation.
 [measurement pages](performance.md) preserve exact-source tables and limitations;
 [next work](next-work.md) lists actionable gaps. Short controls, missing/noisy
 observations and a partial native-S3 run do not establish sustained acceptance.
-FUSE io_uring remains an upstream watch; passthrough and disk-backed cache are
-deferred. No single profile proves that all optimization opportunities are exhausted.
+FUSE io_uring remains an upstream watch and passthrough remains deferred. The
+original disk-cache deferral was superseded by the separately authorized
+[persistent-tier work](disk-cache-design.md) and scoped HDD trial above; neither
+closes production acceptance. No single profile proves that all optimization
+opportunities are exhausted.

@@ -35,6 +35,14 @@ Include later `pread()` EIO and independently reproduced native backend read
 failure. Compare vhost/method/URI and generations before attributing 404 changes;
 current native/served HEAD parity is not historical full-payload acceptance.
 
+The [HDD functional checkpoint](target-disk-cache-functional.md) adds a completed
+hourly replay with five common-mount body truncations, despite successful explicit
+byte/recovery controls. Reproduce the `spawn_traced` admission boundary through
+native buffered reads/sendfile and implement bounded foreground backpressure
+without unbounded queued owners or early release of actual-work credits. Preserve
+the original failures and distinguish them from other mounts/proxy errors before
+changing runtime limits or claiming a fix.
+
 ## 2. Target access and large-namespace memory
 
 Explicit `allow_other` wiring and the three local cross-UID cases are complete;
@@ -100,5 +108,7 @@ allocation/rate objections. Do not reinstate those trials without new evidence.
 
 [FUSE io_uring](fuse-io-uring-assessment.md) waits for a fitting released upstream
 API, target-kernel/confinement support and a material measured transport share.
-Passthrough, writeback and disk-backed caching remain deferred. A merge may retain
-the experimental checkpoint; it does not accept production replacement.
+Passthrough and writeback remain deferred. The original disk-cache deferral was
+superseded by separately authorized persistent-tier development and the withdrawn
+HDD trial; its results do not close acceptance. A merge may retain the experimental
+checkpoint; it does not accept production replacement.

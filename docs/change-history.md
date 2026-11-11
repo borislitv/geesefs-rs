@@ -5,6 +5,29 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-11: record the withdrawn-reader HDD functional trial
+
+The operator accepts single-user downloaded-copy semantics without an extra KMS
+authorization GET and occasional disk-cache slowdowns. A frozen `91bdc20` binary
+allocates a 2-TiB HDD file, completes 127.997 GiB of direct-filesystem population,
+and recovers 87,981 records on the same inventory after an ordinary restart.
+Independent peer rsync/metadata and HTTP controls pass before and after restart;
+range probes demonstrate actual recovered L2 delivery.
+
+Preserve failed setup attempts and correct their causes: rejected live nginx
+zone-key changes, a banned single replay generator, inappropriate full downloads
+of historically aborted responses, and an immediate-Ready assertion that ignored
+asynchronous recovery. No runtime budget/deadline or cache inventory was changed
+to obtain these results.
+
+The completed hour still contains seven truncated responses and eleven socket
+timeouts, including five truncations through the changed common mount. Immediate
+FUSE admission rejection is a concrete investigation target, not an exemption
+because its source predates this PR. Keep reader RSS, allocator, cgroup and the
+large consumer file-cache footprint separate in the
+[target checkpoint](target-disk-cache-functional.md). Production acceptance
+remains open; temporary test exceptions are removed and admission stays withdrawn.
+
 ## 2026-11-11: correct two independently falsified admission/progress defects
 
 Five independent WOOF roles and a separate falsifier reviewed the full PR at
@@ -25,8 +48,9 @@ preload tests distinguish this path. Ten isolated faults are rejected.
 Direct-tree default/all-features suites pass 518 tests each, with
 24 opt-in entries. This does not attribute historical matrix failures to either
 defect or close qualification. Target/recovery acceptance and KMS cached-copy
-revocation semantics remain explicit questions; unrelated optional recommendations
-and pre-existing traversal costs are retained separately.
+revocation semantics were explicit questions at this review checkpoint; the later
+single-user decision above resolves only the latter scoped contract. Unrelated
+optional recommendations and pre-existing traversal costs remain separate.
 
 ## 2026-11-11: overlap bounded source gaps and transfer decoded payload ownership
 

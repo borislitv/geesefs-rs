@@ -4,7 +4,7 @@ use crate::error::{Error, Result};
 pub(crate) const PAGE: usize = 4096;
 pub(crate) const JOBS: usize = 4;
 pub(crate) const POOL: usize = 512 * 1024;
-pub(crate) fn rounded(n: usize) -> usize {
+pub(crate) const fn rounded(n: usize) -> usize {
     n.div_ceil(PAGE) * PAGE
 }
 
@@ -55,9 +55,8 @@ impl Funding {
         // Each admitted read may own serialized buffer, decoded key/value, and
         // task bookkeeping simultaneously. Caller output is separately admitted.
         let read_work_bytes =
-            JOBS * (rounded(RECORD_CAP) + 3 * super::MAX_IDENTITY_BYTES + MAX_PAYLOAD_BYTES + PAGE);
-        let submission_bytes =
-            JOBS * (rounded(RECORD_CAP) + 2 * foyer::SubmissionLimits::METADATA_BYTES);
+            JOBS * (RECORD_CAP + 3 * super::MAX_IDENTITY_BYTES + MAX_PAYLOAD_BYTES + PAGE);
+        let submission_bytes = JOBS * (RECORD_CAP + 2 * foyer::SubmissionLimits::METADATA_BYTES);
         let required_bytes =
             fixed_bytes + metadata_bytes + copy_bytes + read_work_bytes + submission_bytes;
         if required_bytes > available_payload_bytes {

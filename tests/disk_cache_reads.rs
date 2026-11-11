@@ -30,8 +30,20 @@ async fn attach(config: Config, store: Arc<MemoryStore>) -> Arc<Filesystem> {
     use std::os::unix::fs::PermissionsExt;
     let disk = config.disk_cache_config().unwrap().unwrap();
     std::fs::set_permissions(&disk.directory, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let prepared = PreparedDiskCache::prepare(&disk.directory, disk.max_bytes).unwrap();
+    let mut prepared = PreparedDiskCache::prepare(&disk.directory, disk.max_bytes).unwrap();
     let fs = Filesystem::new(config, store).unwrap();
+    if fs.disk_cache_bypass_reason().is_none() && !disk.directory.join("payload-v1.cache").exists()
+    {
+        // These read tests require an already Ready tier. Seed empty persistent
+        // media explicitly; fresh deferred attachment is covered separately.
+        let resources = geesefs_rs::budget::Budget::new(32 * MIB).unwrap();
+        let cache = geesefs_rs::disk_cache::DiskCache::open(prepared, &resources)
+            .await
+            .unwrap();
+        cache.close(DEADLINE).await.unwrap();
+        drop(cache);
+        prepared = PreparedDiskCache::prepare(&disk.directory, disk.max_bytes).unwrap();
+    }
     fs.attach_disk_cache(prepared).await.unwrap();
     fs
 }
@@ -712,6 +724,15 @@ async fn selected_loans_from_before_attachment_are_discarded_without_demotion_af
         assert_eq!(fs.effective_budgets().read_cache_loaned_bytes, loaned);
         let disk = config.disk_cache_config().unwrap().unwrap();
         std::fs::set_permissions(&disk.directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let prepared = PreparedDiskCache::prepare(&disk.directory, disk.max_bytes).unwrap();
+        // This epoch test specifically covers old loans entering a recovered
+        // Ready tier, rather than triggering the separate fresh-media startup.
+        let resources = geesefs_rs::budget::Budget::new(32 * MIB).unwrap();
+        let cache = geesefs_rs::disk_cache::DiskCache::open(prepared, &resources)
+            .await
+            .unwrap();
+        cache.close(DEADLINE).await.unwrap();
+        drop(cache);
         let prepared = PreparedDiskCache::prepare(&disk.directory, disk.max_bytes).unwrap();
         tokio::time::timeout(DEADLINE, fs.attach_disk_cache(prepared))
             .await

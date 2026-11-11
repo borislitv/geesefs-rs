@@ -9,6 +9,112 @@ use support::{DEADLINE, MIB, block, key, open};
 pub use support::{budget, disk_cache, error};
 
 #[tokio::test]
+async fn funded_read_queue_releases_cancelled_and_expired_waiters() {
+    use disk_cache::{READ_WAIT_BYTES, ReadFallback};
+    let dir = support::directory();
+    let resources = Budget::new(32 * MIB).unwrap();
+    let credit = Budget::new(5 * READ_WAIT_BYTES).unwrap();
+    let cache = open(dir.path(), &resources).await;
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        held.push(
+            cache
+                .read_admission(credit.try_reserve(READ_WAIT_BYTES).unwrap(), DEADLINE)
+                .await
+                .unwrap(),
+        );
+    }
+    let queued = {
+        let cache = cache.clone();
+        let credit = credit.try_reserve(READ_WAIT_BYTES).unwrap();
+        tokio::spawn(async move { cache.read_admission(credit, DEADLINE).await })
+    };
+    tokio::time::timeout(DEADLINE, async {
+        while cache.stats().queued_reads != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    queued.abort();
+    assert!(queued.await.is_err());
+    assert_eq!(cache.stats().queued_reads, 0);
+    assert_eq!(credit.used(), 4 * READ_WAIT_BYTES);
+    let result = cache
+        .read_admission(
+            credit.try_reserve(READ_WAIT_BYTES).unwrap(),
+            std::time::Duration::from_millis(10),
+        )
+        .await;
+    assert!(matches!(result, Err(ReadFallback::Timeout)));
+    assert_eq!(cache.stats().queued_reads, 0);
+    assert_eq!(credit.used(), 4 * READ_WAIT_BYTES);
+    assert_eq!(
+        cache.stats().read_operations.count,
+        0,
+        "key-free waiters perform no backend I/O"
+    );
+    drop(held);
+    assert_eq!(credit.used(), 0);
+    assert_eq!(cache.stats().active_read_jobs, 0);
+    let slot = cache
+        .read_admission(credit.try_reserve(READ_WAIT_BYTES).unwrap(), DEADLINE)
+        .await
+        .unwrap();
+    drop(slot);
+    cache.close(DEADLINE).await.unwrap();
+}
+
+#[tokio::test]
+async fn timed_out_funded_read_keeps_bookkeeping_and_output_until_io_finishes() {
+    use disk_cache::{READ_WAIT_BYTES, ReadFallback};
+    use std::sync::atomic::Ordering;
+    let dir = support::directory();
+    let resources = Budget::new(32 * MIB).unwrap();
+    let credit = Budget::new(READ_WAIT_BYTES).unwrap();
+    let output = Budget::new(3).unwrap();
+    let gate = support::IoGate::new();
+    let cache = support::gated(dir.path(), &resources, gate.clone()).await;
+    assert_eq!(
+        cache.try_demote(key(0, 3), block(b"abc")),
+        Demotion::Admitted
+    );
+    cache.drain(DEADLINE).await.unwrap();
+    gate.hold_reads.store(true, Ordering::SeqCst);
+    let slot = cache
+        .read_admission(
+            credit.try_reserve(READ_WAIT_BYTES).unwrap(),
+            std::time::Duration::from_millis(20),
+        )
+        .await
+        .unwrap();
+    let result = slot
+        .read_reserved(&key(0, 3), output.try_reserve(3).unwrap())
+        .await;
+    assert!(matches!(result, Err(ReadFallback::Timeout)));
+    tokio::time::timeout(DEADLINE, gate.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    assert_eq!(credit.used(), READ_WAIT_BYTES);
+    assert_eq!(output.used(), 3);
+    assert_eq!(cache.stats().active_read_jobs, 1);
+    assert!(cache.close(std::time::Duration::ZERO).await.is_err());
+    gate.hold_reads.store(false, Ordering::SeqCst);
+    gate.release.add_permits(1);
+    cache.close(DEADLINE).await.unwrap();
+    assert_eq!(credit.used(), 0);
+    assert_eq!(output.used(), 0);
+    assert_eq!(cache.stats().read_operations.count, 1);
+    assert_eq!(
+        cache.stats().hits,
+        0,
+        "late completion is not a delivered hit"
+    );
+}
+
+#[tokio::test]
 async fn adapter_observations_follow_queued_spill_and_completed_reads() {
     use std::{os::unix::fs::MetadataExt, sync::atomic::Ordering, time::Instant};
     let dir = support::directory();
@@ -479,10 +585,17 @@ async fn cancelled_read_and_close_keep_admission_and_lock_until_real_io_finishes
         cache.read_block(&key(0, 3), &output).await.is_none(),
         "saturated reads bypass rather than queue a fifth job"
     );
+    gate.hold_writes.store(true, Ordering::SeqCst);
     assert_eq!(
         cache.try_demote(key(3, 3), block(b"def")),
-        Demotion::Dropped
+        Demotion::Admitted,
+        "saturated readers cannot consume the separately funded spill lane"
     );
+    tokio::time::timeout(DEADLINE, gate.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
     for reader in &readers {
         reader.abort();
     }
@@ -494,7 +607,9 @@ async fn cancelled_read_and_close_keep_admission_and_lock_until_real_io_finishes
         12,
         "cancelled waiter cannot free live output admission"
     );
-    assert_eq!(cache.stats().active_jobs, 4);
+    assert_eq!(cache.stats().active_jobs, 5);
+    assert_eq!(cache.stats().active_read_jobs, 4);
+    assert_eq!(cache.stats().active_spill_jobs, 1);
     assert!(cache.close(std::time::Duration::ZERO).await.is_err());
     assert_eq!(
         cache.stats().read_operations.count,
@@ -505,7 +620,8 @@ async fn cancelled_read_and_close_keep_admission_and_lock_until_real_io_finishes
     assert!(PreparedDiskCache::prepare(dir.path(), (16 * MIB) as u64).is_err());
     assert!(resources.used() > 0);
     gate.hold_reads.store(false, Ordering::SeqCst);
-    gate.release.add_permits(4);
+    gate.hold_writes.store(false, Ordering::SeqCst);
+    gate.release.add_permits(16);
     cache.close(DEADLINE).await.unwrap();
     assert_eq!(cache.status().state(), State::Closed);
     assert_eq!(cache.stats().read_operations.count, 4);

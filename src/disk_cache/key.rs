@@ -13,7 +13,11 @@ pub const MAX_IDENTITY_BYTES: usize = 16 * 1024;
 pub const MAX_PAYLOAD_BYTES: usize = 128 * 1024;
 const KEY_HEADER: usize = 34;
 // Foyer header (36), complete bounded key, value envelope (12), payload.
-pub(crate) const RECORD_CAP: usize = 36 + MAX_IDENTITY_BYTES + 12 + MAX_PAYLOAD_BYTES;
+const MAX_ENCODED_RECORD_BYTES: usize = 36 + MAX_IDENTITY_BYTES + 12 + MAX_PAYLOAD_BYTES;
+// Foyer uses one limit for raw addr.len on reads AND page-rounded buffer
+// admission on writes/reinsertion. The storage envelope must cover both;
+// decoded identity/payload bounds remain independently enforced below.
+pub(crate) const RECORD_CAP: usize = super::funding::rounded(MAX_ENCODED_RECORD_BYTES);
 const KEY_MAGIC: &[u8; 4] = b"GLK1";
 const VALUE_MAGIC: &[u8; 4] = b"GLV1";
 
@@ -224,12 +228,25 @@ mod tests {
         assert!(
             matches!(DiskKey::decode(&mut Header(std::io::Cursor::new(key))), Err(e) if e.kind() == foyer::ErrorKind::OutOfRange)
         );
-        let mut value = VALUE_MAGIC.to_vec();
-        value.extend_from_slice(&((MAX_PAYLOAD_BYTES + 1) as u32).to_le_bytes());
-        value.extend_from_slice(&0_u32.to_le_bytes());
+        let mut one_over = vec![0; KEY_HEADER];
+        one_over[..4].copy_from_slice(KEY_MAGIC);
+        one_over[4..6].copy_from_slice(&16_349_u16.to_le_bytes());
+        for i in [6, 8] {
+            one_over[i..i + 2].copy_from_slice(&1_u16.to_le_bytes());
+        }
+        one_over[10..18].copy_from_slice(&131_072_u64.to_le_bytes());
+        one_over[26..30].copy_from_slice(&131_072_u32.to_le_bytes());
         assert!(
-            matches!(DiskValue::decode(&mut Header(std::io::Cursor::new(value))), Err(e) if e.kind() == foyer::ErrorKind::OutOfRange)
+            matches!(DiskKey::decode(&mut Header(std::io::Cursor::new(one_over))), Err(e) if e.kind() == foyer::ErrorKind::OutOfRange)
         );
+        for len in [0, (MAX_PAYLOAD_BYTES + 1) as u32, u32::MAX] {
+            let mut value = VALUE_MAGIC.to_vec();
+            value.extend_from_slice(&len.to_le_bytes());
+            value.extend_from_slice(&0_u32.to_le_bytes());
+            assert!(
+                matches!(DiskValue::decode(&mut Header(std::io::Cursor::new(value))), Err(e) if e.kind() == foyer::ErrorKind::OutOfRange)
+            );
+        }
         let key = DiskKey::new(b"n", b"k", b"e", 9, 0, 9).unwrap();
         let mut bytes = vec![];
         key.encode(&mut bytes).unwrap();

@@ -775,7 +775,7 @@ impl Trace {
     ) {
         self.record(level, event, errno, reason, None);
     }
-    fn debug(&self, event: &'static str, details: impl FnOnce() -> serde_json::Value) {
+    pub(crate) fn debug(&self, event: &'static str, details: impl FnOnce() -> serde_json::Value) {
         if self.inner.log_level == DiagnosticLogLevel::Debug {
             self.record(
                 DiagnosticLogLevel::Debug,

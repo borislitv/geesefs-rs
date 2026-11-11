@@ -7,6 +7,6 @@ mod store;
 pub use funding::Funding;
 pub use key::{DiskKey, MAX_IDENTITY_BYTES, MAX_PAYLOAD_BYTES};
 pub use store::{
-    Demotion, DiskCache, DiskCacheStatus, LatencyStats, PreparedDiskCache, StartupStats, State,
-    Stats,
+    Demotion, DiskCache, DiskCacheStatus, FundedPreparedDiskCache, LatencyStats, PreparedDiskCache,
+    READ_WAIT_BYTES, ReadAdmission, ReadFallback, StartupStats, State, Stats,
 };

@@ -5,6 +5,40 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-11: preserve funded warm-L2 reads under contention
+
+Four recovered readers could bypass valid disk records when read/spill slots or
+namespace/inode try-locks contended. Required windows now wait on caller-funded,
+key-free FIFO admission; read and spill owners use their independently funded
+limits. Bounded blocking eligibility acquires namespace and inode guards
+sequentially and revalidates names after the inode wait. Actual work retains
+funding after timeout/cancellation. Each block lookup keeps its own deadline;
+slow source gaps do not prematurely expire later warm lookups.
+
+Proven-new media defers engine/file creation until eligible capacity pressure,
+while existing inventory still recovers eagerly. Funding/lock ownership transfers
+without release/reacquire. A separate maximum-record regression corrects the
+raw-versus-page-rounded engine cap without relaxing decoded identity/payload
+bounds. Reuse identical full/fragment keys instead of allocating them twice.
+
+Deterministic contention, real parent rename and slow-prefix regressions fail
+under independently reintroduced faults. Native large warm reads and capacity
+reuse pass representative gates; repeated-mount performance acceptance is separate.
+
+## 2026-11-11: qualify Range fixtures and fixed-work comparisons
+
+Moto materialized the entire object before Range slicing, distorting large-read
+preparation. Reuse the existing supported SeaweedFS fixture for measured S3 work;
+retain Moto for functional fault injection. Verify byte ranges, conditional
+requests, metadata and writer operations, and account provider costs separately.
+
+Independent harness review exposed success after a final source-receipt error,
+per-arm timed repetition and I/O counters extending into an untimed eviction
+probe. Fail closed while retaining results; enforce identical declared operation
+plans; measure probe I/O separately. Fixed-capacity preparation checks every byte
+and actual region reuse. Original failed runs remain preserved independently of
+the corrected protocol and subsequent results.
+
 ## 2026-11-10: demote eligible byte-pressure victims before loans
 
 A real-file regression reading 48 MiB with a 32-MiB payload budget retained

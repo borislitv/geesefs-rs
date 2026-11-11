@@ -5,16 +5,22 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
-## Metadata compaction and persistent L2 — 2026-11-10
+## Metadata compaction and persistent L2 — 2026-11-11
 
-Default and system-allocator configurations pass 480 active tests, with 24
+Default and system-allocator configurations pass 499 active tests, with 24
 explicit opt-in native/diagnostic entries, plus denied-warning Clippy. Meaningful
 regressions cover canonical/key owner lifetime, COW baseline/conflict handling,
 postcommit metadata credit, stale-size admission, byte-pressure demotion, genuine
 loan revocation and inherited directory-lock release. The allocation matrix uses
 default jemalloc separately; an all-feature run is not that allocator evidence.
+Further real-engine tests cover lazy new-media creation, maximum rounded record
+admission, funded FIFO reads, actual cancelled-worker ownership, namespace/inode
+contention, a parent rename during the wait and a slow missing prefix before warm
+lookups. Independent fault controls fail the intended assertions before restoring
+the reviewed source; successful setup alone is not failure sensitivity.
 
 ```bash
+timeout 1800s cargo +1.99.1 test --locked --all-targets --no-fail-fast
 timeout 1800s cargo +1.99.1 test --locked --all-targets --all-features --no-fail-fast
 timeout 1800s cargo +1.99.1 clippy --locked --all-targets --all-features -- -D warnings
 timeout 60s cargo +1.99.1 fmt --all -- --check
@@ -22,16 +28,25 @@ timeout 180s python3 -m unittest discover -s bench -p 'test_*.py'
 ```
 
 Put the documented Python 3.12 fixture environment on PATH: Rust tests invoke
-Python subprocesses too. The latest benchmark harness has 126 passing tests;
-the project Python suite has 16. The public-source audit checks 388 resolved
+Python subprocesses too. The benchmark suite has 161 tests: two require an
+explicit locally verified `GEESEFS_WEED_BINARY` and otherwise skip. The native
+enabled run passes all 161 without skips. The project Python suite has 16 tests.
+The public-source audit checks 388 resolved
 packages, including only the exact approved Foyer fork/revision/package set.
 
 The opt-in disk recovery tests document their isolated ext4 block/inode ENOSPC
 and permission-error command. The mounted harness `bench/disk_cache.py` requires
 frozen binaries/manifest, a delegated cgroup, nginx/rsync and an explicit deadline.
+Measured workloads require `--fixture-weed` for the qualified SeaweedFS 4.51
+fixture; Moto remains functional/fault-only. Declare fixed cycles/bytes/operations
+identically across baseline/candidate/A-A mounts. Capacity preparation is outside
+the measured interval; the later eviction witness probe has separate I/O counters.
+Final source/hash errors invalidate success and exit nonzero while preserving rows.
 Unavailable prerequisites fail rather than count as a successful skip. The
-small-object native protocol passes, but the [full 456-case qualification](performance-disk-cache.md)
-does not. [Metadata allocation results](performance-metadata-compaction.md) are
+small-object protocol and 16 corrected large-read/eviction/writer representatives
+pass, but the [earlier full 456-case qualification](performance-disk-cache.md)
+failed. Representative passes do not supersede a new frozen paired matrix.
+[Metadata allocation results](performance-metadata-compaction.md) are
 not substituted for that missing performance acceptance.
 
 ## Bounded subtree listing — 2026-11-09 (unreleased)

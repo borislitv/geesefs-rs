@@ -22,8 +22,8 @@ use crate::{
 };
 use fuser::{FileAttr, FileType};
 use futures_util::{
-    StreamExt,
-    future::{Either, ready},
+    FutureExt, StreamExt,
+    future::{BoxFuture, Either, Shared, ready},
     stream::FuturesUnordered,
 };
 use tokio::sync::{Notify, RwLock, Semaphore};
@@ -31,15 +31,16 @@ use tokio::sync::{Notify, RwLock, Semaphore};
 pub struct Filesystem {
     pub config: Arc<Config>,
     pub store: Arc<dyn Store>,
-    pub namespace: Mutex<Namespace>,
+    pub namespace: Arc<Mutex<Namespace>>,
     inodes: Arc<crate::namespace::InodeIndex>,
     pub ingress: Budget,
     metadata: crate::metadata_budget::MetadataBudget,
     data: Budget,
     cache: crate::cache::ReadCache,
-    disk: Mutex<DiskTier>,
+    disk: Arc<Mutex<DiskTier>>,
     disk_funding_bytes: usize,
     disk_read_bytes: std::sync::atomic::AtomicU64,
+    disk_decisions: Arc<[std::sync::atomic::AtomicU64; 16]>,
     cache_published: Notify,
     flush_lane: Budget,
     flush_activity: Arc<RwLock<()>>,
@@ -381,12 +382,25 @@ pub struct EffectiveBudgets {
     pub metadata_resolution_jobs_in_use: usize,
 }
 
+type DiskStartup = Shared<BoxFuture<'static, std::result::Result<(), Arc<str>>>>;
+
 struct DiskTier {
     namespace: Option<[u8; 32]>,
     bypass: Option<crate::backend::cache_scope::CacheBypass>,
     status: Option<crate::disk_cache::DiskCacheStatus>,
     cache: Option<crate::disk_cache::DiskCache>,
     attaching: bool,
+    deferred: Option<crate::disk_cache::FundedPreparedDiskCache>,
+    startup: Option<DiskStartup>,
+    closing: bool,
+}
+
+impl Drop for DiskTier {
+    fn drop(&mut self) {
+        if let Some(deferred) = self.deferred.take() {
+            deferred.close();
+        }
+    }
 }
 
 pub fn not_found(error: &Error) -> bool {
@@ -438,7 +452,11 @@ impl Filesystem {
             .saturating_sub(MAX_IO)
             .min(u32::MAX as usize - MAX_IO);
         if self.disk_funding_bytes > 0 {
-            window = window.saturating_sub(2 * read::READ_BLOCK_BYTES) / 2;
+            // Source/disk output plus caller-funded queue bookkeeping, including
+            // alignment at both ends. Never expose deferred/read-work credit.
+            let block = read::READ_BLOCK_BYTES;
+            let wait = crate::disk_cache::READ_WAIT_BYTES;
+            window = window.saturating_sub(2 * (block + wait)) / (2 * block + wait) * block;
         }
         EffectiveBudgets {
             payload_limit_bytes: self.ingress.limit() + self.data.limit() + self.flush_lane.limit(),
@@ -534,7 +552,7 @@ impl Filesystem {
         self: &Arc<Self>,
         prepared: crate::disk_cache::PreparedDiskCache,
     ) -> Result<()> {
-        {
+        let startup = {
             let mut disk = self.disk.lock().unwrap();
             if self.config.disk_cache_dir.is_none() || disk.attaching || self.is_closing() {
                 return Err(Error::Config(
@@ -555,13 +573,34 @@ impl Filesystem {
                 ));
             }
             disk.status = Some(prepared.status());
-        }
-        let fs = self.clone();
-        tokio::spawn(async move {
-            let cache = crate::disk_cache::DiskCache::open(prepared, &fs.data).await?;
+            let funded = prepared.fund(&self.data)?;
+            if !funded.has_inventory() {
+                disk.deferred = Some(funded);
+                return Ok(());
+            }
+            self.start_disk_cache(&mut disk, funded)
+        };
+        startup
+            .await
+            .map_err(|error| Error::Config(error.to_string()))
+    }
+
+    fn start_disk_cache(
+        &self,
+        disk: &mut DiskTier,
+        funded: crate::disk_cache::FundedPreparedDiskCache,
+    ) -> DiskStartup {
+        let owner = self.disk.clone();
+        let deadline = self.config.request_timeout;
+        // Spawn now, not when a waiter polls the shared completion. No victim,
+        // loan or payload backing is retained by this single startup owner.
+        let task = tokio::spawn(async move {
+            let cache = crate::disk_cache::DiskCache::open_funded(funded)
+                .await
+                .map_err(|error| Arc::<str>::from(error.to_string()))?;
             let closing = {
-                let mut disk = fs.disk.lock().unwrap();
-                if fs.is_closing() {
+                let mut disk = owner.lock().unwrap();
+                if disk.closing {
                     true
                 } else {
                     disk.cache = Some(cache.clone());
@@ -569,20 +608,52 @@ impl Filesystem {
                 }
             };
             if closing {
-                cache.close(fs.config.request_timeout).await?;
+                cache
+                    .close(deadline)
+                    .await
+                    .map_err(|error| Arc::<str>::from(error.to_string()))?;
+            }
+            Ok(())
+        });
+        let startup = async move {
+            task.await
+                .map_err(|error| Arc::<str>::from(error.to_string()))?
+        }
+        .boxed()
+        .shared();
+        disk.startup = Some(startup.clone());
+        startup
+    }
+
+    fn start_disk_for_capacity(&self, node: &Inode, generation: u64) {
+        let deferred = self.disk.lock().unwrap().deferred.is_some();
+        if !deferred || !self.disk_eligible(node, generation) {
+            return;
+        }
+        let mut disk = self.disk.lock().unwrap();
+        if !disk.closing
+            && let Some(funded) = disk.deferred.take()
+        {
+            drop(self.start_disk_cache(&mut disk, funded));
+        }
+    }
+
+    pub async fn drain_disk_cache(&self, deadline: Duration) -> Result<()> {
+        let startup = self.disk.lock().unwrap().startup.clone();
+        tokio::time::timeout(deadline, async {
+            if let Some(startup) = startup {
+                startup
+                    .await
+                    .map_err(|error| Error::Config(error.to_string()))?;
+            }
+            let cache = self.disk.lock().unwrap().cache.clone();
+            if let Some(cache) = cache {
+                cache.drain(deadline).await?;
             }
             Ok(())
         })
         .await
-        .map_err(|_| Error::Cancelled)?
-    }
-
-    pub async fn drain_disk_cache(&self, deadline: Duration) -> Result<()> {
-        let cache = self.disk.lock().unwrap().cache.clone();
-        if let Some(cache) = cache {
-            cache.drain(deadline).await?;
-        }
-        Ok(())
+        .map_err(|_| Error::Timeout("L2 drain"))?
     }
 
     fn disk_read(&self, node: &Inode, generation: u64) -> Option<read::DiskRead> {
@@ -590,47 +661,222 @@ impl Filesystem {
             let disk = self.disk.lock().unwrap();
             (disk.cache.clone()?, disk.namespace?)
         };
+        self.disk_eligible(node, generation)
+            .then_some(read::DiskRead { cache, namespace })
+    }
+
+    fn disk_eligible(&self, node: &Inode, generation: u64) -> bool {
+        self.check_disk_eligible(node, generation).is_ok()
+    }
+
+    pub fn disk_read_decisions(&self) -> [u64; 16] {
+        std::array::from_fn(|index| self.disk_decisions[index].load(Ordering::Relaxed))
+    }
+
+    fn record_disk_decision(&self, reason: read::DiskDecision) {
+        self.disk_decisions[reason as usize].fetch_add(1, Ordering::Relaxed);
+        if let Some(trace) = metrics::context() {
+            trace.debug(
+                "l2_read_eligibility",
+                || serde_json::json!({"reason": reason.label()}),
+            );
+        }
+    }
+
+    async fn disk_read_window(
+        &self,
+        node: Arc<Inode>,
+        generation: u64,
+        snapshot: Arc<write::Snapshot>,
+        charge: &mut crate::budget::Reservation,
+        deadline: tokio::time::Instant,
+    ) -> Option<read::DiskRead> {
         if self.is_closing() {
+            self.record_disk_decision(read::DiskDecision::Closing);
             return None;
+        }
+        let (cache, namespace) = {
+            let disk = self.disk.lock().unwrap();
+            let Some(cache) = disk.cache.clone() else {
+                self.record_disk_decision(read::DiskDecision::Unavailable);
+                return None;
+            };
+            let Some(namespace) = disk.namespace else {
+                self.record_disk_decision(read::DiskDecision::NamespaceIdentity);
+                return None;
+            };
+            (cache, namespace)
+        };
+        // Borrow one existing per-block bookkeeping credit for qualification.
+        // Only four funded read-work owners can enter the blocking executor;
+        // the remaining windows wait key-free on the existing FIFO semaphore.
+        let slot = match cache
+            .read_admission(
+                charge.split(crate::disk_cache::READ_WAIT_BYTES),
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+            )
+            .await
+        {
+            Ok(slot) => slot,
+            Err(reason) => {
+                self.record_disk_decision(read::DiskDecision::Admission);
+                read::debug_disk_fallback(&cache, reason);
+                return None;
+            }
+        };
+        let ns = self.namespace.clone();
+        let config = self.config.clone();
+        let counts = self.disk_decisions.clone();
+        let trace = metrics::context();
+        let qualified = slot
+            .qualify(move || {
+                let record = |reason: read::DiskDecision| {
+                    counts[reason as usize].fetch_add(1, Ordering::Relaxed);
+                    if let Some(trace) = &trace {
+                        trace.debug(
+                            "l2_read_eligibility",
+                            || serde_json::json!({"reason": reason.label()}),
+                        );
+                    }
+                };
+                // No namespace guard is held while waiting for an inode, and no
+                // guard escapes into disk/source I/O. The canonical snapshot remains
+                // charged to its original metadata owner; no identity Vec is made.
+                let check_namespace = || {
+                    let ns = match ns.try_lock() {
+                        Ok(ns) => ns,
+                        Err(std::sync::TryLockError::WouldBlock) => {
+                            record(read::DiskDecision::NamespaceContended);
+                            ns.lock().map_err(|_| read::DiskDecision::LockPoisoned)?
+                        }
+                        Err(_) => return Err(read::DiskDecision::LockPoisoned),
+                    };
+                    Self::check_disk_namespace(&ns, &snapshot.key)
+                };
+                check_namespace()?;
+                let state = match node.state.try_lock() {
+                    Ok(state) => state,
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        record(read::DiskDecision::InodeContended);
+                        node.state
+                            .lock()
+                            .map_err(|_| read::DiskDecision::LockPoisoned)?
+                    }
+                    Err(_) => return Err(read::DiskDecision::LockPoisoned),
+                };
+                Self::check_disk_state(&config, &state, generation)?;
+                if state.key != snapshot.key || state.size != snapshot.size {
+                    return Err(read::DiskDecision::Generation);
+                }
+                drop(state);
+                // A parent MoveLease can begin while the child inode is held.
+                // Revalidate names after that wait, without nesting the locks.
+                check_namespace()
+            })
+            .await;
+        match qualified {
+            Ok((slot, decision)) => {
+                charge.merge(slot.release_credit());
+                self.record_disk_decision(match decision {
+                    Ok(()) => read::DiskDecision::Eligible,
+                    Err(reason) => reason,
+                });
+                decision.ok().map(|()| read::DiskRead { cache, namespace })
+            }
+            Err(reason) => {
+                // Actual blocked work retains its credit. Source output was
+                // independently admitted and does not reclaim that live owner.
+                self.record_disk_decision(read::DiskDecision::Admission);
+                read::debug_disk_fallback(&cache, reason);
+                None
+            }
+        }
+    }
+
+    fn check_disk_eligible(
+        &self,
+        node: &Inode,
+        generation: u64,
+    ) -> std::result::Result<(), read::DiskDecision> {
+        if self.is_closing() {
+            return Err(read::DiskDecision::Closing);
         }
         // Optional work never waits for namespace/inode ownership. In particular
         // capacity eviction cannot hold up a FIFO reader or a writer's loan.
-        let ns = self.namespace.try_lock().ok()?;
-        let state = node.state.try_lock().ok()?;
-        if state.deleted
-            || state.version != state.durable
+        let ns = self
+            .namespace
+            .try_lock()
+            .map_err(|_| read::DiskDecision::NamespaceContended)?;
+        let state = node
+            .state
+            .try_lock()
+            .map_err(|_| read::DiskDecision::InodeContended)?;
+        Self::check_disk_state(&self.config, &state, generation)?;
+        Self::check_disk_namespace(&ns, &state.key)
+    }
+
+    fn check_disk_state(
+        config: &Config,
+        state: &State,
+        generation: u64,
+    ) -> std::result::Result<(), read::DiskDecision> {
+        if state.deleted {
+            return Err(read::DiskDecision::Deleted);
+        }
+        if state.version != state.durable
             || !state.extents.is_empty()
-            || state.pending_upload.is_some()
+            || state.visible_remote_size < state.size
+        {
+            return Err(read::DiskDecision::Dirty);
+        }
+        if state.pending_upload.is_some()
             || state.rename_target.is_some()
             || state.data_key.is_some()
-            || file_type(state.mode) != FileType::RegularFile
-            || state
-                .remote
-                .as_ref()
-                .is_none_or(|head| head.size != state.size || head.etag.is_empty())
-            || state.visible_remote_size < state.size
-            || read::generation(state.version, state.remote.as_ref()) != generation
-            || !self
-                .config
-                .disk_cache_regex
-                .as_ref()?
-                .matches(&format!("/{}", state.key))
-            || state
-                .key
-                .match_indices('/')
-                .map(|(end, _)| end)
-                .chain(std::iter::once(state.key.len()))
-                .any(|end| {
-                    let prefix = &state.key[..end];
-                    ns.moving.contains(prefix)
-                        || ns.pending_moves.contains_key(prefix)
-                        || ns.pending_deletes.contains_key(prefix)
-                        || ns.tombstones.contains_key(prefix)
-                })
         {
-            return None;
+            return Err(read::DiskDecision::Pending);
         }
-        Some(read::DiskRead { cache, namespace })
+        if file_type(state.mode) != FileType::RegularFile {
+            return Err(read::DiskDecision::NotRegular);
+        }
+        if state
+            .remote
+            .as_ref()
+            .is_none_or(|head| head.size != state.size || head.etag.is_empty())
+        {
+            return Err(read::DiskDecision::RemoteIdentity);
+        }
+        if read::generation(state.version, state.remote.as_ref()) != generation {
+            return Err(read::DiskDecision::Generation);
+        }
+        if !config
+            .disk_cache_regex
+            .as_ref()
+            .is_some_and(|regex| regex.matches(&format!("/{}", state.key)))
+        {
+            return Err(read::DiskDecision::Excluded);
+        }
+        Ok(())
+    }
+
+    fn check_disk_namespace(
+        ns: &Namespace,
+        key: &str,
+    ) -> std::result::Result<(), read::DiskDecision> {
+        if key
+            .match_indices('/')
+            .map(|(end, _)| end)
+            .chain(std::iter::once(key.len()))
+            .any(|end| {
+                let prefix = &key[..end];
+                ns.moving.contains(prefix)
+                    || ns.pending_moves.contains_key(prefix)
+                    || ns.pending_deletes.contains_key(prefix)
+                    || ns.tombstones.contains_key(prefix)
+            })
+        {
+            return Err(read::DiskDecision::Pending);
+        }
+        Ok(())
     }
 
     fn demote_capacity(&self, victim: crate::cache::CapacityVictim) {
@@ -640,6 +886,7 @@ impl Filesystem {
         let Ok(node) = self.node(victim.inode) else {
             return;
         };
+        self.start_disk_for_capacity(&node, victim.generation);
         let Some(disk) = self.disk_read(&node, victim.generation) else {
             return;
         };
@@ -724,15 +971,19 @@ impl Filesystem {
                 )
                 .ok();
                 let full_end = read::block_end(block_start, state.size);
-                let full = crate::disk_cache::DiskKey::new(
-                    &disk.namespace,
-                    state.key.as_bytes(),
-                    head.etag.as_bytes(),
-                    state.size,
-                    block_start,
-                    (full_end - block_start) as usize,
-                )
-                .ok();
+                let full = (at != block_start || end != full_end)
+                    .then(|| {
+                        crate::disk_cache::DiskKey::new(
+                            &disk.namespace,
+                            state.key.as_bytes(),
+                            head.etag.as_bytes(),
+                            state.size,
+                            block_start,
+                            (full_end - block_start) as usize,
+                        )
+                        .ok()
+                    })
+                    .flatten();
                 (full, fragment)
             };
             let Some(key) = fragment else {
@@ -854,19 +1105,25 @@ impl Filesystem {
             });
         Ok(Arc::new(Self {
             inodes: namespace.inodes.clone(),
-            namespace: Mutex::new(namespace),
+            namespace: Arc::new(Mutex::new(namespace)),
             ingress: Budget::new(ingress_bytes)?,
             metadata,
             data: Budget::new(data_bytes)?,
-            disk: Mutex::new(DiskTier {
+            disk: Arc::new(Mutex::new(DiskTier {
                 namespace: disk_namespace,
                 bypass,
                 status: None,
                 cache: None,
                 attaching: false,
-            }),
+                deferred: None,
+                startup: None,
+                closing: false,
+            })),
             disk_funding_bytes,
             disk_read_bytes: std::sync::atomic::AtomicU64::new(0),
+            disk_decisions: Arc::new(std::array::from_fn(|_| {
+                std::sync::atomic::AtomicU64::new(0)
+            })),
             cache: crate::cache::ReadCache::with_entry_limit(
                 (data_bytes + flush_bytes - disk_funding_bytes) as u64,
                 config.entry_limit as usize,
@@ -1673,7 +1930,7 @@ impl Filesystem {
         }
         let admission = length
             + if self.disk_funding_bytes > 0 {
-                read::disk_coverage(range.start, range.end, size)
+                read::disk_window_admission(range.start, range.end, size)
             } else {
                 0
             };
@@ -1919,7 +2176,7 @@ impl Filesystem {
                     (if single_buffer { 1 } else { 2 }) * prefetch
                         + length
                         + if single_buffer && self.disk_funding_bytes > 0 {
-                            read::disk_coverage(start, start + prefetch as u64, size)
+                            read::disk_window_admission(start, start + prefetch as u64, size)
                         } else {
                             0
                         },
@@ -1988,7 +2245,26 @@ impl Filesystem {
             cache_key,
             fill,
         } = window;
-        let disk = cache_key.and_then(|(_, generation)| self.disk_read(fill.node(), generation));
+        let deadline = self.config.request_timeout.min(Duration::from_millis(250));
+        let disk = if let Some((_, generation)) = cache_key.filter(|_| {
+            single_buffer
+                && self.disk_funding_bytes > 0
+                && range.start < range.end.min(snapshot.size)
+        }) {
+            self.disk_read_window(
+                fill.node().clone(),
+                generation,
+                snapshot.clone(),
+                &mut charge,
+                tokio::time::Instant::now() + deadline,
+            )
+            .await
+        } else {
+            if self.disk_funding_bytes > 0 {
+                self.record_disk_decision(read::DiskDecision::Window);
+            }
+            None
+        };
         let disk_reserved = single_buffer && self.disk_funding_bytes > 0;
         let chunk = self.effective_budgets().read_parallel_chunk_bytes.max(1);
         let mut output = charge.split(length);
@@ -2025,12 +2301,11 @@ impl Filesystem {
                 }
                 next += amount as u64;
                 let mut owner = charge.split((if single_buffer { 1 } else { 2 }) * amount);
-                let disk_charge = disk_reserved
-                    .then(|| charge.split(read::disk_coverage(at, next, snapshot.size)));
+                let disk_charge = (disk_reserved && disk.is_some())
+                    .then(|| charge.split(read::disk_window_admission(at, next, snapshot.size)));
                 let disk = disk.clone();
                 let node = fill.node().clone();
                 let generation = cache_key.map(|(_, generation)| generation);
-                let deadline = self.config.request_timeout.min(Duration::from_millis(250));
                 let (store, snapshot) = (self.store.clone(), snapshot.clone());
                 let metrics = self.read_metrics.clone();
                 let diagnostics = self.diagnostics.clone();
@@ -2249,12 +2524,15 @@ impl Filesystem {
         if self.config.disk_cache_regex.is_some()
             && let Some(key) = self.cache.loan_candidate()
             && let Ok(node) = self.node(key.0)
-            && let Some(disk) = self.disk_read(&node, key.1)
-            && disk.cache.status().state() == crate::disk_cache::State::Ready
-            && let Some(victim) = self.cache.unloaned_capacity_victim(key)
         {
-            self.demote_capacity(victim);
-            return true;
+            self.start_disk_for_capacity(&node, key.1);
+            if let Some(disk) = self.disk_read(&node, key.1)
+                && disk.cache.status().state() == crate::disk_cache::State::Ready
+                && let Some(victim) = self.cache.unloaned_capacity_victim(key)
+            {
+                self.demote_capacity(victim);
+                return true;
+            }
         }
         // Never wait for optional capacity or lend while an upload/body owns it.
         let loaned = self
@@ -3818,11 +4096,31 @@ impl Filesystem {
 
     pub async fn shutdown(&self) -> Result<()> {
         self.closing.store(true, Ordering::Release);
-        let cache = self.disk.lock().unwrap().cache.clone();
+        let (cache, startup) = {
+            let mut disk = self.disk.lock().unwrap();
+            disk.closing = true;
+            if let Some(deferred) = disk.deferred.take() {
+                deferred.close();
+            }
+            (disk.cache.clone(), disk.startup.clone())
+        };
         let deadline = self.config.request_timeout;
         // Teardown is independently owned before the first writer await. A
         // cancelled/failed flush cannot strand the optional directory lock.
-        let close = cache.map(|cache| tokio::spawn(async move { cache.close(deadline).await }));
+        let close = (cache.is_some() || startup.is_some()).then(|| {
+            tokio::spawn(async move {
+                if let Some(cache) = cache {
+                    cache.close(deadline).await?;
+                }
+                if let Some(startup) = startup {
+                    tokio::time::timeout(Duration::from_secs(120) + deadline, startup)
+                        .await
+                        .map_err(|_| Error::Timeout("L2 startup shutdown"))?
+                        .map_err(|error| Error::Config(error.to_string()))?;
+                }
+                Ok::<_, Error>(())
+            })
+        });
         let result = self.flush_all().await;
         if let Some(close) = close {
             match close.await {

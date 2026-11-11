@@ -28,6 +28,8 @@ import urllib.request
 import urllib.error
 
 import compare
+import capacity_population
+from fixture_accounting import FixtureSampler
 from accounting import cpu_efficiency
 from paired import assess
 
@@ -38,13 +40,23 @@ POPULATION_ROUNDS = 8
 POPULATION_SECONDS = 180
 POPULATION_READ_AHEAD_KIB = 128
 EVICTION_PIPELINE_BYTES = 5 * MIB
+READ_REASONS = ['output_reservation', 'output_coverage', 'state', 'poisoned', 'jobs', 'activity',
+                'timeout', 'join', 'backend_miss', 'backend_error', 'identity', 'output_copy',
+                'generation_before', 'generation_after']
 STATES = ['both_cold', 'l1_hot', 'l2_hot_pagecache_hot', 'l2_hot_pagecache_cold_requested']
 WORKLOADS = ['metadata', 'sequential', 'random', 'concurrent', 'eviction', 'mixed', 'writer_fsync']
 READS = ['sequential', 'random', 'concurrent', 'mixed']
 METRICS = ['throughput', 'p50_ms', 'p95_ms', 'p99_ms', 'rss_peak_bytes', 'rss_steady_bytes',
            'daemon_cpu_seconds', 'client_cpu_seconds', 'cgroup_cpu_seconds',
            'cgroup_peak_bytes', 'cgroup_steady_bytes', 'file_cache_steady_bytes', 'kernel_steady_bytes',
-           'allocator_peak_bytes', 'allocator_steady_bytes']
+            'allocator_peak_bytes', 'allocator_steady_bytes']
+
+
+def invalidate(report):
+    # Preserve individual results/evidence, but a fatal orchestration failure
+    # cannot leave any aggregate success flag set (including --native-only).
+    report.update(qualified=False, native_passed=False, full_matrix_qualified=False,
+                  observed_state_screen_passed=False)
 
 
 def example_manifest():
@@ -53,7 +65,8 @@ def example_manifest():
                 disk_capacity_bytes=256 * MIB, metadata_entries=2048, random_operations=256,
                 random_block_bytes=128 * 1024, concurrency=4, writer_bytes=8 * MIB,
                 cpu_quota_us=200000, cpu_period_us=100000, cgroup_memory_max_mb=2048,
-                minimum_active_seconds=1,
+                 measurement_cycles=8, l1_sequential_cycles=64,
+                 eviction_preparation=capacity_population.protocol(512 * MIB),
                 states=STATES[:], workloads=WORKLOADS[:],
                 disk_metrics=dict(l1_hit_bytes='geesefs_read_cache_hit_bytes_total',
                                    l1_resident_bytes='geesefs_read_cache_bytes',
@@ -88,7 +101,16 @@ def example_manifest():
                                   recent_entries='geesefs_disk_cache_recent_entries',
                                   submission_bytes='geesefs_disk_cache_submission_bytes{scope="queued_and_active"}',
                                   submission_items='geesefs_disk_cache_submission_items{scope="queued_and_active"}',
-                                  active_jobs='geesefs_disk_cache_active_jobs',
+                                   active_jobs='geesefs_disk_cache_active_jobs',
+                                   active_read_jobs='geesefs_disk_cache_active_read_jobs',
+                                   active_spill_jobs='geesefs_disk_cache_active_spill_jobs',
+                                   queued_reads='geesefs_disk_cache_queued_reads',
+                                   **{f'reason_{reason}': f'geesefs_disk_cache_read_fallbacks_total{{reason="{reason}"}}'
+                                      for reason in READ_REASONS},
+                                   state_prepared='geesefs_disk_cache_state{state="prepared"}',
+                                   state_ready='geesefs_disk_cache_state{state="ready"}',
+                                   state_disabled='geesefs_disk_cache_state{state="disabled"}',
+                                   stats_available='geesefs_disk_cache_stats_available',
                                   copy_owned_bytes='geesefs_disk_cache_copy_owned_bytes',
                                   io_read_bytes='geesefs_disk_cache_io_read_bytes_total',
                                   io_write_bytes='geesefs_disk_cache_io_write_bytes_total',
@@ -108,6 +130,8 @@ def example_manifest():
 
 
 def validate(config, pairs, controls):
+    if config.get('diagnostic_debug'):
+        raise ValueError('debug logs are diagnosis-only, not qualification comparisons')
     for name, value in [('pairs', pairs), ('controls', controls)]:
         if type(value) is not int or value < 8:
             raise ValueError(f'{name} requires at least eight independent mounts')
@@ -124,20 +148,27 @@ def validate(config, pairs, controls):
         raise ValueError('require small L1 set, dataset > RAM, L2 capacity > dataset, eviction set > L2')
     if config['random_block_bytes'] >= config['l1_hot_bytes'] or config['eviction_bytes'] > 2 * 1024 ** 3:
         raise ValueError('range must fit every dataset; local fixture bounded at 2 GiB')
+    if config.get('eviction_preparation') != capacity_population.protocol(config['eviction_bytes']):
+        raise ValueError('explicit fixed, matched eviction_preparation protocol required')
     if config.get('states') != STATES or config.get('workloads') != WORKLOADS:
         raise ValueError('explicit complete state/workload matrix required; cold requested is not verified cold')
     mapping = config.get('disk_metrics', {})
     if set(mapping) != set(example_manifest()['disk_metrics']) or any(
-            not isinstance(value, str) or not re.fullmatch(r'[a-zA-Z_:][a-zA-Z0-9_:]*(?:\{(?:scope="queued_and_active"|phase="(?:startup|allocation|recovery)")\})?', value)
+            not isinstance(value, str) or not re.fullmatch(r'[a-zA-Z_:][a-zA-Z0-9_:]*(?:\{(?:scope="queued_and_active"|phase="(?:startup|allocation|recovery)"|state="(?:prepared|ready|disabled)"|reason="[a-z_]+")\})?', value)
             for value in mapping.values()):
         raise ValueError('disk_metrics must explicitly map every required counter/gauge to an exact runtime name')
     if config.get('unavailable_disk_observations') != example_manifest()['unavailable_disk_observations']:
         raise ValueError('unavailable_disk_observations must retain actual adapter instrumentation gaps')
     if not isinstance(config.get('metadata_limit'), str) or not config['metadata_limit']:
         raise ValueError('explicit metadata_limit required independently of payload limit')
-    duration = config.get('minimum_active_seconds')
-    if type(duration) not in (int, float) or not math.isfinite(duration) or not 0 < duration <= 30:
-        raise ValueError('minimum_active_seconds must be finite, positive and <= 30')
+    if 'minimum_active_seconds' in config:
+        raise ValueError('time-driven work is unsupported; declare measurement_cycles instead')
+    if type(config.get('measurement_cycles')) is not int or not 1 <= config['measurement_cycles'] <= 8:
+        raise ValueError('measurement_cycles must predeclare between one and eight fixed warm cycles')
+    if type(config.get('l1_sequential_cycles')) is not int or not 1 <= config['l1_sequential_cycles'] <= 64:
+        raise ValueError('l1_sequential_cycles must predeclare between one and 64 fixed small-read cycles')
+    if type(config.get('writer_files', 1)) is not int or not 1 <= config.get('writer_files', 1) <= 8:
+        raise ValueError('writer_files must predeclare between one and eight files')
     targets = config.get('superiority_targets')
     groups = {f'{name}/{state}' for name in WORKLOADS for state in
               (STATES if name in READS else ['normal']) if not state.endswith('cold_requested')}
@@ -177,8 +208,14 @@ def parse_metrics(text, mapping):
         if len(fields) == 2 and not fields[0].startswith('#'):
             samples[fields[0]] = float(fields[1])
     result = {}
+    lazy = samples.get('geesefs_disk_cache_state{state="prepared"}') == 1 and samples.get('geesefs_disk_cache_stats_available') == 0
     for meaning, name in mapping.items():
         value = samples.get(name)
+        if (value is None and lazy and name.startswith('geesefs_disk_cache_') and meaning not in
+                ['l2_hit_bytes', 'funding_bytes', 'managed_capacity_bytes', 'state_prepared',
+                 'state_ready', 'state_disabled', 'stats_available']):
+            result[meaning] = None  # Absent adapter observation, not fabricated occupancy.
+            continue
         if (meaning == 'opened_file_allocated_bytes' and value is None
                 and samples.get(mapping.get('opened_file_available')) == 0):
             result[meaning] = None
@@ -192,9 +229,17 @@ def parse_metrics(text, mapping):
 def delta(before, after, name):
     if name not in before or name not in after:
         raise RuntimeError(f'missing cache evidence: {name}')
-    if after[name] < before[name]:
+    left = before[name]
+    if left is None and before.get('state_prepared') == 1 and before.get('stats_available') == 0:
+        left = 0  # Proven new/lazy engine has not performed adapter operations.
+    right = after[name]
+    if right is None and after.get('state_prepared') == 1 and after.get('stats_available') == 0:
+        right = 0
+    if left is None or right is None:
+        raise RuntimeError(f'unknown cache evidence: {name}')
+    if right < left:
         raise RuntimeError(f'counter reset within one mount: {name}')
-    return after[name] - before[name]
+    return right - left
 
 
 def verify_state(state, before, after, arm):
@@ -208,6 +253,11 @@ def verify_state(state, before, after, arm):
             raise RuntimeError('L2-hot requested but no observed L2 hit; runtime/eviction/recovery pending')
         if delta(before, after, 'remote_bytes') != 0:
             raise RuntimeError('L2-hot incurred remote payload reads; inventory coverage incomplete')
+    if state == 'l1_hot' or (state.startswith('l2_hot') and arm == 'candidate'):
+        if delta(before, after, 'source_get_attempts') != 0:
+            raise RuntimeError('pure-hot interval incurred source GET attempts')
+        if delta(before, after, 'fuse_reads') <= 0:
+            raise RuntimeError('pure-hot interval did not reach actual FUSE reads')
 
 
 def eviction_probe(path, size):
@@ -336,7 +386,21 @@ def provenance(path, receipt):
         raise RuntimeError('exact build command/toolchain receipt required')
     help_text = integration.command([path, '--help'], capture_output=True, text=True, timeout=10).stdout
     return dict(receipt, path=str(path), help_sha256=hashlib.sha256(help_text.encode()).hexdigest(),
-                linkage='operator-supplied frozen-build receipt; executable bytes independently checked'), help_text
+                 linkage='operator-supplied frozen-build receipt; executable bytes independently checked'), help_text
+
+
+def runtime_sources(receipt):
+    """Verify an explicit dirty-source build without modifying any VCS state."""
+    expected = receipt.get('runtime_source_sha256')
+    if not isinstance(expected, dict) or not expected:
+        raise RuntimeError('explicit complete runtime_source_sha256 build receipt required')
+    names = {str(path.relative_to(ROOT)) for path in (ROOT / 'src').rglob('*.rs')} | {'Cargo.toml', 'Cargo.lock'}
+    if set(expected) != names:
+        raise RuntimeError('runtime source receipt must cover all Rust sources and Cargo inputs')
+    actual = {name: integration.sha_file(ROOT / name) for name in sorted(names)}
+    if actual != expected:
+        raise RuntimeError('runtime source hashes differ from executable build receipt; frozen rebuild required')
+    return actual
 
 
 def sample_endpoint(port, mapping):
@@ -350,8 +414,12 @@ def native_snapshot(port, config, output, label, require_adapter=True):
         text = response.read(2 * MIB).decode()
     (output / (label + '-metrics.txt')).write_text(text)
     mapping = config['disk_metrics'] if require_adapter else {
-        key: config['disk_metrics'][key] for key in ['l1_hit_bytes', 'remote_bytes', 'l1_resident_bytes', 'l1_loaned_bytes']}
+        key: config['disk_metrics'][key] for key in ['l1_hit_bytes', 'remote_bytes', 'l1_resident_bytes', 'l1_loaned_bytes',
+            'state_prepared', 'state_ready', 'state_disabled', 'stats_available', 'funding_bytes', 'managed_capacity_bytes']}
     values = parse_metrics(text, mapping)
+    if values.get('state_prepared') == 1 and values.get('stats_available') == 0:
+        values['known_engine_io'] = dict(read_bytes=0, write_bytes=0,
+            scope='explicit lazy Prepared with no attached adapter; not fabricated adapter gauges')
     if not require_adapter:
         values.update(parse_metrics(text, dict(state_bypass='geesefs_disk_cache_state{state="bypass"}',
             stats_available='geesefs_disk_cache_stats_available')))
@@ -360,9 +428,14 @@ def native_snapshot(port, config, output, label, require_adapter=True):
     enabled = parse_metrics(text, {'enabled': 'geesefs_diagnostics_enabled'})['enabled']
     if enabled != 1:
         raise RuntimeError('native GET-attempt verification requires enabled diagnostics')
-    values.update(parse_metrics(text, dict(fuse_reads='geesefs_fuse_replies_total{opcode="read",errno="OK"}')))
+    values['fuse_reads'] = sum(float(line.split()[1]) for line in text.splitlines()
+        if line.startswith('geesefs_fuse_replies_total{') and 'opcode="read"' in line and 'errno="OK"' in line)
     values['source_get_attempts'] = sum(float(line.split()[1]) for line in text.splitlines()
         if line.startswith('geesefs_s3_attempts_total{') and 'operation="get"' in line)
+    values['cancelled_phases'] = sum(float(line.split()[1]) for line in text.splitlines()
+        if line.startswith('geesefs_stage_completions_total{') and 'outcome="cancelled"' in line)
+    values['diagnostic_logs_dropped'] = sum(float(line.split()[1]) for line in text.splitlines()
+        if line.startswith('geesefs_diagnostic_logs_dropped_total '))
     (output / (label + '-metrics.json')).write_text(json.dumps(values, indent=2) + '\n')
     return values
 
@@ -410,6 +483,37 @@ def mixed(path, config):
                 operations=len(calls), elapsed_seconds=elapsed, latencies_ms=calls, **latency_percentiles(calls))
 
 
+def operation_plan(config, workload, state):
+    cycles = config['measurement_cycles']
+    if type(cycles) is not int or not 1 <= cycles <= 8:
+        raise ValueError('fixed measurement_cycles must be an integer between one and eight')
+    # Cold observations retain one pass. Pressure and writers always perform one
+    # pass; repeating mutation/fsync or refreshing the witness changes contract.
+    if workload in ['eviction', 'writer_fsync'] or state == 'both_cold' or state.endswith('cold_requested'):
+        cycles = 1
+    elif workload == 'sequential' and state == 'l1_hot':
+        cycles = config['l1_sequential_cycles']
+        if type(cycles) is not int or not 1 <= cycles <= 64:
+            raise ValueError('fixed l1_sequential_cycles must be an integer between one and 64')
+    if workload in ['sequential', 'eviction']:
+        transferred = config['dataset_bytes']
+        operations = (transferred + MIB - 1) // MIB
+    elif workload == 'metadata':
+        transferred, operations = 0, config['metadata_entries']
+    elif workload in ['random', 'concurrent', 'mixed']:
+        operations = config['random_operations'] * (config['concurrency'] if workload == 'concurrent' else 1)
+        transferred = operations * config['random_block_bytes']
+    elif workload == 'writer_fsync':
+        transferred = config['writer_bytes'] * config.get('writer_files', 1)
+        operations = ((config['writer_bytes'] + MIB - 1) // MIB) * config.get('writer_files', 1)
+    else:
+        raise ValueError(f'unknown fixed workload: {workload}')
+    return dict(workload=workload, state=state, cycles=cycles, dataset_bytes=config['dataset_bytes'],
+                random_operations=config['random_operations'], random_block_bytes=config['random_block_bytes'],
+                concurrency=config['concurrency'], seed=1729, writer_files=config.get('writer_files', 1),
+                bytes=transferred * cycles, operations=operations * cycles)
+
+
 def worker_main():
     import boto3
     from botocore.config import Config
@@ -420,6 +524,8 @@ def worker_main():
                           config=Config(connect_timeout=3, read_timeout=30, retries={'max_attempts': 1}))
     try:
         path = Path(spec['path'])
+        if spec['name'] == 'eviction':
+            path = path / 'capacity-pressure'
         if spec['state'] == 'l1_hot':
             compare.workload(path, 'sequential', spec['config'], client, spec['bucket'],
                              spec['prefix'], spec['endpoint'], True, spec['expected_sha'])
@@ -427,8 +533,9 @@ def worker_main():
         print(json.dumps({'ready': True}), flush=True)
         sys.stdin.readline()
         from metrics import latency_percentiles
+        plan = operation_plan(spec['config'], spec['name'], spec['state'])
         started, calls, transferred, cycles = time.perf_counter(), [], 0, 0
-        while True:
+        for _ in range(plan['cycles']):
             if spec['name'] in READS + ['eviction']:
                 drop_client_pages(path)
             metrics = (mixed(path, spec['config']) if spec['name'] == 'mixed' else
@@ -437,13 +544,14 @@ def worker_main():
             calls.extend(metrics['latencies_ms'])
             transferred += metrics['bytes']
             cycles += 1
-            if (spec['state'].endswith('cold_requested') or spec['state'] == 'both_cold'
-                    or time.perf_counter() - started >= spec['config']['minimum_active_seconds']):
-                break
         elapsed = time.perf_counter() - started
+        if transferred != plan['bytes'] or len(calls) != plan['operations']:
+            raise RuntimeError('observed byte/operation counts differ from the fixed operation plan')
         metrics.update(bytes=transferred, operations=len(calls), elapsed_seconds=elapsed,
                        throughput=(transferred or len(calls)) / elapsed, cycles=cycles,
-                       independent_mounts=1, latencies_ms=calls, latency_variance_ms2=statistics.pvariance(calls),
+                        independent_mounts=1, latencies_ms=calls, latency_variance_ms2=statistics.pvariance(calls),
+                        operation_plan=plan, workload_duration_seconds=elapsed,
+                        duration_scope='observed fixed-work duration, not minimum-duration or sustained-operation acceptance',
                        **latency_percentiles(calls))
         print(json.dumps({'metrics': metrics}), flush=True)
         sys.stdin.readline()  # Remain alive for CPU/RSS accounting.
@@ -491,6 +599,8 @@ def mount_extra(config, arm, cache, stats, port, read_only=False):
         # client kernel page cache from masquerading as application L1/L2 hits.
         # Writer/native durability checks retain normal writable semantics.
         result += ['--read-only-direct-io', '-o', 'ro']
+    if config.get('diagnostic_debug'):
+        result += ['--diagnostic-log-level', 'debug']
     return result
 
 
@@ -498,6 +608,8 @@ def disk_idle(port, config):
     deadline = time.monotonic() + 10
     while True:
         snapshot = sample_endpoint(port, config['disk_metrics'])
+        if snapshot['state_prepared'] == 1 and snapshot['stats_available'] == 0:
+            return snapshot
         if snapshot['active_jobs'] == 0 and snapshot['submission_bytes'] == 0 and snapshot['submission_items'] == 0:
             return snapshot
         if time.monotonic() >= deadline:
@@ -509,6 +621,24 @@ def disk_ready(port, config):
     """FUSE visibility does not imply that asynchronous disk recovery is Ready."""
     wait_disk_state(port, 'ready')
     return sample_endpoint(port, config['disk_metrics'])
+
+
+def disk_started(port, config, require_ready=False):
+    """Existing inventories require Ready; new lazy funding is not fake Ready."""
+    if require_ready:
+        return disk_ready(port, config)
+    deadline = time.monotonic() + 30
+    last_error = None
+    while True:
+        try:
+            snapshot = sample_endpoint(port, config['disk_metrics'])
+            if snapshot['state_ready'] == 1 or (snapshot['state_prepared'] == 1 and snapshot['stats_available'] == 0):
+                return snapshot
+        except (RuntimeError, OSError) as error:
+            last_error = str(error)
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f'disk cache neither explicitly lazy Prepared nor Ready; last observation: {last_error}')
+        time.sleep(0.02)
 
 
 def wait_disk_state(port, expected):
@@ -535,7 +665,9 @@ def verify_native_hot(before, after, size):
 
 
 def verify_startup_fallback(before, after, size):
-    if any(row['state_bypass'] != 1 or row['stats_available'] != 0 for row in [before, after]):
+    started_lazy = before.get('state_prepared') == 1 and before.get('funding_bytes', 0) > 0
+    if (before['stats_available'] != 0 or (before['state_bypass'] != 1 and not started_lazy)
+            or after['state_bypass'] != 1 or after['stats_available'] != 0):
         raise RuntimeError('startup fault requires Bypass without an attached adapter snapshot')
     if (delta(before, after, 'remote_bytes') < size or delta(before, after, 'source_get_attempts') <= 0
             or delta(before, after, 'fuse_reads') <= 0):
@@ -570,7 +702,7 @@ def prime(binary, fixture, work, record, config, cache, group, output):
         with integration.mount(binary, fixture['bucket'], fixture['prefix'], fixture['endpoint'], fixture['environment'],
                                work, label, config['memory_limit_mb'], extra, group, row) as (path, daemon):
             if record['arm'] == 'candidate':
-                disk_ready(port, config)
+                disk_started(port, config, require_ready=(cache / 'payload-v1.cache').exists())
             row['before'] = native_snapshot(port, config, output, label + '-before', require_adapter=record['arm'] == 'candidate')
             if record['workload'] == 'eviction':
                 eviction_probe(path, EVICTION_PIPELINE_BYTES)
@@ -626,6 +758,7 @@ def allocator_snapshot(path, started_ns, finished_ns):
 
 def measured_run(binary, fixture, work, record, config, group_root, output):
     label = record['mount_id']
+    record['diagnostic_debug'] = bool(config.get('diagnostic_debug'))
     cache = work / (label + '-cache')
     cache.mkdir(mode=0o700)
     space = os.statvfs(cache)
@@ -644,7 +777,7 @@ def measured_run(binary, fixture, work, record, config, group_root, output):
         with integration.mount(binary, fixture['bucket'], fixture['prefix'], fixture['endpoint'], fixture['environment'],
                                work, label, config['memory_limit_mb'], extra, group, record) as (path, daemon):
             if record['arm'] == 'candidate':
-                disk_ready(port, config)
+                disk_started(port, config, require_ready=(cache / 'payload-v1.cache').exists())
             record['mount_and_recovery_seconds'] = time.monotonic() - started
             if record['workload'] == 'eviction':
                 # Outside the timed workload; warm the same prefix in every arm.
@@ -656,14 +789,23 @@ def measured_run(binary, fixture, work, record, config, group_root, output):
                     seed_after = native_snapshot(port, config, output, label + '-eviction-seed-after')
                     verify_native_hot(seed_before, seed_after, EVICTION_PIPELINE_BYTES)
                     record['eviction_seed'] = dict(before=seed_before, after=seed_after, byte_correct=True)
+                record['capacity_preparation'] = capacity_population.populate(path, config['eviction_bytes'],
+                    fixture['environment'], group, output / (label + '-capacity-client.log'),
+                    (lambda: disk_idle(port, config)) if record['arm'] == 'candidate' else (lambda: None))
+                if record['arm'] == 'candidate':
+                    prepared = native_snapshot(port, config, output, label + '-capacity-after')
+                    record['capacity_preparation'].update(before=seed_after, after=prepared)
+                    if delta(seed_after, prepared, 'region_reclaims_started') <= 0:
+                        raise RuntimeError('fixed capacity preparation did not start real region reuse')
             spec = {key: fixture[key] for key in ['bucket', 'prefix', 'endpoint', 'expected_sha']}
             spec.update(path=str(path), name=record['workload'], state=record['state'], config=config)
             with worker(spec, fixture['environment'], group, output / (label + '-client.log')) as consumer:
-                mapping = config['disk_metrics'] if record['arm'] == 'candidate' else {
-                    key: config['disk_metrics'][key] for key in ['l1_hit_bytes', 'remote_bytes', 'l1_resident_bytes', 'l1_loaned_bytes']}
-                before = sample_endpoint(port, mapping)
+                before = native_snapshot(port, config, output, label + '-measured-before', require_adapter=record['arm'] == 'candidate')
                 io_before = io_counters(daemon.pid)
-                with compare.Sampler(daemon.pid, consumer.pid, group, output / (label + '-memory.jsonl')) as sampler:
+                boundary = (FixtureSampler(dict(provider=fixture['provider_pid'], supervisor=os.getpid(),
+                    daemon=daemon.pid, client=consumer.pid), group_root, output / (label + '-fixture-memory.jsonl'))
+                    if fixture.get('provider_pid') else contextlib.nullcontext())
+                with boundary as fixture_sampler, compare.Sampler(daemon.pid, consumer.pid, group, output / (label + '-memory.jsonl')) as sampler:
                     start_ns = time.time_ns()
                     consumer.stdin.write('start\n')
                     consumer.stdin.flush()
@@ -681,33 +823,52 @@ def measured_run(binary, fixture, work, record, config, group_root, output):
                     metrics['elapsed_seconds'] += drain_seconds
                     metrics['throughput'] = (metrics['bytes'] or metrics['operations']) / metrics['elapsed_seconds']
                     end_ns = time.time_ns()
-                after = sample_endpoint(port, mapping)
+                # Close the workload I/O interval at the sampler boundary,
+                # before metric scrapes and any untimed correctness probes.
+                io_after = io_counters(daemon.pid)
+                after = native_snapshot(port, config, output, label + '-measured-after', require_adapter=record['arm'] == 'candidate')
                 metrics.update(cpu_efficiency(sampler.metrics(), transferred=metrics['bytes'], operations=metrics['operations']))
+                record['fixture_accounting'] = fixture_sampler.metrics() if fixture_sampler is not None else dict(available=False)
                 allocator_peak, allocator_steady, effective = allocator_snapshot(stats, start_ns, end_ns)
                 metrics.update(allocator_peak_bytes=allocator_peak, allocator_steady_bytes=allocator_steady)
                 # Keep observed resources even when a workload's state gate fails.
                 record.update(metrics=metrics, cache_before=before, cache_after=after,
+                    daemon_io_before=io_before, daemon_io_after=io_after,
                     effective_budgets=effective,
                     cpu_counters={'before': sampler.cpu.before, 'after': sampler.cpu.after},
                     effective_cgroup_limits={name: (group / name).read_text().strip() for name in ['cpu.max', 'memory.max']},
                     l1_residency_scope='pre/post visible retained bytes and idle-flush loan bytes, not peak backing allocation; effective L1 policy is an upper bound including loans; Ready selected victims may exclude the idle flush lane')
+                if after.get('state_prepared') == 1:
+                    if after['stats_available'] != 0 or (cache / 'payload-v1.cache').exists():
+                        raise RuntimeError('lazy Prepared unexpectedly has an attached engine/data file')
+                    record['lazy_engine_absence'] = dict(state='prepared', adapter_available=False,
+                        data_file_present=False, known_engine_io=after['known_engine_io'])
                 verify_state(record['state'], before, after, record['arm'])
+                if record['workload'] in READS + ['eviction'] and delta(before, after, 'fuse_reads') <= 0:
+                    raise RuntimeError('measured reads did not reach FUSE')
                 if record['workload'] == 'eviction' and record['arm'] == 'candidate':
+                    probe_io_before = io_counters(daemon.pid)
                     eviction_probe(path, min(MIB, config['l1_hot_bytes']))
                     probe_after = disk_idle(port, config)
-                    record['eviction_evidence'] = verify_eviction(before, after, after, probe_after)
-                    record['eviction_evidence']['probe_byte_correct'] = True
-                    record['eviction_evidence']['timing_scope'] = 'seed and fallback probes excluded from timed pressure workload'
+                    probe_io_after = io_counters(daemon.pid)
+                    record.update(eviction_probe_io_before=probe_io_before, eviction_probe_io_after=probe_io_after,
+                        eviction_probe_io_scope='untimed witness correctness probe and its drain; excluded from workload CPU/memory/I/O and throughput')
+                    record['eviction_probe_io_delta'] = ({key: delta(probe_io_before, probe_io_after, key)
+                        for key in ['read_bytes', 'write_bytes', 'syscr', 'syscw']}
+                        if probe_io_before is not None and probe_io_after is not None else None)
                     record['eviction_probe_after'] = probe_after
+                    record['eviction_evidence'] = verify_eviction(seed_after, after, after, probe_after)
+                    record['eviction_evidence']['probe_byte_correct'] = True
+                    record['eviction_evidence']['timing_scope'] = 'seed, fixed capacity preparation, its drains and fallback probe excluded; reclamation scope includes preparation'
                 record.update(metrics=metrics, cache_before=before, cache_after=after, effective_budgets=effective,
-                              daemon_io_before=io_before, daemon_io_after=io_counters(daemon.pid),
+                               daemon_io_before=io_before, daemon_io_after=io_after,
                               cpu_counters={'before': sampler.cpu.before, 'after': sampler.cpu.after},
                               correctness=True, independent_mount=True)
                 record['effective_cgroup_limits'] = {name: (group / name).read_text().strip()
                                                      for name in ['cpu.max', 'memory.max']}
                 # Expose mount-lifetime I/O, not fabricated hardware IOPS. Kernel
                 # coalescing/read-ahead makes syscr/syscw syscall counts, not IOPS.
-                record['disk_io_scope'] = '/proc daemon read_bytes/write_bytes/syscr/syscw; hardware IOPS unavailable'
+                record['disk_io_scope'] = '/proc daemon counters at active workload/sampler boundaries including workload-induced spill drain, excluding preparation and untimed probes; hardware IOPS unavailable and writeback may be asynchronous'
                 record['cache_resource_samples_scope'] = 'pre/post index/recency entry counts and queued+active submission ownership; no measured index heap or transient peaks'
                 if record['daemon_io_before'] is not None and record['daemon_io_after'] is not None:
                     changes = {name: delta(record['daemon_io_before'], record['daemon_io_after'], name)
@@ -722,7 +883,7 @@ def measured_run(binary, fixture, work, record, config, group_root, output):
 
 
 def summarize(records, config, pairs, controls):
-    errors, summaries, budgets = [], {}, []
+    errors, summaries, budgets, work_errors = [], {}, [], []
     indexed = {(r['workload'], r['state'], r['pair'], r['arm']): r for r in records}
     if not records:
         errors.append('missing independent mount observations')
@@ -739,6 +900,32 @@ def summarize(records, config, pairs, controls):
                     if not base or not other or not all(r.get('correctness') and r.get('independent_mount') for r in [base, other]):
                         group_errors.append(f'missing/failed mount: {workload}/{state}/{pair}')
                         continue
+                    if base.get('diagnostic_debug') or other.get('diagnostic_debug'):
+                        group_errors.append('debug-enabled observation is diagnosis-only')
+                    for row in [base, other]:
+                        try:
+                            measured = row['metrics']
+                            plan = operation_plan(dataset_config(config, state, workload), workload, state)
+                            if measured.get('operation_plan') != plan or measured.get('cycles') != plan['cycles']:
+                                raise RuntimeError('measured work does not match the declared fixed operation plan')
+                            if measured.get('bytes') != plan['bytes'] or measured.get('operations') != plan['operations']:
+                                raise RuntimeError('observed byte/operation counts differ from the fixed operation plan')
+                            signature = (measured.get('bytes'), measured.get('operations'), measured['cycles'])
+                            if any(type(value) is not int or value < 0 for value in signature) or signature[1] == 0:
+                                raise RuntimeError('missing/invalid measured work counts')
+                        except (KeyError, RuntimeError) as error:
+                            work_errors.append(f'{workload}/{state}/{pair}/{row["arm"]}: {error}')
+                        try:
+                            if workload in READS:
+                                verify_state(state, row['cache_before'], row['cache_after'], row['arm'])
+                            if workload == 'eviction':
+                                preparation = row['capacity_preparation']
+                                if (preparation['protocol'] != config['eviction_preparation'] or
+                                        not preparation['byte_correct'] or preparation['bytes'] != config['eviction_bytes'] or
+                                        preparation['reads'] != config['eviction_bytes'] // capacity_population.BLOCK):
+                                    raise RuntimeError('incomplete/unmatched fixed capacity preparation')
+                        except (KeyError, RuntimeError) as error:
+                            group_errors.append(f'missing/invalid state/preparation evidence: {error}')
                     for name in METRICS:
                         left, right = other.get('metrics', {}).get(name), base.get('metrics', {}).get(name)
                         if (type(left) not in (int, float) or type(right) not in (int, float)
@@ -752,8 +939,11 @@ def summarize(records, config, pairs, controls):
                             seed = candidate['eviction_seed']
                             if not seed.get('byte_correct') or not candidate['eviction_evidence'].get('probe_byte_correct'):
                                 raise RuntimeError('eviction probe byte correctness missing')
-                            verify_state('l2_hot_pagecache_hot', seed['before'], seed['after'], 'candidate')
-                            verify_eviction(candidate['cache_before'], candidate['cache_after'],
+                            verify_native_hot(seed['before'], seed['after'], EVICTION_PIPELINE_BYTES)
+                            preparation = candidate['capacity_preparation']
+                            if not preparation['byte_correct'] or preparation['protocol'] != config['eviction_preparation']:
+                                raise RuntimeError('fixed byte-correct capacity preparation missing')
+                            verify_eviction(seed['after'], candidate['cache_after'],
                                             candidate['cache_after'], candidate['eviction_probe_after'])
                         except (KeyError, RuntimeError) as error:
                             group_errors.append(f'missing/invalid eviction evidence: {error}')
@@ -774,6 +964,7 @@ def summarize(records, config, pairs, controls):
                     qualified=False, status='advisory/uncontrolled', errors=sorted(set(group_errors)))
             else:
                 errors.extend(group_errors)
+    errors.extend(sorted(set(work_errors)))
     observed_passed = bool(records) and not errors
     gaps = config.get('unavailable_disk_observations', [])
     return dict(qualified=observed_passed, observed_state_screen_passed=observed_passed,
@@ -827,7 +1018,7 @@ def native_read_cache_phase(binary, fixture, package, work, config, group_root, 
                 receipt['rounds'].append(row)
                 with integration.mount(binary, fixture['bucket'], fixture['prefix'], fixture['endpoint'], fixture['environment'],
                                        work, label, config['memory_limit_mb'], extra, group, row) as (path, daemon):
-                    disk_ready(port, config)
+                    disk_started(port, config, require_ready=(cache / 'payload-v1.cache').exists())
                     before = native_snapshot(port, config, output, label + '-before')
                     row['before'] = before
                     native_hash(path / 'package.rpm', package_sha, group, max(1, min(30, deadline - time.monotonic())))
@@ -851,7 +1042,7 @@ def native_read_cache_phase(binary, fixture, package, work, config, group_root, 
             receipt['validation'] = validation
             with integration.mount(binary, fixture['bucket'], fixture['prefix'], fixture['endpoint'], fixture['environment'],
                                    work, label, config['memory_limit_mb'], extra, group, validation) as (path, daemon):
-                disk_ready(port, config)
+                disk_started(port, config, require_ready=(cache / 'payload-v1.cache').exists())
                 before = native_snapshot(port, config, output, label + '-before')
                 native_hash(path / 'package.rpm', package_sha, group)
                 after = native_snapshot(port, config, output, label + '-after')
@@ -901,7 +1092,7 @@ def native_checks(binary, fixture, work, config, group_root, output):
             compatibility = dict(phase='RW compatibility, not L2-hot qualification', passed=False)
             with integration.mount(binary, bucket, prefix, fixture['endpoint'], fixture['environment'], work,
                                    f'native-{cycle}', config['memory_limit_mb'], extra, group, compatibility) as (path, daemon):
-                disk_ready(port, config)
+                disk_started(port, config, require_ready=(cache / 'payload-v1.cache').exists())
                 compare.workload(path, 'metadata', config, s3, bucket, prefix,
                                  fixture['endpoint'], True, fixture['expected_sha'])
                 attrs = (path / 'package.rpm').stat()
@@ -963,6 +1154,15 @@ def native_checks(binary, fixture, work, config, group_root, output):
     return checks
 
 
+def verify_enospc_log(text):
+    # Eager mount-time reporting and lazy engine-open error relaying have
+    # different prefixes. Retain exact ownership and errno in either format.
+    known = {'disk cache unavailable; using source reads: filesystem error: 28',
+             'disk cache close failed: invalid configuration: filesystem error: 28'}
+    if not known.intersection(text.splitlines()):
+        raise RuntimeError('engine-open Bypass did not report actual ENOSPC preallocation failure')
+
+
 def local_disk_failure(binary, fixture, work, config, group_root, output):
     """Exhaust only owned tmpfs BEFORE opening an empty cache: real fallocate failure.
 
@@ -977,6 +1177,7 @@ def local_disk_failure(binary, fixture, work, config, group_root, output):
     integration.command(['mount', '-t', 'tmpfs', '-o', f'size={capacity + 8 * MIB},mode=0700',
                          'geesefs-disposable-l2-fault', volume], timeout=5)
     receipt = {'injection': 'owned-tmpfs-startup-preallocation-ENOSPC', 'capacity_bytes': capacity + 8 * MIB,
+               'activation': 'selected real victim triggers lazy engine open; before preallocation, not ongoing engine I/O',
                'source_fallback_verified': False, 'ongoing_engine_io_failure_verified': False}
     try:
         cache = volume / 'cache'
@@ -996,10 +1197,14 @@ def local_disk_failure(binary, fixture, work, config, group_root, output):
             mount_receipt = {}
             receipt['mount'] = mount_receipt
             with integration.mount(binary, fixture['bucket'], fixture['prefix'], fixture['endpoint'], fixture['environment'],
-                                   work, 'disk-fault', config['memory_limit_mb'], extra, group, mount_receipt) as (path, daemon):
-                wait_disk_state(port, 'bypass')
+                                    work, 'disk-fault', config['memory_limit_mb'], extra, group, mount_receipt) as (path, daemon):
+                # A genuinely new cache must remain lazy until a selected real
+                # victim exists. Do not force an engine open merely for a fault.
+                disk_started(port, config)
                 before = native_snapshot(port, config, output, 'disk-fault-before', require_adapter=False)
                 native_hash(path / 'payload', fixture['expected_sha'], group)
+                native_hash(path / 'pressure', fixture['pressure_sha'], group)
+                wait_disk_state(port, 'bypass')
                 with (path / 'payload').open('rb', buffering=0) as stream:
                     for offset in [0, config['dataset_bytes'] // 2, config['dataset_bytes'] - 37]:
                         if os.pread(stream.fileno(), 37, offset) != integration.expected_range(offset, 37):
@@ -1009,12 +1214,14 @@ def local_disk_failure(binary, fixture, work, config, group_root, output):
                 after = native_snapshot(port, config, output, 'disk-fault-after', require_adapter=False)
                 receipt.update(before=before, after=after)
                 verify_startup_fallback(before, after, config['dataset_bytes'])
-                error_log = (work / 'disk-fault.log').read_text()
-                receipt['startup_error_log'] = error_log
-                if 'disk cache unavailable; using source reads: filesystem error: 28' not in error_log:
-                    raise RuntimeError('startup Bypass did not report actual ENOSPC preallocation failure')
-                receipt['source_fallback_verified'] = True
             mount_receipt.update(daemon_exit=daemon.returncode, mount_present_after=os.path.ismount(path))
+            # Lazy attachment retains its failed-open result and reports it on
+            # graceful close. Observe that terminal error only after ownership
+            # has closed, while the byte/state measurements stay inside mount.
+            error_log = (work / 'disk-fault.log').read_text()
+            receipt['startup_error_log'] = error_log
+            verify_enospc_log(error_log)
+            receipt['source_fallback_verified'] = True
         return 'owned startup-preallocation ENOSPC: observed Bypass and exact full/range/EOF source bytes; ongoing I/O-error injection unverified'
     except Exception as error:
         receipt['error'] = str(error)
@@ -1113,14 +1320,17 @@ def run_native_preflight(args, report, binary, fixture, work, config, group_root
             passed=report['native_passed'], checks=report.get('native_checks', []), errors=report['errors']), indent=2) + '\n')
 
 
-def run_matrix_cases(args, config, report, binaries, fixtures, work, group_root):
+def run_matrix_cases(args, config, report, binaries, fixtures, work, group_root, workloads=None):
     """Retain every failed case and finish independent cases, never select wins.
 
     Source changes, aggregate deadlines or failed owned-resource cleanup remain
     fatal. An unmet warm-state gate is not permission to discard the whole arm.
     """
     for record in cases(config, args.pairs, args.controls):
+        if workloads is not None and record['workload'] not in workloads:
+            continue
         current = dataset_config(config, record['state'], record['workload'])
+        record['fixture_provider'] = fixtures[current['dataset_bytes']].get('provider', 'legacy Moto')
         expected_arm = 'baseline' if record['arm'] == 'control' else record['arm']
         if integration.sha_file(binaries[record['arm']]) != report['provenance'][expected_arm]['binary_sha256']:
             raise RuntimeError('frozen executable changed during the matrix')
@@ -1149,11 +1359,61 @@ def run_matrix_cases(args, config, report, binaries, fixtures, work, group_root)
                 (args.output / 'runs.json').write_text(json.dumps(report['runs'], indent=2) + '\n')
 
 
+def seed_fixtures(client, bucket, config, sizes):
+    fixtures = {}
+    for size in sizes:
+        prefix = f'dataset-{size}'
+        sha = integration.seed(client, bucket, prefix, size, config['metadata_entries'])
+        pressure_sha = integration.seed(client, bucket, prefix + '-pressure', 2 * config['memory_limit_mb'] * MIB, 1)
+        client.copy_object(Bucket=bucket, Key=prefix + '/pressure', CopySource={'Bucket': bucket, 'Key': prefix + '-pressure/payload'})
+        head = client.head_object(Bucket=bucket, Key=prefix + '/payload')
+        fixtures[size] = dict(bucket=bucket, prefix=prefix, expected_sha=sha, pressure_sha=pressure_sha,
+                               etag=head['ETag'], size=head['ContentLength'])
+        if size == config['eviction_bytes']:
+            key = prefix + '/capacity-pressure/payload'
+            client.copy_object(Bucket=bucket, Key=key, CopySource={'Bucket': bucket, 'Key': prefix + '/payload'})
+            pressure_head = client.head_object(Bucket=bucket, Key=key)
+            if pressure_head['ContentLength'] != size:
+                raise RuntimeError('distinct capacity pressure object has wrong size')
+            fixtures[size]['capacity_pressure'] = dict(key=key, size=size, etag=pressure_head['ETag'], expected_sha=sha)
+    return fixtures
+
+
+def attach_service(fixtures, client, endpoint, environment, provider):
+    for fixture in fixtures.values():
+        fixture.update(client=client, endpoint=endpoint, environment=environment, provider=provider)
+
+
+@contextlib.contextmanager
+def performance_service(weed, work, config, sizes, sealed):
+    if weed is None:
+        raise ValueError('performance matrix requires explicit --fixture-weed; Moto is functional/fault-only')
+    from sealed_s3_fixture import native_service
+    fixtures = {}
+
+    def prepare(client, bucket):
+        fixtures.update(seed_fixtures(client, bucket, config, sizes))
+
+    with native_service(weed, work, prepare, sealed=sealed) as (client, _, endpoint, environment, _):
+        provider = 'SeaweedFS 4.51 sealed RO' if sealed else 'SeaweedFS 4.51 disposable RW'
+        attach_service(fixtures, client, endpoint, environment, provider)
+        for fixture in fixtures.values():
+            fixture['provider_pid'] = int((work / 'backend.pid').read_text())
+        yield fixtures
+
+
 def execute(args, config, report):
+    if not args.native_only and getattr(args, 'fixture_weed', None) is None:
+        raise ValueError('performance matrix requires explicit --fixture-weed; Moto is functional/fault-only')
     group_root = compare.cgroup_preflight(args.cgroup_root)
-    if integration.command(['git', 'status', '--porcelain', '--', 'src', 'Cargo.toml', 'Cargo.lock'],
-                           cwd=ROOT, capture_output=True, text=True, timeout=5).stdout:
-        raise RuntimeError('runtime source writes pending; require clean frozen source checkpoint before execution')
+    supplied_sources = config.get('provenance', {}).get('candidate', {}).get('runtime_source_sha256')
+    frozen_sources = runtime_sources(config['provenance']['candidate']) if supplied_sources else None
+    if frozen_sources is None and integration.command(['git', 'status', '--porcelain', '--', 'src', 'Cargo.toml', 'Cargo.lock'],
+                            cwd=ROOT, capture_output=True, text=True, timeout=5).stdout:
+        raise RuntimeError('runtime source writes pending; require clean checkpoint or exact complete build receipt')
+    report['runtime_source_sha256'] = frozen_sources
+    report['source_checkpoint_scope'] = ('exact content-addressed runtime/Cargo build receipt; base revision may have dirty source'
+        if frozen_sources is not None else 'clean runtime/Cargo source checkpoint')
     binaries = {}
     report['provenance'] = {}
     for arm, path in [('baseline', args.baseline), ('candidate', args.candidate)]:
@@ -1182,36 +1442,43 @@ def execute(args, config, report):
     # Always local, uniquely owned; never consumes GEESEFS_TEST_ENDPOINT.
     with evidence_work(args.output) as work:
         with integration.service(None, work) as (client, bucket, endpoint, environment, _):
-            report['s3_fixture'] = 'owned localhost Moto HTTP fixture; not provider interoperability acceptance'
-            fixtures = {}
-            for size in [config['l1_hot_bytes'], config['dataset_bytes'], config['eviction_bytes']]:
-                prefix = f'dataset-{size}'
-                sha = integration.seed(client, bucket, prefix, size, config['metadata_entries'])
-                pressure_sha = integration.seed(client, bucket, prefix + '-pressure', 2 * config['memory_limit_mb'] * MIB, 1)
-                client.copy_object(Bucket=bucket, Key=prefix + '/pressure', CopySource={'Bucket': bucket, 'Key': prefix + '-pressure/payload'})
-                head = client.head_object(Bucket=bucket, Key=prefix + '/payload')
-                fixtures[size] = dict(client=client, bucket=bucket, prefix=prefix, endpoint=endpoint,
-                                      environment=environment, expected_sha=sha, pressure_sha=pressure_sha,
-                                      etag=head['ETag'], size=head['ContentLength'])
-            report['fixture_generations'] = {size: {key: value[key] for key in ['prefix', 'expected_sha', 'pressure_sha', 'etag', 'size']}
-                                             for size, value in fixtures.items()}
+            report['native_fixture'] = 'owned localhost Moto 5.1.17: functional/fault checks only, never performance'
+            fixtures = seed_fixtures(client, bucket, config, [config['dataset_bytes']])
+            attach_service(fixtures, client, endpoint, environment, report['native_fixture'])
             run_native_preflight(args, report, binaries['candidate'], fixtures[config['dataset_bytes']], work, config, group_root)
-            if not args.native_only:
-                run_matrix_cases(args, config, report, binaries, fixtures, work, group_root)
-            if not args.native_only:
-                report.update(summarize(report['runs'], config, args.pairs, args.controls))
-            if not report['native_passed']:
-                report.update(qualified=False, full_matrix_qualified=False)
-            if integration.command(['git', 'status', '--porcelain', '--', 'src', 'Cargo.toml', 'Cargo.lock'],
-                                   cwd=ROOT, capture_output=True, text=True, timeout=5).stdout:
-                report['native_passed'] = False
-                raise RuntimeError('runtime source changed during the frozen matrix')
-            final_revision = integration.command(['git', 'rev-parse', 'HEAD'], cwd=ROOT,
-                capture_output=True, text=True, timeout=5).stdout.strip()
-            if final_revision != revision or any(integration.sha_file(ROOT / name) != digest
-                    for name, digest in report['harness_sha256'].items()):
-                report['native_passed'] = False
-                raise RuntimeError('source checkpoint or harness changed during the matrix')
+        if not args.native_only:
+            report['s3_fixture'] = 'SeaweedFS 4.51: sealed RO reads; separate disposable RW writer, same provider per paired arm; provider outside child cgroup'
+            report['fixture_generations'] = {}
+            for scope, sealed, workloads, sizes in [
+                    ('sealed-ro', True, set(WORKLOADS) - {'writer_fsync'},
+                     [config['l1_hot_bytes'], config['dataset_bytes'], config['eviction_bytes']]),
+                    ('disposable-rw', False, {'writer_fsync'}, [config['dataset_bytes']])]:
+                provider_work = work / scope
+                provider_work.mkdir()
+                with performance_service(args.fixture_weed, provider_work, config, sizes, sealed) as fixtures:
+                    report['fixture_generations'][scope] = {size: {key: value[key] for key in
+                        ['prefix', 'expected_sha', 'pressure_sha', 'etag', 'size', 'provider', 'capacity_pressure'] if key in value} for size, value in fixtures.items()}
+                    report.setdefault('fixture_receipts', {})[scope] = json.loads((provider_work / 'provider.json').read_text())
+                    run_matrix_cases(args, config, report, binaries, fixtures, work, group_root, workloads)
+            report.update(summarize(report['runs'], config, args.pairs, args.controls))
+        if not report['native_passed']:
+            invalidate(report)
+        if frozen_sources is not None:
+            try:
+                runtime_sources(report['provenance']['candidate'])
+            except Exception:
+                invalidate(report)
+                raise
+        elif integration.command(['git', 'status', '--porcelain', '--', 'src', 'Cargo.toml', 'Cargo.lock'],
+                               cwd=ROOT, capture_output=True, text=True, timeout=5).stdout:
+            invalidate(report)
+            raise RuntimeError('runtime source changed during the frozen matrix')
+        final_revision = integration.command(['git', 'rev-parse', 'HEAD'], cwd=ROOT,
+            capture_output=True, text=True, timeout=5).stdout.strip()
+        if final_revision != revision or any(integration.sha_file(ROOT / name) != digest
+                for name, digest in report['harness_sha256'].items()):
+            invalidate(report)
+            raise RuntimeError('source checkpoint or harness changed during the matrix')
 
 
 def parser():
@@ -1227,6 +1494,7 @@ def parser():
     result.add_argument('--execute', action='store_true')
     result.add_argument('--preflight', action='store_true')
     result.add_argument('--native-only', action='store_true')
+    result.add_argument('--fixture-weed', type=Path, help='explicit locally verified SeaweedFS 4.51 binary; required for performance')
     result.add_argument('--example-manifest', action='store_true')
     result.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
     result.add_argument('--namespace-owned', action='store_true', help=argparse.SUPPRESS)
@@ -1288,8 +1556,8 @@ def main():
     args.output = args.output.resolve()
     report = dict(qualified=False, production_accepted=False, native_passed=False, runs=[], errors=[])
     report['harness_sha256'] = {name: integration.sha_file(ROOT / name) for name in [
-        'bench/disk_cache.py', 'bench/accounting.py', 'bench/compare.py', 'bench/paired.py',
-        'bench/sealed_s3_fixture.py', 'scripts/integration.py']}
+         'bench/disk_cache.py', 'bench/accounting.py', 'bench/compare.py', 'bench/metrics.py', 'bench/paired.py',
+        'bench/capacity_population.py', 'bench/fixture_accounting.py', 'bench/sealed_s3_fixture.py', 'scripts/integration.py', 'scripts/s3_fixture.py']}
     def expired(_signum, _frame):
         raise compare.BenchmarkDeadline('local disk-cache aggregate deadline exceeded')
     signal.signal(signal.SIGALRM, expired)
@@ -1315,10 +1583,12 @@ def main():
         report['errors'].append(str(error))
     finally:
         signal.alarm(0)
+        if report['errors']:
+            invalidate(report)
         (args.output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report, indent=2))
     if args.execute:
-        return 0 if report['native_passed'] and (args.native_only or report['qualified']) else 1
+        return 0 if not report['errors'] and report['native_passed'] and (args.native_only or report['qualified']) else 1
     return 0 if not report['errors'] else 1
 
 

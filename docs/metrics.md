@@ -87,6 +87,36 @@ Explicit cache clearing and same-key replacements are not policy evictions.
 An evicted block can remain charged while a reader owns its backing. Byte admission,
 retention policy, span count and process RSS are different quantities.
 
+### Persistent payload tier
+
+These observations are separate from RAM ownership and process memory. The
+`geesefs_disk_cache_state{state}` vocabulary is `disabled`, `prepared`,
+`recovering`, `ready`, `closing`, `closed`, `bypass`. A proven-new Prepared cache
+reserves funding without constructing media. `geesefs_disk_cache_stats_available`
+is zero until an adapter snapshot exists; absent adapter gauges then remain
+omitted, not fabricated zero occupancy or a successful Ready observation.
+
+| Metric | Meaning |
+| --- | --- |
+| `geesefs_disk_cache_funding_bytes` | Fixed payload-budget deduction; not measured heap or RSS |
+| `geesefs_effective_l1_policy_bytes` | Remaining retention ceiling including revocable flush loans, not actual residency |
+| `geesefs_disk_cache_eligibility_decisions_total{reason}` | Sixteen fixed required-window decisions/observations; excludes optional touches/demotion. Contention can be followed by successful eligibility |
+| `geesefs_disk_cache_read_fallbacks_total{reason}` | Fourteen fixed admission/I/O/validation outcomes; not mutually exclusive S3 misses |
+| `geesefs_disk_cache_active_read_jobs` / `geesefs_disk_cache_active_spill_jobs` | Actual independently funded owners, at most four of each; includes work outliving its observer |
+| `geesefs_disk_cache_queued_reads` | Key-free FIFO waiters charged to their read windows |
+| `geesefs_disk_cache_admitted_demotions_total` / `geesefs_disk_cache_engine_admitted_demotions_total` | Admitted copy and accepted engine enqueue, respectively; neither is a durability acknowledgement |
+| `geesefs_disk_cache_read_operation_hits_total` / `geesefs_disk_cache_hits_total` | Worker-completed copies versus caller-delivered adapter results; a later generation check may still reject delivery |
+| `geesefs_disk_cache_hit_bytes_total` | Validated bytes delivered into the read pipeline, including alignment/read-ahead; not requested client bytes |
+| `geesefs_disk_cache_region_reclaims_started_total` | Region-picker callbacks, not completed per-record evictions or reclaimed bytes |
+| `geesefs_disk_cache_opened_file_allocated_bytes` | Opening-time file allocation observation, not current physical occupancy |
+
+Request-correlated debug records include `l2_read_eligibility` and adapter
+decisions without object keys or dynamic metric labels. Use eligibility and
+adapter reasons together: a rejected window never reaches the adapter. Scraping
+does not initiate startup, read data, touch recency or admit work. Operation
+latencies include their admission/task wait and must not be labelled device
+service time. Detailed debug runs are separate from performance measurements.
+
 ### Read observations
 
 | Metric | Meaning |

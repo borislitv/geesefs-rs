@@ -54,6 +54,16 @@ pub(super) fn register(registry: &mut Registry, fs: &Filesystem, snapshot: &Snap
     funding_metrics(registry, funding.as_ref());
     metadata(registry, fs);
     instrumentation(registry, stats.as_ref());
+    let decisions = Family::<Vec<(&str, &str)>, Counter>::default();
+    let counts = fs.disk_read_decisions();
+    for reason in crate::read::DiskDecision::ALL {
+        decisions
+            .get_or_create(&vec![("reason", reason.label())])
+            .inc_by(counts[reason as usize]);
+    }
+    registry.register("geesefs_disk_cache_eligibility_decisions",
+        "Required read-window eligibility only, not optional L1 touches/demotions; contention may be resolved without fallback; fixed closed reasons",
+        decisions);
 }
 
 fn states(registry: &mut Registry, state: Option<State>, bypass: Option<CacheBypass>) {
@@ -73,7 +83,7 @@ fn states(registry: &mut Registry, state: Option<State>, bypass: Option<CacheByp
     }
     registry.register(
         "geesefs_disk_cache_state",
-        "Observed cache lifecycle state; disabled is not Ready",
+        "Observed cache lifecycle state; prepared may reserve funding without constructing a proven-new empty engine; disabled is not Ready",
         values,
     );
     let reason = match bypass {
@@ -105,7 +115,31 @@ fn states(registry: &mut Registry, state: Option<State>, bypass: Option<CacheByp
 }
 
 fn adapter(registry: &mut Registry, stats: Option<&Stats>) {
+    let fallbacks = Family::<Vec<(&str, &str)>, Counter>::default();
+    for reason in crate::disk_cache::ReadFallback::ALL {
+        fallbacks
+            .get_or_create(&vec![("reason", reason.label())])
+            .inc_by(stats.map_or(0, |stats| stats.read_fallbacks[reason as usize]));
+    }
+    registry.register("geesefs_disk_cache_read_fallbacks",
+        "Closed read-boundary reasons; generation discards may follow adapter hits and worker outcomes may finish after caller timeout; not mutually exclusive backend misses",
+        fallbacks);
     for (name, help, value) in [
+        (
+            "geesefs_disk_cache_active_read_jobs",
+            "Active independently funded read-work owners",
+            stats.map_or(0, |s| s.active_read_jobs),
+        ),
+        (
+            "geesefs_disk_cache_active_spill_jobs",
+            "Active independently funded copy/submission owners",
+            stats.map_or(0, |s| s.active_spill_jobs),
+        ),
+        (
+            "geesefs_disk_cache_queued_reads",
+            "Key-free FIFO admission waiters charged to existing read windows",
+            stats.map_or(0, |s| s.queued_reads as usize),
+        ),
         (
             "geesefs_disk_cache_active_jobs",
             "Admitted active adapter read/spill jobs; not a queued-only count",

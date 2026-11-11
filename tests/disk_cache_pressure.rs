@@ -17,7 +17,18 @@ async fn attach(config: Config, store: std::sync::Arc<MemoryStore>) -> std::sync
         PreparedDiskCache::prepare(&disk.directory, disk.max_bytes).unwrap()
     });
     let fs = Filesystem::new(config, store).unwrap();
-    if let Some(prepared) = prepared {
+    if let Some(mut prepared) = prepared {
+        let disk = fs.config.disk_cache_config().unwrap().unwrap();
+        if !disk.directory.join("payload-v1.cache").exists() {
+            // R1 exercises Ready demotion-before-loan, not initial startup.
+            let resources = geesefs_rs::budget::Budget::new(32 * MIB).unwrap();
+            let cache = geesefs_rs::disk_cache::DiskCache::open(prepared, &resources)
+                .await
+                .unwrap();
+            cache.close(DEADLINE).await.unwrap();
+            drop(cache);
+            prepared = PreparedDiskCache::prepare(&disk.directory, disk.max_bytes).unwrap();
+        }
         fs.attach_disk_cache(prepared).await.unwrap();
     }
     fs

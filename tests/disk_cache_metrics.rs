@@ -41,7 +41,18 @@ fn configured(dir: &std::path::Path, mount: &std::path::Path) -> Config {
 async fn attach(config: Config, store: Arc<MemoryStore>) -> Arc<Filesystem> {
     let disk = config.disk_cache_config().unwrap().unwrap();
     std::fs::set_permissions(&disk.directory, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let prepared = PreparedDiskCache::prepare(&disk.directory, disk.max_bytes).unwrap();
+    let mut prepared = PreparedDiskCache::prepare(&disk.directory, disk.max_bytes).unwrap();
+    if !disk.directory.join("payload-v1.cache").exists() {
+        // Exact Ready-operation accounting requires recovered media, not a
+        // deferred fresh engine. Lazy attachment metrics are tested separately.
+        let resources = geesefs_rs::budget::Budget::new(32 * MIB).unwrap();
+        let cache = geesefs_rs::disk_cache::DiskCache::open(prepared, &resources)
+            .await
+            .unwrap();
+        cache.close(DEADLINE).await.unwrap();
+        drop(cache);
+        prepared = PreparedDiskCache::prepare(&disk.directory, disk.max_bytes).unwrap();
+    }
     let fs = Filesystem::new(config, store).unwrap();
     fs.attach_disk_cache(prepared).await.unwrap();
     fs
@@ -183,6 +194,46 @@ async fn cancelled_fill_follower_and_scrapes_do_not_count_another_l2_operation()
             0.
         );
         assert_eq!(sample(&text, "geesefs_disk_cache_hit_bytes_total"), 0.);
+        for reason in geesefs_rs::disk_cache::ReadFallback::ALL {
+            assert_eq!(
+                sample(
+                    &text,
+                    &format!(
+                        "geesefs_disk_cache_read_fallbacks_total{{reason=\"{}\"}}",
+                        reason.label()
+                    ),
+                ),
+                if matches!(reason, geesefs_rs::disk_cache::ReadFallback::BackendMiss) {
+                    1.
+                } else {
+                    0.
+                },
+                "scrapes and a cancelled fill follower must preserve the actual fallback reason"
+            );
+        }
+        for reason in geesefs_rs::read::DiskDecision::ALL {
+            assert_eq!(
+                sample(
+                    &text,
+                    &format!(
+                        "geesefs_disk_cache_eligibility_decisions_total{{reason=\"{}\"}}",
+                        reason.label()
+                    )
+                ),
+                if matches!(reason, geesefs_rs::read::DiskDecision::Eligible) {
+                    1.
+                } else {
+                    0.
+                }
+            );
+        }
+        for name in [
+            "geesefs_disk_cache_active_read_jobs",
+            "geesefs_disk_cache_active_spill_jobs",
+            "geesefs_disk_cache_queued_reads",
+        ] {
+            assert_eq!(sample(&text, name), 0.);
+        }
     }
     gate.add_permits(1);
     assert_eq!(

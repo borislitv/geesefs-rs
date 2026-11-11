@@ -124,8 +124,11 @@ that older observation. Later HEAD/commit generations still override older data.
 
 ## Optional persistent payload tier
 
-The three disk-cache flags enable a private, locked, preallocated local container
-through the maintained Foyer Store adapter. Only eligible capacity evictions
+The three disk-cache flags enable a private, locked local container through the
+maintained Foyer Store adapter. Proven-new media initially stays Prepared: funding
+and directory ownership are reserved, but no engine or payload file is constructed
+until eligible capacity pressure. Existing media starts bounded recovery eagerly;
+lazy creation must not discard its inventory. Only eligible capacity evictions
 populate it, after releasing the L1 lock; replacements, invalidations and loan
 revocation do not. Demotion funds an exact visible-range copy, promptly releasing
 the original backing. Qualified L2 hits promote into L1 while retaining the disk
@@ -143,10 +146,25 @@ ingress reserves. Recovery is asynchronous with source fallback and no inventory
 reset. Owned jobs retain funding/directory ownership past caller cancellation;
 shutdown starts cache teardown even when writer flushing later fails.
 
+Required read windows use a key-free FIFO queue before allocating persistent
+identities. Four funded read-work owners are independent of four funded spill
+owners; eight aggregate jobs are possible without enlarging the fixed pools.
+Each potential disk block also reserves 4096 bytes of bookkeeping within the same
+data-window admission, reducing its effective ceiling rather than adding a pool.
+Eligibility borrows that credit and a read slot for bounded blocking work. It
+releases namespace ownership before waiting for inode state, then releases inode
+ownership before revalidating the namespace. No guard crosses disk/source I/O.
+Qualification and each block lookup have their own bounded operation deadline;
+a source gap does not age later lookups against one shared window deadline.
+Timed-out or cancelled tasks retain their actual slot, credit and owners until
+completion. Optional L1 touches and demotion still use immediate try-admission.
+
 Under byte pressure, Ready/eligible nonloaned victims demote before borrowing the
 idle flush lane. Loan-first selection would make subsequent victims ineligible
-and could starve L2 completely. Disabled, excluded and not-yet-Ready paths retain
-loan-first behavior; already loaned owners are always discarded without demotion.
+and could starve L2 completely. Eligible pressure can start the deferred engine
+before the current read falls back to loans; it does not queue that victim for
+later demotion. Disabled, excluded and not-yet-Ready paths retain loan-first
+behavior; already loaned owners are always discarded without demotion.
 The published L1 policy capacity is an upper bound including revocable loans,
 not a promise that selected data uses the flush lane in Ready mode. Benchmark
 comparisons must report actual residency/loan counts as well as the funding cut.

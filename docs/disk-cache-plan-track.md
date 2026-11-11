@@ -33,8 +33,8 @@ failed and remains open**. No deployment or production acceptance is implied.
 - The later loan-first starvation correction retains disabled/excluded loan
   behavior while demoting Ready eligible victims before borrowing. Policy ceilings
   include revocable loans; actual selected residency can differ and is reported.
-- Final runtime `fac68b40d8a31c15dcd03d87f0537068137c22ff`: 480 tests pass in
-  default and system-allocator configurations, with 24 explicit opt-in entries.
+- The contention/lazy/max-record follow-up passes 499 tests in default and
+  system-allocator configurations, with 24 explicit opt-in entries.
   Clippy, format and source audit pass. Native ext4 block/inode ENOSPC and EACCES
   checks run separately; they do not establish EDQUOT or power-loss durability.
 
@@ -53,9 +53,15 @@ seven pairs. Measured L1/metadata/writer resource regressions remain visible.
 See [the frozen result](performance-disk-cache.md); neither incomplete groups nor
 improvements in a subset of metrics are promoted to acceptance.
 
-Next gate: isolate the fixture's full-object-before-Range cost and qualify a
-supported bounded/streaming fixture before another large matrix. Investigate
-measured runtime CPU/RSS/cgroup side costs independently; a fixture explanation
-does not remove them. Native large-set eviction, controlled media-cold behavior,
-Go-relative and target-environment acceptance remain open. All owned measurement
-mounts, workers and cgroups were cleaned up; serving settings were not changed.
+The [follow-up qualification](performance-disk-cache-followup.md) uses qualified
+SeaweedFS Range behavior and independently reviewed fixed work. All 456 mounts
+complete: 454 pass the full byte/state contract; two concurrent cold-requested
+mounts fall back on the existing read timeout despite completed backend hits.
+Random-hot and eviction CPU/throughput regressions remain. Correct native
+capacity reuse and representative passes do not close these repeated-mount gates.
+
+Next: attribute actual timeout delay, correct redundant fragment demotion and
+investigate fragmented source GETs under eviction, preserving all measurements.
+Controlled media-cold, ongoing postallocation I/O errors, Go-relative and target
+acceptance remain open. All owned completed-run resources were cleaned up;
+serving settings were not changed.

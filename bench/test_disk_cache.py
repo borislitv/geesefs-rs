@@ -15,6 +15,75 @@ import disk_cache as disk
 
 
 class Contracts(unittest.TestCase):
+    def test_lazy_prepared_is_absent_adapter_not_fake_ready_or_zero_gauges(self):
+        mapping = {key: disk.example_manifest()['disk_metrics'][key] for key in
+                   ['state_prepared', 'stats_available', 'io_read_bytes', 'active_read_jobs', 'opened_file_available']}
+        text = 'geesefs_disk_cache_state{state="prepared"} 1\ngeesefs_disk_cache_stats_available 0\n'
+        actual = disk.parse_metrics(text, mapping)
+        self.assertIsNone(actual['io_read_bytes'])
+        self.assertIsNone(actual['active_read_jobs'])
+        self.assertIsNone(actual['opened_file_available'])
+        self.assertEqual(disk.delta(actual, actual, 'io_read_bytes'), 0)
+        for changed in [text.replace('prepared"} 1', 'prepared"} 0'), text.replace('available 0', 'available 1')]:
+            with self.assertRaisesRegex(RuntimeError, 'missing/invalid'):
+                disk.parse_metrics(changed, mapping)
+
+    def test_lazy_started_never_satisfies_existing_inventory_ready_gate(self):
+        config = disk.example_manifest()
+        lazy = dict(state_prepared=1, state_ready=0, stats_available=0)
+        with patch.object(disk, 'sample_endpoint', return_value=lazy):
+            self.assertEqual(disk.disk_started(1, config), lazy)
+        with patch.object(disk, 'disk_ready', side_effect=RuntimeError('existing inventory not Ready')):
+            with self.assertRaisesRegex(RuntimeError, 'not Ready'):
+                disk.disk_started(1, config, require_ready=True)
+
+    def test_preparation_and_reason_lane_receipts_are_explicit(self):
+        config = disk.example_manifest()
+        disk.validate(config, 8, 8)
+        self.assertEqual(config['eviction_preparation']['rounds'], 1)
+        self.assertEqual(config['eviction_preparation']['size'], 536870912)
+        self.assertEqual(config['disk_metrics']['active_read_jobs'], 'geesefs_disk_cache_active_read_jobs')
+        self.assertEqual(config['disk_metrics']['queued_reads'], 'geesefs_disk_cache_queued_reads')
+        self.assertEqual(config['disk_metrics']['reason_jobs'], 'geesefs_disk_cache_read_fallbacks_total{reason="jobs"}')
+        config['eviction_preparation']['rounds'] = 2
+        with self.assertRaisesRegex(ValueError, 'fixed, matched'):
+            disk.validate(config, 8, 8)
+
+    def test_debug_option_cannot_enter_qualification_comparisons(self):
+        config = dict(disk.example_manifest(), diagnostic_debug=True)
+        self.assertIn('--diagnostic-log-level', disk.mount_extra(config, 'candidate', Path('/cache'), Path('/stats'), 123))
+        with self.assertRaisesRegex(ValueError, 'diagnosis-only'):
+            disk.validate(config, 8, 8)
+
+    def test_explicit_dirty_build_receipt_checks_every_source_and_rejects_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'src').mkdir()
+            for name in ['src/lib.rs', 'Cargo.toml', 'Cargo.lock']:
+                (root / name).write_bytes(b'fixture source\n')
+            expected = {name: disk.hashlib.sha256(b'fixture source\n').hexdigest()
+                        for name in ['src/lib.rs', 'Cargo.toml', 'Cargo.lock']}
+            with patch.object(disk, 'ROOT', root):
+                self.assertEqual(disk.runtime_sources(dict(runtime_source_sha256=expected)), expected)
+                with self.assertRaisesRegex(RuntimeError, 'cover all'):
+                    disk.runtime_sources(dict(runtime_source_sha256={'src/lib.rs': expected['src/lib.rs']}))
+                (root / 'src/lib.rs').write_text('changed source\n')
+                with self.assertRaisesRegex(RuntimeError, 'differ'):
+                    disk.runtime_sources(dict(runtime_source_sha256=expected))
+
+    def test_moto_cannot_be_selected_for_performance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(ValueError, 'Moto is functional/fault-only'):
+                with disk.performance_service(None, Path(temporary), disk.example_manifest(), [], True):
+                    self.fail('unverified performance provider admitted')
+        args = SimpleNamespace(native_only=False, fixture_weed=None)
+        with self.assertRaisesRegex(ValueError, 'explicit --fixture-weed'):
+            disk.execute(args, disk.example_manifest(), {})
+
+    def test_native_provider_flag_is_explicit(self):
+        args = disk.parser().parse_args(['--fixture-weed', '/private/verified/weed'])
+        self.assertEqual(args.fixture_weed, Path('/private/verified/weed'))
+
     def test_allocator_snapshot_ignores_only_unfinished_trailing_json_frame(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / 'stats.jsonl'
@@ -128,7 +197,7 @@ class Contracts(unittest.TestCase):
                 cache.mkdir()
                 config = disk.example_manifest()
                 config['dataset_bytes'] = 7
-                with patch.object(disk.integration, 'mount', mount), patch.object(disk, 'disk_ready'), \
+                with patch.object(disk.integration, 'mount', mount), patch.object(disk, 'disk_ready'), patch.object(disk, 'disk_started'), \
                      patch.object(disk, 'disk_idle'), patch.object(disk, 'native_snapshot',
                          side_effect=[dict(fuse_reads=n, l2_hit_bytes=7 * n, remote_bytes=0, source_get_attempts=0)
                                       for _ in range(9) for n in [0, 1]]):
@@ -159,7 +228,7 @@ class Contracts(unittest.TestCase):
             def mount(*args):
                 yield root, SimpleNamespace(returncode=0)
             record = dict(mount_id='eviction', arm='candidate', workload='eviction')
-            with patch.object(disk.integration, 'mount', mount), patch.object(disk, 'disk_ready'), \
+            with patch.object(disk.integration, 'mount', mount), patch.object(disk, 'disk_ready'), patch.object(disk, 'disk_started'), \
                  patch.object(disk, 'disk_idle'), patch.object(disk, 'eviction_probe') as probe, \
                  patch.object(disk, 'native_snapshot', side_effect=[
                      dict(fuse_reads=n, l2_hit_bytes=5 * disk.MIB * n, remote_bytes=0, source_get_attempts=0)
@@ -181,10 +250,20 @@ class Contracts(unittest.TestCase):
         before = dict(state_bypass=1, stats_available=0, remote_bytes=0, source_get_attempts=0, fuse_reads=0)
         after = dict(before, remote_bytes=1024, source_get_attempts=1, fuse_reads=8)
         disk.verify_startup_fallback(before, after, 1024)
+        prepared = dict(before, state_bypass=0, state_prepared=1, funding_bytes=5672960)
+        disk.verify_startup_fallback(prepared, after, 1024)
         for changed in [dict(after, state_bypass=0), dict(after, stats_available=1),
                         dict(after, remote_bytes=0), dict(after, source_get_attempts=0), dict(after, fuse_reads=0)]:
             with self.assertRaises(RuntimeError):
                 disk.verify_startup_fallback(before, changed, 1024)
+
+    def test_engine_open_enospc_log_accepts_lazy_error_relay_not_unrelated_errno(self):
+        disk.verify_enospc_log('disk cache unavailable; using source reads: filesystem error: 28\n')
+        disk.verify_enospc_log('disk cache close failed: invalid configuration: filesystem error: 28\n')
+        for text in ['filesystem error: 28', 'disk cache close failed: invalid configuration: filesystem error: 5',
+                     'disk cache unavailable; using source reads: timeout']:
+            with self.assertRaisesRegex(RuntimeError, 'actual ENOSPC'):
+                disk.verify_enospc_log(text)
 
     def test_fuse_mount_visibility_is_not_disk_readiness_or_a_zero_snapshot(self):
         recovering = dict(ready=0, bypass=0, closed=0, available=0)
@@ -202,12 +281,16 @@ class Contracts(unittest.TestCase):
         text = ('geesefs_diagnostics_enabled 1\nx_total 11\ngeesefs_fuse_replies_total{opcode="read",errno="OK"} 8\n'
                 'geesefs_s3_attempts_total{operation="get",transport="sdk"} 3\n'
                 'geesefs_s3_attempts_total{operation="get",transport="extension"} 4\n'
-                'geesefs_s3_attempts_total{operation="list",transport="sdk"} 99\n')
+                'geesefs_s3_attempts_total{operation="list",transport="sdk"} 99\n'
+                'geesefs_stage_completions_total{stage="cache_read",outcome="cancelled"} 2\n'
+                'geesefs_stage_completions_total{stage="cache_read",outcome="ok"} 100\n'
+                'geesefs_diagnostic_logs_dropped_total 5\n')
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
             with patch.object(disk.urllib.request, 'urlopen', return_value=io.BytesIO(text.encode())):
                 result = disk.native_snapshot(1, {'disk_metrics': {'l2_hits': 'x_total'}}, output, 'observed')
-            self.assertEqual(result, dict(l2_hits=11, source_get_attempts=7, fuse_reads=8))
+            self.assertEqual(result, dict(l2_hits=11, source_get_attempts=7, fuse_reads=8,
+                                          cancelled_phases=2, diagnostic_logs_dropped=5))
             self.assertEqual((output / 'observed-metrics.txt').read_text(), text)
             self.assertEqual(json.loads((output / 'observed-metrics.json').read_text()), result)
             with patch.object(disk.urllib.request, 'urlopen', return_value=io.BytesIO(b'geesefs_diagnostics_enabled 1\nx_total 0\ngeesefs_fuse_replies_total{opcode="read",errno="OK"} 0\n')):
@@ -243,11 +326,14 @@ class Contracts(unittest.TestCase):
                 disk.validate(changed, 8, 8)
 
     def test_runtime_pending_does_not_become_a_successful_cache_hit(self):
-        before = {'l1_hit_bytes': 0, 'l2_hit_bytes': 0, 'remote_bytes': 0}
+        before = {'l1_hit_bytes': 0, 'l2_hit_bytes': 0, 'remote_bytes': 0, 'source_get_attempts': 0, 'fuse_reads': 0}
         with self.assertRaisesRegex(RuntimeError, 'L2'):
             disk.verify_state('l2_hot_pagecache_hot', before, dict(before), 'candidate')
-        after = dict(before, l2_hit_bytes=4096)
+        after = dict(before, l2_hit_bytes=4096, fuse_reads=1)
         disk.verify_state('l2_hot_pagecache_hot', before, after, 'candidate')
+        for changed in [dict(after, source_get_attempts=1), dict(after, fuse_reads=0)]:
+            with self.assertRaises(RuntimeError):
+                disk.verify_state('l2_hot_pagecache_hot', before, changed, 'candidate')
         after['remote_bytes'] = 1
         with self.assertRaisesRegex(RuntimeError, 'remote'):
             disk.verify_state('l2_hot_pagecache_hot', before, after, 'candidate')
@@ -284,13 +370,23 @@ class Contracts(unittest.TestCase):
             candidate = case['arm'] == 'candidate'
             metrics = {name: 80 if candidate else 100 for name in disk.METRICS}
             metrics['throughput'] = 125 if candidate else 100
+            plan = disk.operation_plan(disk.dataset_config(config, case['state'], case['workload']),
+                                       case['workload'], case['state'])
+            metrics.update(operation_plan=plan, cycles=plan['cycles'], bytes=plan['bytes'], operations=plan['operations'])
             row = dict(case, metrics=metrics, correctness=True, independent_mount=True,
                 effective_budgets={'payload_limit_bytes': 64 << 20,
-                                   'read_cache_policy_bytes': (24 if candidate else 32) << 20})
+                                    'read_cache_policy_bytes': (24 if candidate else 32) << 20})
+            if case['workload'] in disk.READS:
+                row['cache_before'] = dict(l1_hit_bytes=0, l2_hit_bytes=0, remote_bytes=0, source_get_attempts=0, fuse_reads=0)
+                row['cache_after'] = dict(l1_hit_bytes=4096, l2_hit_bytes=4096 if candidate else 0,
+                                         remote_bytes=0, source_get_attempts=0, fuse_reads=1)
+            if case['workload'] == 'eviction':
+                row['capacity_preparation'] = dict(byte_correct=True, bytes=536870912, reads=4096,
+                                                   protocol=config['eviction_preparation'])
             if candidate and case['workload'] == 'eviction':
                 row.update(eviction_seed=dict(byte_correct=True,
-                                              before=dict(l2_hit_bytes=0, remote_bytes=0),
-                                              after=dict(l2_hit_bytes=4096, remote_bytes=0)),
+                                              before=dict(l2_hit_bytes=0, remote_bytes=0, source_get_attempts=0, fuse_reads=0),
+                                              after=dict(l2_hit_bytes=5242880, remote_bytes=0, source_get_attempts=0, fuse_reads=1, region_reclaims_started=0)),
                            cache_before=dict(region_reclaims_started=0),
                            cache_after=dict(region_reclaims_started=1, l2_misses=0, remote_bytes=0),
                            eviction_probe_after=dict(l2_misses=1, remote_bytes=4096),
@@ -303,6 +399,13 @@ class Contracts(unittest.TestCase):
         self.assertFalse(result['production_accepted'])
         self.assertFalse(result['full_matrix_qualified'])
         self.assertFalse(result['summaries']['random/l2_hot_pagecache_cold_requested']['cold_state_evidence']['qualified'])
+        hot = next(row for row in records if row['workload'] == 'sequential' and row['state'] == 'l2_hot_pagecache_hot' and row['arm'] == 'candidate')
+        hot['cache_after']['l2_hit_bytes'] = 0
+        self.assertFalse(disk.summarize(records, config, 8, 8)['qualified'], 'no validated L2 hit must never qualify')
+        hot['cache_after']['l2_hit_bytes'] = 4096
+        hot['metrics']['bytes'] += 1
+        self.assertFalse(disk.summarize(records, config, 8, 8)['qualified'], 'unequal work must never qualify')
+        hot['metrics']['bytes'] -= 1
         eviction = next(row for row in records if row['workload'] == 'eviction' and row['arm'] == 'candidate')
         evidence = eviction.pop('eviction_seed')
         unproven = disk.summarize(records, config, 8, 8)
@@ -345,7 +448,7 @@ class Contracts(unittest.TestCase):
             expected = disk.integration.expected_range(0, 1024)
             (path / 'payload').write_bytes(expected)
             config = disk.example_manifest()
-            config.update(dataset_bytes=1024, minimum_active_seconds=0.005)
+            config.update(dataset_bytes=1024, measurement_cycles=2, l1_sequential_cycles=2)
             spec = dict(path=str(path), endpoint='http://127.0.0.1:9', bucket='fixture', prefix='data',
                         expected_sha=disk.hashlib.sha256(expected).hexdigest(), name='sequential',
                         state='l1_hot', config=config)
@@ -357,13 +460,32 @@ class Contracts(unittest.TestCase):
             messages = [json.loads(line) for line in result.stdout.splitlines()]
             metrics = messages[1]['metrics']
             self.assertEqual(metrics['independent_mounts'], 1)
-            self.assertGreater(metrics['cycles'], 1)
-            self.assertEqual(metrics['bytes'], metrics['cycles'] * 1024)
+            self.assertEqual(metrics['cycles'], 2)
+            self.assertEqual(metrics['bytes'], 2048)
             (path / 'payload').write_bytes(b'wrong-generation')
             result = subprocess.run(command, input=json.dumps(spec) + '\nstart\ndone\n',
                                     capture_output=True, text=True, env=environment, timeout=15)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('checksum', result.stdout)
+
+    def test_measured_pressure_is_one_fixed_pass_and_never_refreshes_witness(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'payload').write_bytes(b'untouched witness')
+            (root / 'capacity-pressure').mkdir()
+            payload = b'fixed independently checked pressure' * 32
+            (root / 'capacity-pressure/payload').write_bytes(payload)
+            config = dict(disk.example_manifest(), dataset_bytes=len(payload), measurement_cycles=8)
+            spec = dict(path=str(root), endpoint='http://127.0.0.1:9', bucket='fixture', prefix='data',
+                        expected_sha=disk.hashlib.sha256(payload).hexdigest(), name='eviction', state='normal', config=config)
+            result = subprocess.run([sys.executable, disk.__file__, '--worker'],
+                input=json.dumps(spec) + '\nstart\ndone\n', capture_output=True, text=True,
+                env=disk.integration.private_environment('disposable-access', 'disposable-secret'), timeout=15)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            metrics = json.loads(result.stdout.splitlines()[1])['metrics']
+            self.assertEqual(metrics['cycles'], 1)
+            self.assertEqual(metrics['bytes'], len(payload))
+            self.assertEqual((root / 'payload').read_bytes(), b'untouched witness')
 
     def test_manifest_cannot_silently_omit_required_cache_evidence(self):
         config = disk.example_manifest()

@@ -133,6 +133,32 @@ prove an opaque credential provider is static: only explicitly known stable or
 anonymous contexts can authorize cross-process reuse. Do not infer a principal
 from profile names or a single non-expiring credential resolution.
 
+## Native Range fixture and buffered device qualification — 2026-11-11
+
+Reuse the project's existing [SeaweedFS 4.51](https://github.com/seaweedfs/seaweedfs/releases/tag/4.51)
+`weed mini` fixture (Apache-2.0), with sealed read-only and separate disposable
+read/write service instances, for measured S3 workloads. Do not implement a new
+S3 server or patch request semantics. Public SDK contracts check exact Range/EOF,
+If-Match, HEAD, listing pagination, metadata, COPY and multipart operations.
+The explicit local executable is verified; tests do not silently download it.
+
+Moto 5.1.17's full-object-before-Range path made 64 small reads of a 128-MiB object
+read 8 GiB through process syscalls for 8 MiB of response payload. The qualified
+SeaweedFS run read 16.54 MiB. Both had zero media `read_bytes` in this cached probe;
+this is provider logical-I/O evidence, not cold-device throughput. Moto 5.2.5
+retains that implementation shape, so an upgrade alone is not the correction.
+Keep Moto for existing functional fault injection. SeaweedFS's larger absolute
+provider RSS remains separately visible; lower transient Range cost is not a
+whole-fixture memory win.
+
+The maintained Foyer `FileDeviceBuilder::with_direct(true)` API was also measured
+in an isolated variant. Eight ext4 pairs plus eight buffered A/A controls reduced
+cgroup peak memory but increased hot-read CPU and latency substantially; the
+tmpfs control did not establish direct-I/O semantics. Retain buffered runtime I/O
+rather than adopting that variant globally. This is a negative result for the
+tested backing/API, not proof that all kernel-cache optimization is impossible.
+Keep raw aligned-I/O, filesystem and resource receipts outside tracked source.
+
 ## Metadata byte admission — 2026-11-10
 
 The operator chose independent opt-in `--metadata-limit`; payload `--memory-limit`

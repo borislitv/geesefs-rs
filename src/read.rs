@@ -11,6 +11,67 @@ use std::{ops::Range, sync::Arc};
 pub const READ_BLOCK_BYTES: usize = 128 * 1024;
 const _: () = assert!(READ_BLOCK_BYTES == crate::disk_cache::MAX_PAYLOAD_BYTES);
 
+/// Window eligibility decisions, separate from adapter/backend read outcomes.
+#[derive(Clone, Copy, Debug)]
+pub enum DiskDecision {
+    Window,
+    Closing,
+    Unavailable,
+    NamespaceIdentity,
+    NamespaceContended,
+    InodeContended,
+    LockPoisoned,
+    Deleted,
+    Dirty,
+    Pending,
+    NotRegular,
+    RemoteIdentity,
+    Generation,
+    Excluded,
+    Eligible,
+    Admission,
+}
+impl DiskDecision {
+    pub const ALL: [Self; 16] = [
+        Self::Window,
+        Self::Closing,
+        Self::Unavailable,
+        Self::NamespaceIdentity,
+        Self::NamespaceContended,
+        Self::InodeContended,
+        Self::LockPoisoned,
+        Self::Deleted,
+        Self::Dirty,
+        Self::Pending,
+        Self::NotRegular,
+        Self::RemoteIdentity,
+        Self::Generation,
+        Self::Excluded,
+        Self::Eligible,
+        Self::Admission,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Window => "uncacheable_window",
+            Self::Closing => "closing",
+            Self::Unavailable => "unavailable",
+            Self::NamespaceIdentity => "namespace_identity",
+            Self::NamespaceContended => "namespace_contended",
+            Self::InodeContended => "inode_contended",
+            Self::LockPoisoned => "lock_poisoned",
+            Self::Deleted => "deleted",
+            Self::Dirty => "dirty",
+            Self::Pending => "pending",
+            Self::NotRegular => "not_regular",
+            Self::RemoteIdentity => "remote_identity",
+            Self::Generation => "generation",
+            Self::Excluded => "excluded",
+            Self::Eligible => "eligible",
+            Self::Admission => "admission",
+        }
+    }
+}
+
 pub(crate) struct Window {
     pub snapshot: Arc<Snapshot>,
     pub range: Range<u64>,
@@ -140,12 +201,31 @@ pub(crate) fn disk_coverage(start: u64, end: u64, size: u64) -> usize {
     (block_end(end - 1, size) - start / READ_BLOCK_BYTES as u64 * READ_BLOCK_BYTES as u64) as usize
 }
 
+pub(crate) fn disk_window_admission(start: u64, end: u64, size: u64) -> usize {
+    let bytes = disk_coverage(start, end, size);
+    bytes + bytes.div_ceil(READ_BLOCK_BYTES) * crate::disk_cache::READ_WAIT_BYTES
+}
+
 pub(crate) struct DiskRange {
     pub disk: DiskRead,
     pub node: Arc<Inode>,
     pub generation: u64,
     pub admission: Reservation,
     pub deadline: std::time::Duration,
+}
+
+pub(crate) fn debug_disk_fallback(
+    cache: &crate::disk_cache::DiskCache,
+    reason: crate::disk_cache::ReadFallback,
+) {
+    if let Some(trace) = crate::metrics::context() {
+        trace.debug("l2_read_fallback", || {
+            let stats = cache.stats();
+            serde_json::json!({"reason": reason.label(), "state": format!("{:?}", stats.state),
+                "active_jobs": stats.active_jobs, "active_read_jobs": stats.active_read_jobs,
+                "active_spill_jobs": stats.active_spill_jobs, "queued_reads": stats.queued_reads})
+        });
+    }
 }
 
 /// Disk output transfers the existing fill reservation. The separate, already
@@ -169,51 +249,109 @@ pub(crate) async fn load_disk_range(
         let full_end = block_end(next, snapshot.size);
         let segment_end = full_end.min(end);
         let full_len = (full_end - full_start) as usize;
-        let full = crate::disk_cache::DiskKey::new(
-            &range.disk.namespace,
-            snapshot.key.as_bytes(),
-            remote.etag.as_bytes(),
-            snapshot.size,
-            full_start,
-            full_len,
-        )
-        .ok();
-        let key = full
-            .filter(|key| range.disk.cache.touch_validated(key))
-            .or_else(|| {
-                crate::disk_cache::DiskKey::new(
-                    &range.disk.namespace,
-                    snapshot.key.as_bytes(),
-                    remote.etag.as_bytes(),
-                    snapshot.size,
-                    next,
-                    (segment_end - next) as usize,
+        let mut block_admission = range
+            .admission
+            .split(full_len + crate::disk_cache::READ_WAIT_BYTES);
+        // The queued state holds only already-funded window/canonical owners,
+        // never a newly allocated DiskKey. Active read-work credit bounds keys.
+        let slot = if current(&range.node, range.generation) {
+            match range
+                .disk
+                .cache
+                .read_admission(
+                    block_admission.split(crate::disk_cache::READ_WAIT_BYTES),
+                    range.deadline,
                 )
-                .ok()
-            });
-        let mut block_admission = range.admission.split(full_len);
-        let block = if current(&range.node, range.generation) {
-            if let Some(key) = &key {
-                range
-                    .disk
-                    .cache
-                    .read_block_reserved(
-                        key,
-                        block_admission.split(key.covered_len()),
-                        range.deadline,
-                    )
-                    .await
-            } else {
-                None
+                .await
+            {
+                Ok(slot) if current(&range.node, range.generation) => Some(slot),
+                Ok(_) => {
+                    range
+                        .disk
+                        .cache
+                        .record_read_fallback(crate::disk_cache::ReadFallback::GenerationBefore);
+                    debug_disk_fallback(
+                        &range.disk.cache,
+                        crate::disk_cache::ReadFallback::GenerationBefore,
+                    );
+                    None
+                }
+                Err(reason) => {
+                    debug_disk_fallback(&range.disk.cache, reason);
+                    None
+                }
             }
+        } else {
+            range
+                .disk
+                .cache
+                .record_read_fallback(crate::disk_cache::ReadFallback::GenerationBefore);
+            debug_disk_fallback(
+                &range.disk.cache,
+                crate::disk_cache::ReadFallback::GenerationBefore,
+            );
+            None
+        };
+        let key = slot.as_ref().and_then(|_| {
+            let full = crate::disk_cache::DiskKey::new(
+                &range.disk.namespace,
+                snapshot.key.as_bytes(),
+                remote.etag.as_bytes(),
+                snapshot.size,
+                full_start,
+                full_len,
+            )
+            .ok();
+            if let Some(full) = full
+                && (range.disk.cache.touch_validated(&full)
+                    || (full_start == next && full_len == (segment_end - next) as usize))
+            {
+                return Some(full);
+            }
+            crate::disk_cache::DiskKey::new(
+                &range.disk.namespace,
+                snapshot.key.as_bytes(),
+                remote.etag.as_bytes(),
+                snapshot.size,
+                next,
+                (segment_end - next) as usize,
+            )
+            .ok()
+        });
+        if slot.is_some() && key.is_none() {
+            range
+                .disk
+                .cache
+                .record_read_fallback(crate::disk_cache::ReadFallback::Identity);
+            debug_disk_fallback(&range.disk.cache, crate::disk_cache::ReadFallback::Identity);
+        }
+        let relative = key.as_ref().map_or(0, |key| (next - key.offset()) as usize);
+        let block = if let (Some(slot), Some(key)) = (slot, key) {
+            let coverage = key.covered_len();
+            let result = slot.read_owned(key, block_admission.split(coverage)).await;
+            if let Err(reason) = result.as_ref() {
+                debug_disk_fallback(&range.disk.cache, *reason);
+            }
+            result.ok()
         } else {
             None
         };
-        if let Some(block) = block.filter(|_| current(&range.node, range.generation)) {
-            let relative = (next - key.as_ref().unwrap().offset()) as usize;
-            // Identity storage belongs to the bounded disk lookup, not to a
-            // possibly blocked source GET or the retained L1 entry.
-            drop(key);
+        let block = block.filter(|_| {
+            if current(&range.node, range.generation) {
+                true
+            } else {
+                range
+                    .disk
+                    .cache
+                    .record_read_fallback(crate::disk_cache::ReadFallback::GenerationAfter);
+                debug_disk_fallback(
+                    &range.disk.cache,
+                    crate::disk_cache::ReadFallback::GenerationAfter,
+                );
+                false
+            }
+        });
+        if let Some(block) = block {
             if missing < next {
                 store
                     .read_range_chunks(

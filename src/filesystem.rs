@@ -453,10 +453,19 @@ impl Filesystem {
             .min(u32::MAX as usize - MAX_IO);
         if self.disk_funding_bytes > 0 {
             // Source/disk output plus caller-funded queue bookkeeping, including
-            // alignment at both ends. Never expose deferred/read-work credit.
+            // alignment at both ends. Reserve the fixed gap-pipeline pool from
+            // this same data ceiling, not by increasing payload or L2 funding.
             let block = read::READ_BLOCK_BYTES;
             let wait = crate::disk_cache::READ_WAIT_BYTES;
-            window = window.saturating_sub(2 * (block + wait)) / (2 * block + wait) * block;
+            let without_pipeline =
+                window.saturating_sub(2 * (block + wait)) / (2 * block + wait) * block;
+            window = window
+                .saturating_sub(
+                    self.disk_gap_pipeline_bytes(without_pipeline.saturating_add(2 * block)),
+                )
+                .saturating_sub(2 * (block + wait))
+                / (2 * block + wait)
+                * block;
         }
         EffectiveBudgets {
             payload_limit_bytes: self.ingress.limit() + self.data.limit() + self.flush_lane.limit(),
@@ -498,6 +507,15 @@ impl Filesystem {
             metadata_resolution_jobs_in_use: self.config.max_requests
                 - self.metadata_slots.available_permits(),
         }
+    }
+
+    fn disk_gap_pipeline_bytes(&self, coverage: usize) -> usize {
+        // L2 chunks end on block boundaries and are at least one block apart.
+        // A small window cannot instantiate every configured request slot.
+        self.config
+            .max_requests
+            .min(coverage.div_ceil(read::READ_BLOCK_BYTES))
+            * read::GAP_PIPELINE_BYTES
     }
 
     pub fn metadata_usage(&self) -> crate::metadata_budget::MetadataUsage {
@@ -1931,6 +1949,11 @@ impl Filesystem {
         let admission = length
             + if self.disk_funding_bytes > 0 {
                 read::disk_window_admission(range.start, range.end, size)
+                    + self.disk_gap_pipeline_bytes(read::disk_coverage(
+                        range.start,
+                        range.end,
+                        size,
+                    ))
             } else {
                 0
             };
@@ -2177,6 +2200,11 @@ impl Filesystem {
                         + length
                         + if single_buffer && self.disk_funding_bytes > 0 {
                             read::disk_window_admission(start, start + prefetch as u64, size)
+                                + self.disk_gap_pipeline_bytes(read::disk_coverage(
+                                    start,
+                                    start + prefetch as u64,
+                                    size,
+                                ))
                         } else {
                             0
                         },
@@ -2266,6 +2294,18 @@ impl Filesystem {
             None
         };
         let disk_reserved = single_buffer && self.disk_funding_bytes > 0;
+        // At most max_requests range tasks coexist. Their fixed metadata pool
+        // is admitted atomically with the window and shared, not re-reserved for
+        // each hole/task turnover. Clones keep it funded through task cancellation.
+        let pipeline_funding = disk_reserved.then(|| {
+            Arc::new(
+                charge.split(self.disk_gap_pipeline_bytes(read::disk_coverage(
+                    range.start,
+                    range.end,
+                    snapshot.size,
+                ))),
+            )
+        });
         let chunk = self.effective_budgets().read_parallel_chunk_bytes.max(1);
         let mut output = charge.split(length);
         // The snapshot may have shrunk while admission flushed another generation.
@@ -2311,7 +2351,9 @@ impl Filesystem {
                 let diagnostics = self.diagnostics.clone();
                 let context = metrics::context();
                 let sender = sender.clone();
+                let pipeline_funding = pipeline_funding.clone();
                 tasks.spawn(metrics::scope(context, async move {
+                    let _pipeline_funding = pipeline_funding;
                     metrics.fill_jobs.inc();
                     let result = async {
                         let local = Budget::new(2 * amount)?;

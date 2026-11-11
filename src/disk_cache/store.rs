@@ -1132,7 +1132,14 @@ impl DiskCache {
                             inner.read_fallback(ReadFallback::Identity);
                             Err(ReadFallback::Identity)
                         } else {
-                            output.copy(value.bytes()).map_err(|_| {
+                            // Load::kv consumes the decoded value. Move its Box
+                            // into caller admission before work/credit release;
+                            // do not allocate and copy the same payload again.
+                            match value {
+                                DiskValue::Decoded(bytes) => output.adopt(bytes),
+                                DiskValue::Source(block) => output.copy(block.as_slice()),
+                            }
+                            .map_err(|_| {
                                 inner.read_fallback(ReadFallback::OutputCopy);
                                 ReadFallback::OutputCopy
                             })

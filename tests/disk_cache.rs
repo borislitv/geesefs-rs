@@ -9,6 +9,123 @@ use support::{DEADLINE, MIB, block, key, open};
 pub use support::{budget, disk_cache, error};
 
 #[tokio::test]
+async fn decoded_output_keeps_its_full_caller_charge_across_slices_and_cache_close() {
+    use disk_cache::READ_WAIT_BYTES;
+    for length in [19, MAX_PAYLOAD_BYTES] {
+        let dir = support::directory();
+        let resources = Budget::new(32 * MIB).unwrap();
+        let output = Budget::new(length).unwrap();
+        let credit = Budget::new(READ_WAIT_BYTES).unwrap();
+        let bytes: Vec<u8> = (0..length).map(|i| (i % 251) as u8).collect();
+        let cache = open(dir.path(), &resources).await;
+        assert_eq!(
+            cache.try_demote(key(0, length), block(&bytes)),
+            Demotion::Admitted
+        );
+        cache.drain(DEADLINE).await.unwrap();
+        let slot = cache
+            .read_admission(credit.try_reserve(READ_WAIT_BYTES).unwrap(), DEADLINE)
+            .await
+            .unwrap();
+        let full = slot
+            .read_reserved(&key(0, length), output.try_reserve(length).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(full.as_slice(), bytes);
+        assert_eq!(
+            credit.used(),
+            0,
+            "completed worker releases bookkeeping credit"
+        );
+        assert_eq!(cache.stats().active_read_jobs, 0);
+        assert_eq!(
+            output.used(),
+            length,
+            "the caller, not read-work, owns the payload"
+        );
+        assert!(output.try_reserve(1).is_err());
+        let clone = full.clone();
+        let slice = full.slice(5..11).slice(1..4);
+        drop(full);
+        cache.close(DEADLINE).await.unwrap();
+        drop(cache);
+        assert_eq!(resources.used(), 0, "no engine/read-work owner remains");
+        assert_eq!(clone.as_slice(), bytes);
+        drop(clone);
+        assert_eq!(slice.as_slice(), &bytes[6..9]);
+        assert_eq!(
+            output.used(),
+            length,
+            "a tiny view retains the complete backing charge"
+        );
+        assert!(output.try_reserve(1).is_err());
+        drop(slice);
+        assert_eq!(output.used(), 0);
+        assert!(output.try_reserve(length).is_ok());
+    }
+}
+
+#[tokio::test]
+async fn cancelled_funded_decode_keeps_real_worker_ownership_until_completion() {
+    use disk_cache::READ_WAIT_BYTES;
+    use std::sync::atomic::Ordering;
+    let dir = support::directory();
+    let resources = Budget::new(32 * MIB).unwrap();
+    let credit = Budget::new(READ_WAIT_BYTES).unwrap();
+    let output = Budget::new(MAX_PAYLOAD_BYTES).unwrap();
+    let gate = support::IoGate::new();
+    let cache = support::gated(dir.path(), &resources, gate.clone()).await;
+    assert_eq!(
+        cache.try_demote(
+            key(0, MAX_PAYLOAD_BYTES),
+            block(&vec![0x5c; MAX_PAYLOAD_BYTES])
+        ),
+        Demotion::Admitted
+    );
+    cache.drain(DEADLINE).await.unwrap();
+    let slot = cache
+        .read_admission(credit.try_reserve(READ_WAIT_BYTES).unwrap(), DEADLINE)
+        .await
+        .unwrap();
+    let reservation = output.try_reserve(MAX_PAYLOAD_BYTES).unwrap();
+    gate.hold_reads.store(true, Ordering::SeqCst);
+    let reader = tokio::spawn(async move {
+        slot.read_reserved(&key(0, MAX_PAYLOAD_BYTES), reservation)
+            .await
+    });
+    tokio::time::timeout(DEADLINE, gate.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    reader.abort();
+    assert!(matches!(reader.await, Err(error) if error.is_cancelled()));
+    let held = (credit.used(), output.used(), cache.stats().active_read_jobs);
+    gate.hold_reads.store(false, Ordering::SeqCst);
+    gate.release.add_permits(1);
+    cache.close(DEADLINE).await.unwrap();
+    // Check after cleanup so an ownership-fault assertion cannot strand gated I/O.
+    assert_eq!(
+        held,
+        (READ_WAIT_BYTES, MAX_PAYLOAD_BYTES, 1),
+        "the cancelled observer must not free the actual worker's credit or output"
+    );
+    assert_eq!(credit.used(), 0);
+    assert_eq!(
+        output.used(),
+        0,
+        "unobserved late output is destroyed, not leaked"
+    );
+    assert_eq!(cache.stats().active_read_jobs, 0);
+    assert_eq!(cache.stats().read_operations.count, 1);
+    assert_eq!(
+        cache.stats().hits,
+        0,
+        "a cancelled caller received no decoded output"
+    );
+}
+
+#[tokio::test]
 async fn funded_read_queue_releases_cancelled_and_expired_waiters() {
     use disk_cache::{READ_WAIT_BYTES, ReadFallback};
     let dir = support::directory();
@@ -385,6 +502,12 @@ async fn exact_partial_payload_roundtrip_and_full_identity_misses() {
         key(37, 18),
     ] {
         assert!(cache.read_block(&wrong, &output).await.is_none());
+        assert_eq!(
+            output.used(),
+            0,
+            "an identity miss releases caller output admission"
+        );
+        assert_eq!(cache.stats().active_read_jobs, 0);
     }
     cache.close(DEADLINE).await.unwrap();
     drop(cache);
@@ -415,6 +538,7 @@ fn bounded_identity_range_and_scaled_funding() {
 
 #[tokio::test]
 async fn output_budget_and_wrong_coverage_fail_without_allocation_or_data() {
+    use disk_cache::{READ_WAIT_BYTES, ReadFallback};
     let dir = support::directory();
     let resources = Budget::new(32 * MIB).unwrap();
     let cache = open(dir.path(), &resources).await;
@@ -449,6 +573,27 @@ async fn output_budget_and_wrong_coverage_fail_without_allocation_or_data() {
     );
     drop(result);
     assert_eq!(admitted.used(), 0);
+    let credit = Budget::new(READ_WAIT_BYTES).unwrap();
+    let before_read = cache.stats().io_read_bytes;
+    for size in [2, 4] {
+        let output = Budget::new(size).unwrap();
+        let slot = cache
+            .read_admission(credit.try_reserve(READ_WAIT_BYTES).unwrap(), DEADLINE)
+            .await
+            .unwrap();
+        let result = slot
+            .read_reserved(&key(0, 3), output.try_reserve(size).unwrap())
+            .await;
+        assert!(matches!(result, Err(ReadFallback::OutputCoverage)));
+        assert_eq!(output.used(), 0);
+        assert_eq!(credit.used(), 0);
+        assert_eq!(cache.stats().active_read_jobs, 0);
+        assert_eq!(
+            cache.stats().io_read_bytes,
+            before_read,
+            "both undersized and oversized output admission must fail before disk I/O"
+        );
+    }
     cache.close(DEADLINE).await.unwrap();
 }
 

@@ -152,6 +152,15 @@ impl Reservation {
         }
         Ok(Block::owned(bytes.into(), self))
     }
+
+    /// Transfer an already allocated payload into its exact caller admission.
+    /// The previous owner must retain its work funding until this handoff.
+    pub(crate) fn adopt(self, data: Box<[u8]>) -> Result<Block> {
+        if data.len() != self.size {
+            return Err(Error::Config("reservation length mismatch".into()));
+        }
+        Ok(Block::owned(data, self))
+    }
 }
 
 impl Block {

@@ -225,6 +225,279 @@ async fn excluded_and_disabled_reads_do_not_populate_disk() {
 }
 
 #[tokio::test]
+async fn unaligned_disk_hit_retains_validated_backing_without_fragment_demotion() {
+    let dir = tempfile::tempdir().unwrap();
+    let mount = tempfile::tempdir().unwrap();
+    let store = scoped_store();
+    let bytes: Vec<u8> = (0..READ_BLOCK_BYTES).map(|i| (i % 251) as u8).collect();
+    store.seed("package.rpm", &bytes);
+    let mut config = configured(dir.path(), mount.path());
+    let fs = attach(config.clone(), store.clone()).await;
+    let node = fs.lookup(1, "package.rpm").await.unwrap();
+    assert_eq!(
+        fs.read(node.ino, 0, bytes.len()).await.unwrap().as_slice(),
+        bytes
+    );
+    pressure(&fs, &store).await;
+    assert_eq!(fs.disk_cache_stats().unwrap().index_entries, 1);
+    fs.shutdown().await.unwrap();
+    drop(fs);
+
+    config.read_ahead = 0;
+    config.read_ahead_small = 0;
+    config.read_ahead_large = 0;
+    let fs = attach(config.clone(), store.clone()).await;
+    let node = fs.lookup(1, "package.rpm").await.unwrap();
+    let gets = store.read_calls.load(Ordering::Relaxed);
+    let before = fs.disk_cache_stats().unwrap();
+    assert_eq!(
+        fs.read(node.ino, 11, 37).await.unwrap().as_slice(),
+        &bytes[11..48]
+    );
+    assert_eq!(store.read_calls.load(Ordering::Relaxed), gets);
+    assert_eq!(fs.disk_cache_stats().unwrap().hits, before.hits + 1);
+    assert_eq!(
+        fs.disk_cache_read_bytes(),
+        48,
+        "reply/window delivery stays sliced"
+    );
+    assert_eq!(
+        fs.effective_budgets().data_used_bytes,
+        fs.effective_budgets().disk_cache_funding_bytes + READ_BLOCK_BYTES,
+        "the entire retained allocation, not the 48-byte window, stays charged"
+    );
+    let loaded = fs.disk_cache_stats().unwrap();
+    pressure(&fs, &store).await;
+    let evicted = fs.disk_cache_stats().unwrap();
+    assert_eq!(
+        evicted.engine_admitted_demotions, loaded.engine_admitted_demotions,
+        "evicting a validated full backing must not admit a new fragment"
+    );
+    assert_eq!(evicted.io_write_bytes, loaded.io_write_bytes);
+    assert_eq!(evicted.index_entries, loaded.index_entries);
+    let gets = store.read_calls.load(Ordering::Relaxed);
+    assert_eq!(
+        fs.read(node.ino, 0, bytes.len()).await.unwrap().as_slice(),
+        bytes
+    );
+    assert_eq!(store.read_calls.load(Ordering::Relaxed), gets);
+    assert!(
+        fs.disk_cache_stats().unwrap().hits > evicted.hits,
+        "pressure really evicted L1"
+    );
+    let disk_bytes = fs.disk_cache_read_bytes();
+    assert_eq!(
+        fs.read(node.ino, 65547, 37).await.unwrap().as_slice(),
+        &bytes[65547..65584]
+    );
+    assert_eq!(
+        fs.disk_cache_read_bytes(),
+        disk_bytes,
+        "the full record remains readable from L1 after disk delivery"
+    );
+    fs.shutdown().await.unwrap();
+    drop(fs);
+
+    let fs = attach(config, store.clone()).await;
+    let node = fs.lookup(1, "package.rpm").await.unwrap();
+    let gets = store.read_calls.load(Ordering::Relaxed);
+    assert_eq!(
+        fs.read(node.ino, 0, bytes.len()).await.unwrap().as_slice(),
+        bytes
+    );
+    assert_eq!(store.read_calls.load(Ordering::Relaxed), gets);
+    fs.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn optional_disk_refill_after_a_source_prefix_keeps_the_record_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let mount = tempfile::tempdir().unwrap();
+    let store = scoped_store();
+    let bytes: Vec<u8> = (0..READ_BLOCK_BYTES).map(|i| (i % 251) as u8).collect();
+    store.seed("package.rpm", &bytes);
+    let mut config = configured(dir.path(), mount.path());
+    let fs = attach(config.clone(), store.clone()).await;
+    let node = fs.lookup(1, "package.rpm").await.unwrap();
+    fs.read(node.ino, 0, bytes.len()).await.unwrap();
+    pressure(&fs, &store).await;
+    fs.shutdown().await.unwrap();
+    drop(fs);
+
+    config.read_ahead = 0;
+    config.read_ahead_small = 128;
+    config.read_ahead_large = 0;
+    config.small_read_count = 2;
+    // Populate only a 17-byte source prefix before attaching existing L2 media.
+    // The second seek selects small-read readahead for the subsequent cache hit.
+    let disk = config.disk_cache_config().unwrap().unwrap();
+    let fs = Filesystem::new(config, store.clone()).unwrap();
+    let node = fs.lookup(1, "package.rpm").await.unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            fs.read(node.ino, 0, 17).await.unwrap().as_slice(),
+            &bytes[..17]
+        );
+    }
+    fs.attach_disk_cache(PreparedDiskCache::prepare(&disk.directory, disk.max_bytes).unwrap())
+        .await
+        .unwrap();
+    let gets = store.read_calls.load(Ordering::Relaxed);
+    assert!(
+        fs.read_reply_data(node.ino, 0, 17, |result| {
+            assert_eq!(result.unwrap(), &bytes[..17]);
+        })
+        .await
+        .is_none()
+    );
+    assert_eq!(store.read_calls.load(Ordering::Relaxed), gets);
+    assert_eq!(fs.disk_cache_stats().unwrap().hits, 1);
+    assert_eq!(fs.disk_cache_read_bytes(), (READ_BLOCK_BYTES - 17) as u64);
+    let hits = fs.disk_cache_stats().unwrap().hits;
+    assert_eq!(
+        fs.read(node.ino, 1024, 31).await.unwrap().as_slice(),
+        &bytes[1024..1055]
+    );
+    assert_eq!(
+        fs.disk_cache_stats().unwrap().hits,
+        hits,
+        "read the retained L1 owner"
+    );
+    assert_eq!(store.read_calls.load(Ordering::Relaxed), gets);
+    fs.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn retained_disk_backing_can_be_demoted_again_after_its_index_entry_is_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mount = tempfile::tempdir().unwrap();
+    let store = scoped_store();
+    let bytes: Vec<u8> = (0..READ_BLOCK_BYTES).map(|i| (i % 239) as u8).collect();
+    store.seed("package.rpm", &bytes);
+    let mut config = configured(dir.path(), mount.path());
+    let fs = attach(config.clone(), store.clone()).await;
+    let node = fs.lookup(1, "package.rpm").await.unwrap();
+    fs.read(node.ino, 0, bytes.len()).await.unwrap();
+    pressure(&fs, &store).await;
+    fs.shutdown().await.unwrap();
+    drop(fs);
+
+    config.read_ahead = 0;
+    config.read_ahead_small = 0;
+    config.read_ahead_large = 0;
+    config.entry_limit = 512;
+    let fs = attach(config.clone(), store.clone()).await;
+    let target = fs.lookup(1, "package.rpm").await.unwrap();
+    // Fill the L1 entry cap with small selected records. Index capacity is
+    // independently bounded at 128, so subsequent demotions can remove an old
+    // index entry while its disk-origin owner remains resident in L1.
+    assert_eq!(fs.disk_cache_funding().unwrap().index_entries, 128);
+    store.seed("small.rpm", &vec![0x53; 896 * READ_BLOCK_BYTES]);
+    let small = fs.lookup(1, "small.rpm").await.unwrap();
+    for n in 0..512 {
+        assert_eq!(
+            fs.read(small.ino, (n * READ_BLOCK_BYTES) as u64, 5)
+                .await
+                .unwrap()
+                .as_slice(),
+            &[0x53; 5]
+        );
+    }
+    let gets = store.read_calls.load(Ordering::Relaxed);
+    assert_eq!(
+        fs.read(target.ino, 11, 37).await.unwrap().as_slice(),
+        &bytes[11..48]
+    );
+    assert_eq!(store.read_calls.load(Ordering::Relaxed), gets);
+    for n in 512..896 {
+        fs.read(small.ino, (n * READ_BLOCK_BYTES) as u64, 5)
+            .await
+            .unwrap();
+        fs.drain_disk_cache(DEADLINE).await.unwrap();
+    }
+
+    // Evict every other selected owner while keeping this L1 backing hot.
+    // L1 reads may touch a live disk entry but cannot insert a missing one.
+    store.seed("pressure.txt", &vec![0x71; 900 * READ_BLOCK_BYTES]);
+    let pressure_node = fs.lookup(1, "pressure.txt").await.unwrap();
+    for n in 0..600 {
+        fs.read(
+            pressure_node.ino,
+            (n * READ_BLOCK_BYTES) as u64,
+            READ_BLOCK_BYTES,
+        )
+        .await
+        .unwrap();
+        let gets = store.read_calls.load(Ordering::Relaxed);
+        let disk_bytes = fs.disk_cache_read_bytes();
+        assert_eq!(
+            fs.read(target.ino, 0, bytes.len())
+                .await
+                .unwrap()
+                .as_slice(),
+            bytes
+        );
+        assert_eq!(store.read_calls.load(Ordering::Relaxed), gets);
+        assert_eq!(
+            fs.disk_cache_read_bytes(),
+            disk_bytes,
+            "the retained full backing is still in L1"
+        );
+        fs.drain_disk_cache(DEADLINE).await.unwrap();
+    }
+    let before = fs.disk_cache_stats().unwrap();
+    for n in 600..900 {
+        fs.read(
+            pressure_node.ino,
+            (n * READ_BLOCK_BYTES) as u64,
+            READ_BLOCK_BYTES,
+        )
+        .await
+        .unwrap();
+        fs.drain_disk_cache(DEADLINE).await.unwrap();
+    }
+    let after = fs.disk_cache_stats().unwrap();
+    // Only the target can demote in this second, entirely unselected pass.
+    // Admission under its original full key proves that key was actually absent
+    // before refill: a resident key returns IndexedHint without an admission.
+    // A reclaim-start counter alone would not establish removal.
+    assert_eq!(
+        after.engine_admitted_demotions,
+        before.engine_admitted_demotions + 1,
+        "an evicted original record must refill from its retained disk-origin backing"
+    );
+    assert!(after.io_write_bytes >= before.io_write_bytes + READ_BLOCK_BYTES as u64);
+    let gets = store.read_calls.load(Ordering::Relaxed);
+    assert_eq!(
+        fs.read(target.ino, 0, bytes.len())
+            .await
+            .unwrap()
+            .as_slice(),
+        bytes
+    );
+    assert_eq!(store.read_calls.load(Ordering::Relaxed), gets);
+    assert!(fs.disk_cache_stats().unwrap().hits > after.hits);
+    fs.shutdown().await.unwrap();
+    drop(fs);
+    let fs = attach(config, store.clone()).await;
+    let target = fs.lookup(1, "package.rpm").await.unwrap();
+    let gets = store.read_calls.load(Ordering::Relaxed);
+    assert_eq!(
+        fs.read(target.ino, 0, bytes.len())
+            .await
+            .unwrap()
+            .as_slice(),
+        bytes
+    );
+    assert_eq!(
+        store.read_calls.load(Ordering::Relaxed),
+        gets,
+        "the original full record was persisted again, not just a window fragment"
+    );
+    fs.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn restart_reuses_stable_identity_not_inode_or_read_shape() {
     let dir = tempfile::tempdir().unwrap();
     let mount = tempfile::tempdir().unwrap();
@@ -310,6 +583,17 @@ async fn exact_fragment_and_eof_coverage_never_invents_a_hole_or_extends_get() {
             .is_empty()
     );
     assert_eq!(store.read_calls.load(Ordering::Relaxed), gets);
+    let loaded = fs.disk_cache_stats().unwrap();
+    assert_eq!(
+        fs.read(node.ino, 11, 6).await.unwrap().as_slice(),
+        &[0x4c; 6]
+    );
+    pressure(&fs, &store).await;
+    assert_eq!(
+        fs.disk_cache_stats().unwrap().engine_admitted_demotions,
+        loaded.engine_admitted_demotions
+    );
+    let gets = store.read_calls.load(Ordering::Relaxed);
     assert_eq!(
         fs.read(node.ino, 0, 18).await.unwrap().as_slice(),
         &[0x4c; 18]
@@ -370,19 +654,26 @@ async fn persistent_identity_separates_etag_size_and_backend_but_not_metadata() 
         if change == "metadata" {
             assert_eq!(&fs.xattrs(node.ino).unwrap()["user.label"], b"changed");
         }
-        let block = fs.read(node.ino, 0, READ_BLOCK_BYTES).await.unwrap();
+        let block = fs.read(node.ino, 11, 37).await.unwrap();
         let expected_byte = if change == "etag" { 0x48 } else { 0x32 };
-        let expected_length = if change == "size" {
-            31
-        } else {
-            READ_BLOCK_BYTES
-        };
+        let expected_length = if change == "size" { 20 } else { 37 };
         assert_eq!(block.as_slice(), vec![expected_byte; expected_length]);
         assert_eq!(
             store.read_calls.load(Ordering::Relaxed),
             gets + usize::from(change != "metadata"),
             "change={change}"
         );
+        drop(block);
+        pressure(&fs, &store).await;
+        let gets = store.read_calls.load(Ordering::Relaxed);
+        let block = fs.read(node.ino, 0, READ_BLOCK_BYTES).await.unwrap();
+        let expected_length = if change == "size" {
+            31
+        } else {
+            READ_BLOCK_BYTES
+        };
+        assert_eq!(block.as_slice(), vec![expected_byte; expected_length]);
+        assert_eq!(store.read_calls.load(Ordering::Relaxed), gets);
         fs.shutdown().await.unwrap();
     }
 }

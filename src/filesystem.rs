@@ -2440,6 +2440,11 @@ impl Filesystem {
                 // Publish into the cache followers inspect, including after
                 // pressure reclamation while the GET was in flight.
                 let cache = &self.cache;
+                // Delivery remains sliced above. Retain a validated disk record
+                // under its original coverage so later eviction does not create
+                // a different fragment identity for an already resident record.
+                let (block, prefix) = block.into_cache_backing();
+                let at = at - prefix as u64;
                 cache.insert_with_eviction(ino, generation, at, block, |victim| {
                     self.demote_capacity(victim)
                 });

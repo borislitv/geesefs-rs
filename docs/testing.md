@@ -7,7 +7,7 @@ served mounts or production credentials. Use finite subprocess/operation deadlin
 
 ## Metadata compaction and persistent L2 — 2026-11-11
 
-Default and system-allocator configurations pass 499 active tests, with 24
+Default and system-allocator configurations pass 502 active tests, with 24
 explicit opt-in native/diagnostic entries, plus denied-warning Clippy. Meaningful
 regressions cover canonical/key owner lifetime, COW baseline/conflict handling,
 postcommit metadata credit, stale-size admission, byte-pressure demotion, genuine
@@ -18,6 +18,10 @@ admission, funded FIFO reads, actual cancelled-worker ownership, namespace/inode
 contention, a parent rename during the wait and a slow missing prefix before warm
 lookups. Independent fault controls fail the intended assertions before restoring
 the reviewed source; successful setup alone is not failure sensitivity.
+Validated disk-backing tests additionally reject redundant fragment writes,
+incorrect retained offsets, invented partial coverage and a blanket disk-origin
+demotion skip. The refill control proves live-index removal and persisted
+readmission; it does not claim physical target-region recycling.
 
 ```bash
 timeout 1800s cargo +1.99.1 test --locked --all-targets --no-fail-fast

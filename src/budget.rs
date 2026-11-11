@@ -205,6 +205,21 @@ impl Block {
         self.allocation.disk_origin
     }
 
+    /// Preserve the actual validated disk record's coverage in the cache, not
+    /// just the delivered window. The complete immutable backing and its charge
+    /// already belong to this view; source/assembled outputs cannot be widened.
+    /// Returns the visible window's offset within the retained cache block.
+    pub(crate) fn into_cache_backing(mut self) -> (Self, usize) {
+        let prefix = if self.is_disk_origin() {
+            let prefix = self.range.start;
+            self.range = 0..self.allocation.data.len();
+            prefix
+        } else {
+            0
+        };
+        (self, prefix)
+    }
+
     /// Transfer a complete, exclusively cache-owned backing; never add capacity.
     pub(crate) fn try_loan(&mut self, lane: &Budget) -> bool {
         let Some(allocation) = Arc::get_mut(&mut self.allocation) else {

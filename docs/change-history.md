@@ -5,6 +5,20 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-11: retain validated disk coverage in L1
+
+A fixed warm-random workload repeatedly demoted 212 fragments of already resident
+full disk records. Preserve the validated immutable record's actual backing and
+offset when publishing into L1, without changing reply coverage, allocation or
+charges. Partial records and EOF retain their real length; reclaimed entries can
+still be refilled. Public filesystem regressions and independent fault controls
+check unnecessary writes, offsets, invented coverage and refill after index removal.
+
+Eight paired mounts plus eight A/A controls remove all 212 redundant admissions
+and show a scoped warm-random throughput/CPU improvement. RSS controls are biased;
+other workloads and historical timeouts remain separately qualified in the
+[follow-up report](performance-disk-cache-followup.md#validated-backing-correction).
+
 ## 2026-11-11: preserve funded warm-L2 reads under contention
 
 Four recovered readers could bypass valid disk records when read/spill slots or

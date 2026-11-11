@@ -133,6 +133,11 @@ populate it, after releasing the L1 lock; replacements, invalidations and loan
 revocation do not. Demotion funds an exact visible-range copy, promptly releasing
 the original backing. Qualified L2 hits promote into L1 while retaining the disk
 copy. Missing coverage and optional errors use ordinary conditional S3 reads.
+For a validated disk hit, reply/window delivery stays sliced, but L1 retains the
+actual complete record backing and original offset under the same charge. Later
+eviction therefore does not manufacture a second fragment identity. Partial disk
+records remain partial; this never rounds unknown bytes up to a block boundary.
+If the original disk entry is reclaimed, ordinary demotion can populate it again.
 
 Persistent keys include validated backend/access/encryption scope, exact object
 key, opaque ETag, size and coverage. Dirty/sparse/pending namespace states bypass

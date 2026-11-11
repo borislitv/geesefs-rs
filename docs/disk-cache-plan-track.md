@@ -33,7 +33,7 @@ failed and remains open**. No deployment or production acceptance is implied.
 - The later loan-first starvation correction retains disabled/excluded loan
   behavior while demoting Ready eligible victims before borrowing. Policy ceilings
   include revocable loans; actual selected residency can differ and is reported.
-- The contention/lazy/max-record follow-up passes 499 tests in default and
+- The contention/lazy/max-record/backing follow-up passes 502 tests in default and
   system-allocator configurations, with 24 explicit opt-in entries.
   Clippy, format and source audit pass. Native ext4 block/inode ENOSPC and EACCES
   checks run separately; they do not establish EDQUOT or power-loss durability.
@@ -60,8 +60,12 @@ mounts fall back on the existing read timeout despite completed backend hits.
 Random-hot and eviction CPU/throughput regressions remain. Correct native
 capacity reuse and representative passes do not close these repeated-mount gates.
 
-Next: attribute actual timeout delay, correct redundant fragment demotion and
-investigate fragmented source GETs under eviction, preserving all measurements.
+The validated-backing correction removes repeated fragment demotion and improves
+warm-random throughput/CPU in eight Rust-relative pairs plus eight A/A controls.
+All 48 candidate mounts in its six-group comparison pass, but two baseline
+timeouts leave concurrent comparison incomplete. This is not absolute L2/RAM or
+Go acceptance. Next: attribute actual timeout delay and investigate fragmented
+source GETs under eviction, preserving all measurements.
 Controlled media-cold, ongoing postallocation I/O errors, Go-relative and target
 acceptance remain open. All owned completed-run resources were cleaned up;
 serving settings were not changed.

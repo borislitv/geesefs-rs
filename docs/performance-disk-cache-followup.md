@@ -112,3 +112,50 @@ work, allocator/RSS/cgroup/file/kernel/provider tables and source receipts remai
 in ignored `benchmark-results/private/harness-r123-20261111/`, with separate
 `l2-timeout-attribution-20261111/` and `l2-cost-attribution-20261111/` evidence.
 No deployment or serving configuration was changed.
+
+## Validated backing correction
+
+The subsequent minimal correction retains the actual validated disk backing and
+offset in L1 instead of creating a new fragment identity on eviction. Reply
+coverage and entire-backing admission are unchanged. Default/system-allocator
+suites pass 502 tests each, with 24 opt-in entries. Independent review kills
+four relevant isolated faults; refill proves removal of the canonical live-index
+entry followed by persisted readmission, not physical target-region recycling.
+
+Candidate SHA256 `125c2c6b52c8261e2bce8a77df4747a7d8ef1c5fb144b18997a183321f2925e8`
+is compared with the earlier `7bd782…` executable, **both L2 enabled**, with the
+same fixed work, budgets and eight pairs plus eight baseline A/A controls across
+six predeclared groups. All 144 attempts completed: 142 byte/state passes, with
+two baseline concurrent timeouts and all 48 candidate mounts passing. Neither
+failed baseline was retried. This isolates the correction; it cannot establish
+absolute L2-versus-RAM or Go-relative superiority.
+
+All eight warm-random baseline/control mounts reproduce 212 admissions, added
+index entries and spill operations; every candidate has zero. Adapter writes
+fall from about 15.56 MB to zero. Legitimate eviction admissions remain active.
+
+| Group | Throughput cost, 95% CI | Daemon CPU cost, 95% CI | Scope |
+| --- | --- | --- | --- |
+| Random L2-hot | 0.926, 0.882–0.976 | 0.884, 0.845–0.932 | Both improve, 8 pairs/8 A-A |
+| Random cold-requested | 0.982, 0.931–1.044 | 0.912, 0.868–0.961 | Throughput within noise; CPU controls biased |
+| Concurrent cold-requested | 0.973, 0.889–1.075 | 0.784, 0.730–0.847 | Insufficient: 6 valid pairs/6 A-A |
+| Eviction | 0.976, 0.951–1.001 | 0.994, 0.968–1.018 | Within observed noise |
+| Sequential L2-hot | 1.038, 0.944–1.125 | 1.010, 0.961–1.061 | Within observed noise |
+| Sequential L1-hot | 1.047, 0.876–1.235 | 1.049, 0.931–1.200 | Throughput within noise; CPU controls biased |
+
+Warm-random throughput improves about 8.05%, daemon CPU falls 11.60% and target
+cgroup CPU falls 9.00%. Its median RSS peak/latter half is
+135.402/134.430 → 135.758/134.768 MiB; biased RSS controls preclude a memory
+improvement claim. Heap peak is 64.282 → 64.065 MiB, target cgroup peak
+260.379 → 259.365 MiB and file latter half 145.608 → 146.009 MiB. Complete
+CPU user/system, normalized work, allocator/RSS/cgroup/file/kernel/provider
+observations and every adverse/insufficient effect remain in ignored
+`benchmark-results/private/backing-paired-20261111/`.
+
+Independent contract review confirms that S3 single-Range requests cannot merge
+disjoint missing runs without also fetching cached bytes. It does not prove every
+observed attempt minimal or excuse avoidable serialized waits. Likewise bounded
+optional waiting cannot guarantee zero source reads under arbitrary external
+latency; this does not establish the cause of the historical timeouts or waive
+their failed state checks. Kernel file-cache costs are real but are not a proven
+universal lower bound for every supported storage strategy. Acceptance remains open.

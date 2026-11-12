@@ -34,6 +34,7 @@ pub(crate) struct ReadMetrics {
 
 pub(crate) struct Snapshot {
     pub(crate) namespace: Option<(usize, usize, u64, u64)>,
+    pub(crate) kernel_lookup_entries: u64,
     pub(crate) entry_limit: u64,
     pub(crate) cache: Option<CacheStats>,
     pub(crate) lanes: [(&'static str, usize, usize); 3],
@@ -171,6 +172,12 @@ fn namespace_metrics(
 }
 
 fn independent_filesystem_metrics(registry: &mut Registry, snapshot: Snapshot) {
+    gauge(
+        registry,
+        "geesefs_namespace_kernel_lookup_entries",
+        "Inodes with nonzero kernel lookup ownership, including root; not lookup reference count",
+        snapshot.kernel_lookup_entries,
+    );
     gauge(
         registry,
         "geesefs_namespace_entry_limit",

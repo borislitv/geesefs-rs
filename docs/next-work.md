@@ -56,6 +56,14 @@ a separately recorded phase after the frozen workload; preserve inventory and
 verify recovery/independent bytes. Streaming zstd is an inspection topic, not an
 enabled codec or accepted memory/performance improvement.
 
+Resolve the strict `native_flat_directory_retires_kernel_owners_before_the_next_backend_page`
+progress gate before claiming complete traversal at the configured count bound.
+Active-page ownership, exhausted-remainder cursor progress and independent handle
+admission have isolated regression controls, but detached invalidation does not
+guarantee that real kernel `FORGET` keeps pace. Preserve successful-partial-output,
+ENOMEM, backend failure and EMFILE receipts separately. Do not manufacture progress
+with fake FORGET, discarded metadata, higher cache limits or accepted partial `du`.
+
 ## 2. Target access and large-namespace memory
 
 Explicit `allow_other` wiring and the three local cross-UID cases are complete;

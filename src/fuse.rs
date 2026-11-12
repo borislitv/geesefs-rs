@@ -132,6 +132,7 @@ struct File {
     _permit: OwnedSemaphorePermit,
 }
 struct Directory {
+    _permit: OwnedSemaphorePermit,
     _metadata_charge: crate::metadata_budget::MetadataCharge,
     last: crate::metadata_budget::MetadataString,
     page_after: crate::metadata_budget::MetadataString,
@@ -199,29 +200,56 @@ impl Directory {
         let Some(next_after) = page.next_after else {
             return Ok(false);
         };
-        if let DirectoryReply::Basic(reply, charges) = reply {
-            for entry in page.entries {
-                let charge = if self.cookie >= offset {
-                    DirectoryReply::entry_charge(fs, &entry.name)?
-                } else {
-                    None
-                };
-                let next = self.cookie + 1;
-                if self.cookie >= offset
-                    && reply.add(INodeNo(entry.ino), next, entry.kind, entry.name.as_str())
-                {
-                    return Ok(false);
-                }
-                if let Some(charge) = charge {
-                    charges.push(charge);
-                }
-                self.cookie = next;
-                self.last = entry.name;
-            }
+        let stopped = if let DirectoryReply::Basic(reply, charges) = reply {
+            self.basic_entries(fs, offset, page.entries, reply, charges)?
+        } else {
+            self.plus_entries(fs, offset, page.entries, reply).await?
+        };
+        if !stopped {
+            // An exhausted cached remainder only advances the backend-page
+            // cursor. It must never publish an empty wire reply as false EOF.
             self.page_after = next_after;
-            return Ok(true);
         }
-        let mut pending = page.entries.into_iter();
+        Ok(!stopped)
+    }
+
+    fn basic_entries(
+        &mut self,
+        fs: &Core,
+        offset: u64,
+        entries: Vec<crate::filesystem::DirEntry>,
+        reply: &mut ReplyDirectory,
+        charges: &mut Vec<crate::metadata_budget::MetadataCharge>,
+    ) -> crate::error::Result<bool> {
+        for entry in entries {
+            let charge = if self.cookie >= offset {
+                DirectoryReply::entry_charge(fs, &entry.name)?
+            } else {
+                None
+            };
+            let next = self.cookie + 1;
+            if self.cookie >= offset
+                && reply.add(INodeNo(entry.ino), next, entry.kind, entry.name.as_str())
+            {
+                return Ok(true);
+            }
+            if let Some(charge) = charge {
+                charges.push(charge);
+            }
+            self.cookie = next;
+            self.last = entry.name;
+        }
+        Ok(false)
+    }
+
+    async fn plus_entries(
+        &mut self,
+        fs: &Core,
+        offset: u64,
+        entries: Vec<crate::filesystem::DirEntry>,
+        reply: &mut DirectoryReply,
+    ) -> crate::error::Result<bool> {
+        let mut pending = entries.into_iter();
         let mut next = pending.next();
         let mut jobs = FuturesOrdered::new();
         while next.is_some() || !jobs.is_empty() {
@@ -251,15 +279,17 @@ impl Directory {
                     )
                     .await?
             {
-                return Ok(false);
+                return Ok(true);
             }
             self.cookie = next;
             self.last = entry.name;
+            // Publish a nonempty prefix while kernel owners are near the bound.
+            // A related notification may need the parent lock until this reply.
+            if fs.namespace_pressure() {
+                return Ok(true);
+            }
         }
-        // A full kernel frame resumes the same cached backend page; only a
-        // completely consumed backend page advances its exclusive start name.
-        self.page_after = next_after;
-        Ok(true)
+        Ok(false)
     }
 }
 
@@ -351,8 +381,9 @@ pub struct Fuse {
     admission: Mutex<Admission>,
     directories: Arc<Mutex<BTreeMap<u64, Arc<tokio::sync::Mutex<Directory>>>>>,
     files: Arc<Mutex<BTreeMap<u64, File>>>,
-    file_slots: Arc<Semaphore>,
+    handle_slots: Arc<Semaphore>,
     cache_retirement: Arc<Semaphore>,
+    namespace_retirement_scan: Arc<Mutex<crate::namespace::ReclaimScan>>,
     next_handle: Arc<AtomicU64>,
     pub notifier: Arc<Mutex<Option<Notifier>>>,
     pub shutdown_error: Arc<Mutex<Option<String>>>,
@@ -361,7 +392,7 @@ pub struct Fuse {
 impl Fuse {
     pub fn new(fs: Arc<Core>, runtime: Handle) -> Self {
         let slots = fs.config.max_requests;
-        let file_slots = Arc::new(Semaphore::new(fs.config.entry_limit as usize));
+        let handle_slots = Arc::new(Semaphore::new(fs.config.entry_limit as usize));
         Self {
             fs,
             runtime,
@@ -371,8 +402,9 @@ impl Fuse {
             }),
             directories: Arc::new(Mutex::new(BTreeMap::new())),
             files: Arc::new(Mutex::new(BTreeMap::new())),
-            file_slots,
+            handle_slots,
             cache_retirement: Arc::new(Semaphore::new(1)),
+            namespace_retirement_scan: Arc::new(Mutex::new(Default::default())),
             next_handle: Arc::new(AtomicU64::new(1)),
             notifier: Arc::new(Mutex::new(None)),
             shutdown_error: Arc::new(Mutex::new(None)),
@@ -541,8 +573,8 @@ impl Fuse {
         }
     }
 
-    fn reserve_file(&self) -> crate::error::Result<OwnedSemaphorePermit> {
-        self.file_slots
+    fn reserve_handle(&self) -> crate::error::Result<OwnedSemaphorePermit> {
+        self.handle_slots
             .clone()
             .try_acquire_owned()
             .map_err(|_| Error::Fs(libc::EMFILE))
@@ -605,6 +637,54 @@ impl Fuse {
         });
     }
 
+    fn retire_namespace_cache(&self) {
+        // Reserve headroom for concurrently admitted backend pages. This does
+        // not release application inodes: their kernel references still own
+        // them until FORGET, and active wire pages retain their own Arc pins.
+        if !self.fs.namespace_pressure() {
+            return;
+        }
+        let Some(notifier) = self.notifier.lock().unwrap().clone() else {
+            return;
+        };
+        let permit = {
+            let admission = self.admission.lock().unwrap();
+            if admission.closing {
+                return;
+            }
+            let Ok(permit) = self.cache_retirement.clone().try_acquire_owned() else {
+                return;
+            };
+            permit
+        };
+        let fs = self.fs.clone();
+        let scan = self.namespace_retirement_scan.clone();
+        self.runtime.spawn_blocking(move || {
+            let _permit = permit;
+            let Ok(charge) = fs.charge_metadata(
+                128 * std::mem::size_of::<(u64, crate::metadata_budget::SharedKey)>(),
+            ) else {
+                return;
+            };
+            let entries = fs
+                .namespace
+                .lock()
+                .unwrap()
+                .kernel_retirement_batch(&mut scan.lock().unwrap());
+            let entries = crate::metadata_budget::MetadataOwner::new(entries, charge);
+            // Never wait for notifications from a related request or hold an
+            // application lock: inval_entry can wait for a kernel parent lock.
+            for (parent, key) in entries.iter() {
+                let name = key.rsplit('/').next().expect("a key has a final component");
+                let result = notifier.inval_entry(INodeNo(*parent), OsStr::new(name));
+                if let Err(error) = result {
+                    eprintln!("retiring namespace kernel entry failed: {error}");
+                    break;
+                }
+            }
+        });
+    }
+
     fn remove_entry(&self, parent: INodeNo, name: &OsStr, directory: bool, reply: ReplyEmpty) {
         let name = match text(name) {
             Ok(name) => name,
@@ -637,6 +717,7 @@ impl Fuse {
         offset: u64,
         reply: DeadlineReply<DirectoryReply>,
     ) {
+        self.retire_namespace_cache();
         let cursor = match self.directories.lock().unwrap().get(&fh.0).cloned() {
             Some(cursor) => cursor,
             None => {
@@ -655,8 +736,9 @@ impl Fuse {
                 if !cursor.dots(&fs, ino, offset, reply).await? {
                     // The cursor resumes a backend page across smaller kernel
                     // frames; truncating it here causes overlapping S3 LISTs.
-                    let limit = (fs.config.entry_limit as usize)
-                        .saturating_sub(1)
+                    // Small namespace bounds must still leave room for the
+                    // next page while kernel notifications finish between replies.
+                    let limit = ((fs.config.entry_limit as usize).saturating_sub(1) / 4)
                         .clamp(1, crate::backend::extended_list::MAX_PAGE_ENTRIES);
                     while cursor.page(&fs, ino, offset, limit, reply).await? {}
                 }
@@ -758,6 +840,7 @@ impl fuser::Filesystem for Fuse {
         }
     }
     fn lookup(&self, request: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+        self.retire_namespace_cache();
         let reply = self.track(Opcode::Lookup, request, parent, (0, 0), reply);
         let name = match text(name) {
             Ok(name) => name,
@@ -827,7 +910,7 @@ impl fuser::Filesystem for Fuse {
     }
     fn open(&self, request: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         let reply = self.track(Opcode::Open, request, ino, (0, 0), reply);
-        let result = self.reserve_file().and_then(|permit| {
+        let result = self.reserve_handle().and_then(|permit| {
             file_handle(
                 &self.fs,
                 &self.files,
@@ -953,7 +1036,7 @@ impl fuser::Filesystem for Fuse {
         let identity = (request.uid(), request.gid());
         // Reserve capacity before the async create can mutate the namespace.
         // Cancellation or an error returns the permit without a registry entry.
-        let permit = match self.reserve_file() {
+        let permit = match self.reserve_handle() {
             Ok(permit) => permit,
             Err(error) => {
                 reply.error(errno(error));
@@ -1244,17 +1327,18 @@ impl fuser::Filesystem for Fuse {
                 return;
             }
         }
+        let permit = match self.reserve_handle() {
+            Ok(permit) => permit,
+            Err(error) => {
+                reply.error(errno(error));
+                return;
+            }
+        };
         if let Err(error) = self.fs.open(ino.0, false) {
             reply.error(errno(error));
             return;
         }
         let mut directories = self.directories.lock().unwrap();
-        if directories.len() >= self.fs.config.max_requests * 4 {
-            drop(directories);
-            self.fs.release(ino.0);
-            reply.error(Errno::EMFILE);
-            return;
-        }
         let charge = match self.fs.charge_metadata(
             std::mem::size_of::<tokio::sync::Mutex<Directory>>()
                 + std::mem::size_of::<(u64, Arc<tokio::sync::Mutex<Directory>>)>()
@@ -1272,6 +1356,7 @@ impl fuser::Filesystem for Fuse {
         directories.insert(
             handle,
             Arc::new(tokio::sync::Mutex::new(Directory {
+                _permit: permit,
                 _metadata_charge: charge,
                 last: Default::default(),
                 page_after: Default::default(),
@@ -1331,7 +1416,8 @@ impl fuser::Filesystem for Fuse {
         _: OpenFlags,
         reply: ReplyEmpty,
     ) {
-        self.directories.lock().unwrap().remove(&fh.0);
+        let directory = self.directories.lock().unwrap().remove(&fh.0);
+        drop(directory);
         self.fs.release(ino.0);
         reply.ok();
     }

@@ -5,6 +5,39 @@ use std::sync::atomic::Ordering;
 use support::MemoryStore;
 
 #[tokio::test]
+async fn an_active_remainder_keeps_pending_inodes_until_the_frame_is_consumed() {
+    let store = MemoryStore::new();
+    for index in 0..64 {
+        store.seed(&format!("pending-{index:02}"), b"unsent bytes");
+    }
+    store.seed("z", b"later object");
+    let mut config = MemoryStore::config(16);
+    config.entry_limit = 65;
+    let fs = Filesystem::new(config, store).unwrap();
+    let pending = fs.directory_remainder(1, "", "", 64).await.unwrap();
+    assert_eq!(pending.entries.len(), 64);
+    assert!(matches!(
+        fs.lookup(1, "z").await,
+        Err(geesefs_rs::error::Error::Fs(libc::ENOMEM))
+    ));
+    for entry in &pending.entries {
+        assert_eq!(fs.node(entry.ino).unwrap().attr().size, 12);
+    }
+    let cached = fs.directory_remainder(1, "", "", 64).await.unwrap();
+    drop(pending);
+    assert!(matches!(
+        fs.lookup(1, "z").await,
+        Err(geesefs_rs::error::Error::Fs(libc::ENOMEM))
+    ));
+    for entry in &cached.entries {
+        assert_eq!(fs.node(entry.ino).unwrap().attr().size, 12);
+    }
+    drop(cached);
+    assert_eq!(fs.lookup(1, "z").await.unwrap().attr().size, 12);
+    assert_eq!(fs.namespace.lock().unwrap().nodes.len(), 65);
+}
+
+#[tokio::test]
 async fn a_standard_listing_does_not_restart_cached_child_metadata_freshness() {
     let store = MemoryStore::new();
     store.standard_listing.store(true, Ordering::Relaxed);

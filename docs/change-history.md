@@ -5,6 +5,30 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-12: preserve active directory owners and bounded traversal semantics
+
+A small native inode bound exposes successful but truncated `du`: an active
+remainder retained inode numbers without owning the pending inodes. Pin only the
+active remainder, including cache hits; keep TTL pages numeric. Kernel-owned
+entries survive TTL expiry, so retire clean unused dentries through supported,
+detached bounded notifications and keep lookup counts until actual `FORGET`.
+Exhausted cached remainders advance the backend cursor without publishing EOF.
+An independent open-file fixture catches the false-EOF fault as successful
+523264-byte traversal instead of the required 1572864 bytes.
+
+A separate native fixture reproduces EMFILE from capping idle directory handles
+at four times request concurrency. Share the existing entry-bounded owned handle
+semaphore with files, preserving byte charges and actual cursor lifetimes.
+No runtime budget, TTL, metadata or durability requirement is weakened.
+
+The nested walk and within-budget pressure cursor controls pass. The strict
+over-capacity flat traversal remains a failing progress gate; speculative pending
+owner/batch changes did not fix it and were reverted. Keep its exact-size assertion
+and the three independently reproduced native baseline failures visible in
+[verification](testing.md#directory-ownership-and-progress--2026-11-12).
+This is a local correctness correction, not full target `du`, L2 recycling,
+memory/performance acceptance or traffic readmission.
+
 ## 2026-11-12: expose data-region fullness and broaden mirror selection
 
 Configured file capacity, index counts and cumulative I/O did not show how much

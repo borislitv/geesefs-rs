@@ -177,6 +177,7 @@ cache hits can bypass this path; this is not an HTTP client hit ratio.
 | Metric | Meaning |
 | --- | --- |
 | `geesefs_namespace_entries` / `geesefs_namespace_names` | Live inode/name-map lengths, including root |
+| `geesefs_namespace_kernel_lookup_entries` | Inodes with nonzero kernel lookup ownership, including root; not the sum of lookup references or all cached inodes. Independent atomic snapshot, also available during namespace contention |
 | `geesefs_namespace_entry_limit` | Configured inode limit |
 | `geesefs_namespace_evictions_total` | Inodes removed under entry-limit pressure |
 | `geesefs_namespace_capacity_failures_total` | Inode admission failures without an eligible victim |

@@ -15,6 +15,7 @@ The package continues to forbid unsafe code and uses safe dependency APIs only.
 | `flush_activity` | Async shared guards owned by uploads/bodies; lending only tries an exclusive guard | Required to prevent new loans during uploads, including cancellation and retained retry bodies. Independent uploads share the guard; speculative lending never waits for it. |
 | FUSE file/directory registries | Separate short map transactions; clone owners before using them | File release drops its owner outside the registry. Directory open no longer waits for inode state or writes a reply while holding its registry. A shared file-handle lookup still takes a short registry lock. |
 | FUSE admission | Closing flag plus fast try-acquisition; a saturated fixed receiver waits on the existing semaphore after unlocking | At most one pending callback per receiver, with WRITE input still ingress-funded. The same absolute deadline covers admission and execution. Async owners retain permits through post-reply work; shutdown drains them even if not yet scheduled. |
+| FUSE handle admission | One owned semaphore for files and directories, bounded by `entry_limit` | Idle open handles do not consume request concurrency. Registry entries/cursor users retain their permits through actual completion; errors release reservations. Directory metadata remains independently byte-charged. |
 | Metadata admission | One global semaphore for directory type resolution and expired-attribute refresh | READDIRPLUS admits before creating each borrowed future and polls at most `max_requests` futures per page in output order. One admission waiter per page; no detached per-entry tasks. Fresh attributes bypass the semaphore. Errors, full frames and deadlines release pending work and permits. |
 | Required L2 eligibility | Existing caller-funded FIFO read admission; at most four blocking workers | Namespace, inode and final namespace checks acquire guards sequentially, never nested. Final revalidation observes a parent move begun during inode contention. Guards are released before I/O. Timeout/cancellation leaves the actual worker's slot and credit owned until completion. |
 | Optional L2 touches/demotion | Immediate namespace/inode try-lock and bounded spill admission | Contention skips optional work; it does not wait behind required readers or hold up writer loan reclamation. Read and spill jobs have independent, already funded four-owner limits. |
@@ -38,6 +39,7 @@ and inode-state locks; validation and extent/generation publication stay atomic.
 | `Inode::read_fills` | Register/query/retire bounded in-flight intervals; notify followers | Per-inode metadata only. Overlapping same-generation reads deliberately wait on a watch channel after unlocking; disjoint fills proceed independently. |
 | FUSE `Directory` cursor | Async per-open-handle pagination/cookie gate, spans LIST and bounded attribute refresh | Same-handle readdir is serialized to preserve cursor semantics; separate handles are independent. Attribute requests within a PLUS page overlap while replies retain cookie/name order. |
 | FUSE `notifier` | Clone configured sender before kernel notification | Actual potentially blocking notification runs on a separately admitted blocking worker without the mutex. |
+| FUSE `namespace_retirement_scan` | One finite high-water cursor, serialized with the existing notification slot | Inspect at most 128 nodes, try-lock state, retain only shared names. Release namespace/state/scan guards before notification. Never await a related parent invalidation from lookup/readdir; it can need the kernel lock held for that reply. |
 | FUSE `shutdown_error` | Terminal diagnostic publication/take | Not a request hot path. |
 | `RangeSink::owner` | Split an already admitted reservation | Per-producer, no allocation or channel send while locked. Channel backpressure happens after release. |
 | `IamProvider::cache` | Async single-flight token refresh, spans timeout-bounded HTTP | Cold/expired IAM identity requests can share a network wait. Cached credentials return promptly; this does not block executor threads or apply to other authentication modes. |
@@ -52,6 +54,10 @@ Metrics use try-lock snapshots and return unavailable instead of joining a queue
 - Full-capacity namespace eviction still searches canonical owners; all-pinned
   pressure can cost O(cached inodes) under the namespace mutex. The weak upgrade
   race is safe, but this is not a constant-time eviction algorithm.
+- Nonempty PLUS prefixes and detached invalidation do not ensure that actual
+  `FORGET` catches up with new kernel ownership. The over-capacity flat native
+  traversal remains a failing progress gate; do not release fake lookup owners
+  or publish an exhausted cached remainder as successful EOF.
 - Global tombstone expiry cleanup and some pending-prefix conflict checks still
   scale with their own registries. Local directory scan chunks no longer trigger
   whole-tombstone cleanup. Large move/delete transactions still cost their subtree.

@@ -215,6 +215,34 @@ fn entry_limit_and_oversized_insertions_are_not_mistaken_for_byte_capacity() {
 }
 
 #[tokio::test]
+async fn kernel_lookup_gauge_counts_identities_until_the_last_real_forget() {
+    let (_, fs) = fixture();
+    let node = fs.lookup(1, "private-object-name").await.unwrap();
+    let value = || {
+        sample(
+            &render(&fs).unwrap(),
+            "geesefs_namespace_kernel_lookup_entries",
+        )
+    };
+    assert_eq!(value(), 1., "a cached inode is not a kernel lookup owner");
+    fs.reference(&node);
+    fs.reference(&node);
+    assert_eq!(value(), 2., "multiple references retain one identity");
+    fs.forget(node.ino, 0);
+    fs.forget(node.ino, 1);
+    assert_eq!(value(), 2., "a partial FORGET retains the kernel owner");
+    fs.forget(node.ino, 1);
+    assert_eq!(value(), 1.);
+    fs.forget(node.ino, u64::MAX);
+    fs.forget(u64::MAX, 1);
+    assert_eq!(value(), 1., "duplicate or unknown FORGET cannot underflow");
+    fs.reference(&node);
+    assert_eq!(value(), 2., "a later lookup reacquires the same identity");
+    fs.forget(node.ino, 1);
+    assert_eq!(value(), 1.);
+}
+
+#[tokio::test]
 async fn namespace_limit_pressure_is_visible_without_walking_inodes() {
     let store = MemoryStore::new();
     for key in ["one", "two", "three"] {

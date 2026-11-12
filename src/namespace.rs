@@ -341,6 +341,57 @@ impl Namespace {
         self.nodes.len() >= self.limit
     }
 
+    fn clean_unowned(&self, state: &State) -> bool {
+        state.opens == 0
+            && state.version == state.durable
+            && state.rename_target.is_none()
+            && state.data_key.is_none()
+            && state.pending_upload.is_none()
+            && !self.is_moving(&state.key)
+            && !self.is_deleting(&state.key)
+            && !Self::ancestors(&state.key).any(|key| self.pending_moves.contains_key(key))
+    }
+
+    /// Inspect one bounded range, retaining names but never inode owners. Kernel
+    /// lookup counts remain unchanged until the real FORGET callback arrives.
+    pub(crate) fn kernel_retirement_batch(
+        &self,
+        scan: &mut ReclaimScan,
+    ) -> Vec<(u64, crate::metadata_budget::SharedKey)> {
+        use std::ops::Bound::{Excluded, Included};
+        let end = *scan.end.get_or_insert(self.next_ino - 1);
+        let mut entries = Vec::new();
+        for _ in 0..128 {
+            let Some((&ino, node)) = self
+                .nodes
+                .range((Excluded(scan.cursor), Included(end)))
+                .next()
+            else {
+                *scan = ReclaimScan::default();
+                break;
+            };
+            scan.cursor = ino;
+            if ino == 1 || Arc::strong_count(node) != 1 {
+                continue;
+            }
+            let Ok(state) = node.state.try_lock() else {
+                continue;
+            };
+            if state.lookups == 0
+                || state.deleted
+                || self.names.get(state.key.as_str()) != Some(&ino)
+                || !self.clean_unowned(&state)
+            {
+                continue;
+            }
+            let parent = state.key.rsplit_once('/').map_or("", |(parent, _)| parent);
+            if let Some(parent) = self.names.get(parent) {
+                entries.push((*parent, state.key.clone()));
+            }
+        }
+        entries
+    }
+
     /// Examine at most 128 inodes. The caller retains its scan across yields,
     /// starting at the beginning for each admission, not at a prior scan's tail.
     /// Never wait on an inode or retain a resolver pin between batches.
@@ -362,15 +413,7 @@ impl Namespace {
             let Some(state) = node.state.try_lock().ok() else {
                 continue;
             };
-            let eligible = state.lookups == 0
-                && state.opens == 0
-                && state.version == state.durable
-                && state.rename_target.is_none()
-                && state.data_key.is_none()
-                && state.pending_upload.is_none()
-                && !self.is_moving(&state.key)
-                && !self.is_deleting(&state.key)
-                && !Self::ancestors(&state.key).any(|key| self.pending_moves.contains_key(key));
+            let eligible = state.lookups == 0 && self.clean_unowned(&state);
             drop(state);
             if !eligible {
                 continue;

@@ -33,6 +33,7 @@ pub struct Filesystem {
     pub store: Arc<dyn Store>,
     pub namespace: Arc<Mutex<Namespace>>,
     inodes: Arc<crate::namespace::InodeIndex>,
+    kernel_lookup_entries: std::sync::atomic::AtomicU64,
     pub ingress: Budget,
     metadata: crate::metadata_budget::MetadataBudget,
     data: Budget,
@@ -97,6 +98,7 @@ impl DirectoryPage {
                     ))
                 })
                 .transpose()?,
+            inodes: Vec::new(),
         })
     }
 }
@@ -295,6 +297,9 @@ pub struct DirectoryRemainder {
     pub entries: Vec<DirEntry>,
     /// An exhausted page still advances; only a backend EOF has no next name.
     pub next_after: Option<crate::metadata_budget::MetadataString>,
+    // Only the active remainder owns its pending inodes. Cached pages keep
+    // numeric identities, so consuming a frame never pins a TTL's whole tree.
+    inodes: Vec<Arc<Inode>>,
 }
 
 /// An open file retains its inode until the last admitted user releases it.
@@ -433,6 +438,7 @@ impl Filesystem {
         let cache = self.cache.try_stats();
         crate::metrics::Snapshot {
             namespace,
+            kernel_lookup_entries: self.kernel_lookup_entries.load(Ordering::Relaxed),
             cache,
             entry_limit: self.config.entry_limit,
             lanes: [
@@ -1124,6 +1130,7 @@ impl Filesystem {
             });
         Ok(Arc::new(Self {
             inodes: namespace.inodes.clone(),
+            kernel_lookup_entries: std::sync::atomic::AtomicU64::new(1),
             namespace: Arc::new(Mutex::new(namespace)),
             ingress: Budget::new(ingress_bytes)?,
             metadata,
@@ -1445,7 +1452,11 @@ impl Filesystem {
     pub fn forget(&self, ino: u64, count: u64) {
         if let Ok(node) = self.node(ino) {
             let mut s = node.state.lock().unwrap();
+            let was_referenced = s.lookups != 0;
             s.lookups = s.lookups.saturating_sub(count);
+            if was_referenced && s.lookups == 0 {
+                self.kernel_lookup_entries.fetch_sub(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -1668,8 +1679,20 @@ impl Filesystem {
         Ok(Error::Fs(libc::ENOENT))
     }
 
+    pub(crate) fn namespace_pressure(&self) -> bool {
+        let limit = self.config.entry_limit;
+        let headroom = (limit / 2).min(
+            (self.config.max_requests * crate::backend::extended_list::MAX_PAGE_ENTRIES * 2) as u64,
+        );
+        self.kernel_lookup_entries.load(Ordering::Relaxed) >= limit - headroom
+    }
+
     pub fn reference(&self, node: &Inode) {
-        node.state.lock().unwrap().lookups += 1;
+        let mut state = node.state.lock().unwrap();
+        if state.lookups == 0 {
+            self.kernel_lookup_entries.fetch_add(1, Ordering::Relaxed);
+        }
+        state.lookups += 1;
     }
 
     pub fn parent_ino(&self, ino: u64) -> u64 {
@@ -2814,7 +2837,13 @@ impl Filesystem {
                 && let Some(page) =
                     self.cached_directory_page(&ns, &snapshot, after, limit, resume_after)
             {
-                return page.remainder(resume_after);
+                let mut remainder = page.remainder(resume_after)?;
+                remainder.inodes = page
+                    .remaining(resume_after)
+                    .iter()
+                    .map(|entry| ns.get(entry.ino))
+                    .collect::<Result<_>>()?;
+                return Ok(remainder);
             }
             snapshot
         };
@@ -2838,9 +2867,12 @@ impl Filesystem {
         if resolve_types {
             self.resolve_directory_types(ino, &mut selected).await?;
         }
-        self.publish_directory_page(snapshot, after, limit, selected, resolve_types)
-            .await?
-            .remainder(resume_after)
+        let (page, inodes) = self
+            .publish_directory_page(snapshot, after, limit, selected, resolve_types)
+            .await?;
+        let mut remainder = page.remainder(resume_after)?;
+        remainder.inodes = inodes;
+        Ok(remainder)
     }
 
     fn directory_snapshot(
@@ -3323,7 +3355,7 @@ impl Filesystem {
         limit: usize,
         selected: DirectorySelection,
         resolve_types: bool,
-    ) -> Result<Arc<DirectoryPage>> {
+    ) -> Result<(Arc<DirectoryPage>, Vec<Arc<Inode>>)> {
         let page_charge = self.metadata.charge(
             std::mem::size_of::<DirectoryPage>()
                 + std::mem::size_of::<(u64, u64, String, usize)>()
@@ -3332,6 +3364,9 @@ impl Filesystem {
         )?;
         let ino = snapshot.node.ino;
         let mut entries = Vec::with_capacity(selected.len());
+        // A pending wire page is not a reclamation victim. The existing
+        // conservative per-entry charge covers this bounded owner vector too.
+        let mut inodes = Vec::with_capacity(selected.len());
         let deadline = Instant::now() + self.config.request_timeout;
         for (name, mut entry) in selected {
             let entry_charge = self
@@ -3372,6 +3407,7 @@ impl Filesystem {
                 name: crate::metadata_budget::MetadataString::new(name, entry_charge),
                 kind: node.attr().kind,
             });
+            inodes.push(node);
         }
         let page = Arc::new(DirectoryPage {
             metadata_charge: page_charge,
@@ -3389,7 +3425,7 @@ impl Filesystem {
                 .insert((ino, snapshot.epoch, after.into(), limit), page.clone());
             self.directory_pages.run_pending_tasks();
         }
-        Ok(page)
+        Ok((page, inodes))
     }
 
     pub async fn unlink(&self, parent: u64, name: &str, directory: bool) -> Result<()> {

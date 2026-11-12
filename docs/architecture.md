@@ -44,8 +44,11 @@ queued in the kernel. Synchronous non-yielding work remains non-preemptible.
 The executable uses a multithreaded Tokio runtime; tests using a current-thread
 runtime must continue driving it while fuser waits, as for other async callbacks.
 
-File-handle slots are reserved before create can mutate the namespace. A registry
-entry owns its slot and `Arc<OpenFile>`; admitted reads retain that open inode until
+File and directory handles share an owned semaphore bounded by `entry_limit`,
+independently of active-request concurrency. Reserve a slot before create can
+mutate the namespace or opendir can retain an inode. File registry entries own
+their slots and `Arc<OpenFile>`; directory cursors retain their slots through any
+admitted readdir owner. Admitted reads retain that open inode until
 their last owner finishes. Closing admission drains requests before clearing the
 registry. READDIRPLUS holds accepted inode owners until successful buffer delivery;
 error/cancellation transfers no lookup references, and dot entries acquire none.
@@ -58,6 +61,16 @@ and temporary operation plans; payload `--memory-limit` retains its meaning.
 The count guard is additional. Reclamation examines bounded batches and yields
 outside the namespace lock; lookup/open/dirty and in-flight pins remain intact.
 These are admitted logical allocations, not allocator size classes or an RSS cap.
+
+An active directory remainder pins its unsent inodes through frame preparation;
+the TTL page cache still holds numeric identities, not the whole namespace alive.
+Kernel lookup ownership is separate: TTL expiration does not send `FORGET`.
+A zero/nonzero identity counter requests bounded, detached `inval_entry` batches
+near count pressure. The finite scan excludes active, open, dirty and moving
+owners; names survive notification without retaining inode pins. Application locks
+are released before the potentially blocking notification. Real `FORGET` alone
+releases kernel lookup ownership. This improves the verified nested walk, but
+does not guarantee progress through every over-capacity flat directory.
 
 Clean current attributes and their committed baseline share `CachedMetadata`, an
 immutable sorted slice. Writers prepare a separately admitted copy-on-write

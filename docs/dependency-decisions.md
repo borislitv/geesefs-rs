@@ -57,6 +57,39 @@ Sources: [fuser configuration](https://docs.rs/fuser/0.18.0/fuser/struct.Config.
 The public v0.18.0 tag exists; a missing GitHub release object and empty targeted
 backpressure/EAGAIN issue searches do not prove upstream has no related defects.
 
+## Kernel lookup ownership under namespace pressure — 2026-11-12
+
+Retain MIT-licensed fuser 0.18.0 and its supported `Notifier::inval_entry`, rather
+than deleting kernel-owned inodes, changing the entry limit or introducing a FUSE
+transport. TTL expiration does not itself send `FORGET`. A native directory walk
+can therefore retain kernel lookup references beyond the application's namespace
+capacity even though the files are clean and closed. Reuse the existing Tokio
+blocking notification slot and shutdown join; no dependency or unsafe code is added.
+
+Invalidation must not be awaited from the related lookup/readdir request: the
+kernel may hold the parent directory lock until that reply completes. Schedule a
+bounded batch independently while admission still has directory-page headroom,
+release all application locks before notification, and retain ordinary lookup
+ownership until the kernel actually sends `FORGET`. Only the active directory
+remainder pins unsent inodes; cached TTL pages continue to store numeric identities.
+
+Sources: [fuser notifier](https://docs.rs/fuser/0.18.0/fuser/struct.Notifier.html#method.inval_entry),
+[pinned implementation](https://github.com/cberner/fuser/blob/v0.18.0/src/notify.rs),
+[Linux entry invalidation](https://github.com/torvalds/linux/blob/v7.0/fs/fuse/dir.c),
+[Go 0.43.9 lookup/forget ownership](https://github.com/yandex-cloud/geesefs/blob/80c214ef14f620d93407454fc76ca01dd71fa25f/core/goofys_fuse.go).
+The inspected fuser [separate-TTL proposal](https://github.com/cberner/fuser/issues/756)
+does not supply this application capacity policy; shortening TTL is not a substitute
+for relinquishing kernel references.
+
+The pinned fuser `ReplyDirectoryPlus::add` and current public master derive both
+wire node ID and directory-entry inode from `attr.ino`, ignoring the separate inode
+argument. They cannot express a zero node ID with a nonzero directory-entry inode.
+Linux v7.0 `fuse_readdir_uncached` also returns READDIRPLUS errors instead of
+providing an ENOSYS downgrade. No custom wire adapter or new FUSE fork is added;
+worst-case flat-directory progress remains unverified. Idle directory handles use
+Tokio's existing owned semaphore, like files, rather than a second request-derived
+cap or a new resource-management component.
+
 ## Throttling in the existing extension adapter — 2026-11-08
 
 The supported aws-smithy-types 1.9.0 RetryConfig API already provides exponential

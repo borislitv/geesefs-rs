@@ -459,6 +459,207 @@ fn exhausted_file_handles_reject_create_before_namespace_mutation() {
 
 #[test]
 #[ignore = "requires an explicitly authorized Linux FUSE fixture"]
+fn live_directory_handles_use_the_handle_budget_not_request_concurrency() {
+    let store = MemoryStore::new();
+    store.seed("file", b"independent bytes");
+    let mut config = MemoryStore::config(16);
+    config.max_requests = 2;
+    config.entry_limit = 32;
+    let fs = Filesystem::new(config, store).unwrap();
+    mounted(fs.clone(), |path| {
+        let mut held = (0..32)
+            .map(|_| {
+                std::fs::read_dir(path).expect("idle directory handles are not active requests")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            std::fs::read_dir(path).unwrap_err().raw_os_error(),
+            Some(libc::EMFILE)
+        );
+        assert_eq!(
+            std::fs::File::open(path.join("file"))
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EMFILE),
+            "file and directory handles share the same bounded ownership budget"
+        );
+        let names = held[0]
+            .by_ref()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["file"]);
+    });
+    assert_eq!(fs.node(1).unwrap().state.lock().unwrap().opens, 0);
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Linux FUSE fixture"]
+fn native_du_reclaims_kernel_cached_entries_without_losing_open_file_bytes() {
+    use std::io::Read;
+
+    let store = MemoryStore::new();
+    for directory in 0..32 {
+        for file in 0..16 {
+            store.seed(&format!("dir-{directory:02}/file-{file:02}"), &[b'x'; 513]);
+        }
+    }
+    store.seed("anchor", b"held throughout traversal");
+    for entry_limit in [2048, 128] {
+        let mut config = MemoryStore::config(16);
+        config.entry_limit = entry_limit;
+        config.stat_cache_ttl = Duration::from_secs(60);
+        config.mount_options.push("ro".into());
+        let fs = Filesystem::new(config, store.clone()).unwrap();
+        mounted(fs.clone(), |path| {
+            let mut anchor = std::fs::File::open(path.join("anchor")).unwrap();
+            let output = std::process::Command::new("timeout")
+                .args(["15s", "du", "-s", "--block-size=1"])
+                .arg(path)
+                .output()
+                .unwrap();
+            let namespace = fs.namespace.lock().unwrap();
+            let kernel_pinned = namespace
+                .nodes
+                .values()
+                .filter(|node| node.state.lock().unwrap().lookups != 0)
+                .count();
+            let entries = namespace.nodes.len();
+            let evictions = namespace.evictions;
+            drop(namespace);
+            assert!(
+                output.status.success(),
+                "du must traverse more names than the inode bound: {output:?}; entries={}, kernel_pinned={kernel_pinned}",
+                entries
+            );
+            eprintln!(
+                "limit={entry_limit}, entries={}, kernel_pinned={kernel_pinned}, evictions={}, du={:?}",
+                entries, evictions, output
+            );
+            assert!(entries <= entry_limit as usize);
+            if entry_limit == 128 {
+                assert!(evictions > 0);
+            }
+            assert!(output.stderr.is_empty(), "{output:?}");
+            // 512 files each use two 512-byte blocks, plus one block for the anchor.
+            assert_eq!(
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .split_whitespace()
+                    .next(),
+                Some("524800")
+            );
+            let mut bytes = Vec::new();
+            anchor.read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, b"held throughout traversal");
+            assert_eq!(
+                std::fs::read(path.join("dir-00/file-00")).unwrap(),
+                [b'x'; 513]
+            );
+        });
+    }
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Linux FUSE fixture"]
+fn native_pressure_prefixes_advance_exhausted_pages_without_false_eof() {
+    use std::io::Read;
+
+    let store = MemoryStore::new();
+    for file in 0..1536 {
+        store.seed(&format!("file-{file:04}"), &[b'x'; 513]);
+    }
+    for metadata_limit in [None, Some(16 << 20)] {
+        let mut config = MemoryStore::config(16);
+        config.entry_limit = 2048;
+        config.metadata_limit = metadata_limit;
+        config.stat_cache_ttl = Duration::from_secs(60);
+        config.mount_options.push("ro".into());
+        let fs = Filesystem::new(config, store.clone()).unwrap();
+        mounted(fs.clone(), |path| {
+            // Real open files maintain pressure across every reply. All names
+            // fit the bound, isolating cursor progress from capacity exhaustion.
+            let mut held = (0..1024)
+                .map(|file| std::fs::File::open(path.join(format!("file-{file:04}"))).unwrap())
+                .collect::<Vec<_>>();
+            let output = std::process::Command::new("timeout")
+                .args(["15s", "du", "-s", "--block-size=1"])
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert!(output.stderr.is_empty(), "{output:?}");
+            // 1536 independent object bodies each occupy two 512-byte blocks.
+            assert_eq!(
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .split_whitespace()
+                    .next(),
+                Some("1572864")
+            );
+            let namespace = fs.namespace.lock().unwrap();
+            assert!(namespace.nodes.len() <= 2048);
+            assert_eq!(namespace.capacity_failures, 0);
+            drop(namespace);
+            let mut bytes = Vec::new();
+            held[0].read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, [b'x'; 513]);
+        });
+    }
+}
+
+#[test]
+#[ignore = "known flat-pressure progress gap; requires an explicitly authorized Linux FUSE fixture"]
+fn native_flat_directory_retires_kernel_owners_before_the_next_backend_page() {
+    let store = MemoryStore::new();
+    // More names than the namespace budget, with no external inode owners.
+    // Pending PLUS entries need headroom before their lookups reach the kernel.
+    for file in 0..8192 {
+        store.seed(&format!("file-{file:04}"), &[b'x'; 513]);
+    }
+    for metadata_limit in [None, Some(16 << 20)] {
+        let mut config = MemoryStore::config(16);
+        config.entry_limit = 2048;
+        config.metadata_limit = metadata_limit;
+        config.stat_cache_ttl = Duration::from_secs(60);
+        config.mount_options.push("ro".into());
+        let fs = Filesystem::new(config, store.clone()).unwrap();
+        mounted(fs.clone(), |path| {
+            let output = std::process::Command::new("timeout")
+                .args(["15s", "du", "-s", "--block-size=1"])
+                .arg(path)
+                .output()
+                .unwrap();
+            let namespace = fs.namespace.lock().unwrap();
+            eprintln!(
+                "flat: metadata={:?}, entries={}, kernel_pinned={}, evictions={}, capacity_failures={}, output={output:?}",
+                fs.metadata_usage(),
+                namespace.nodes.len(),
+                namespace
+                    .nodes
+                    .values()
+                    .filter(|node| node.state.lock().unwrap().lookups != 0)
+                    .count(),
+                namespace.evictions,
+                namespace.capacity_failures
+            );
+            drop(namespace);
+            assert!(output.status.success(), "{output:?}");
+            assert!(output.stderr.is_empty(), "{output:?}");
+            assert_eq!(
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .split_whitespace()
+                    .next(),
+                Some("8388608")
+            );
+            assert!(fs.namespace.lock().unwrap().nodes.len() <= 2048);
+            assert_eq!(std::fs::read(path.join("file-0000")).unwrap(), [b'x'; 513]);
+        });
+    }
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Linux FUSE fixture"]
 fn namespace_pressure_does_not_reclaim_or_reference_unsent_plus_entries() {
     let store = MemoryStore::new();
     for number in 0..12 {

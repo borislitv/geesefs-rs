@@ -5,6 +5,53 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Directory ownership and progress — 2026-11-12
+
+`tests/directory_pages.rs` retains a pending remainder and then a second cached
+remainder across real count pressure. Neither owner can be evicted until its last
+pin is released. `tests/metrics.rs` checks cached versus kernel-owned identities,
+repeated references, partial/last/duplicate/unknown FORGET and reacquisition.
+Ten selected counter-transition mutants are killed; discovery is not a whole-file
+mutation score. The new helper CC values are at most nine; coverage/CRAP are N/A.
+Dryer retains three existing score-1.00 namespace-bookkeeping pairs.
+
+The native nested fixture requires exact 524800-byte `du` at both 2048 and 128
+inode bounds, actual small-bound eviction and unchanged open-anchor bytes. A
+separate 1536-file fixture holds 1024 real files open under a 2048-inode bound,
+forcing nonempty pressure prefixes without capacity exhaustion. Both metadata
+charging modes require exact 1572864 bytes and preserved open bytes. Injecting
+empty-remainder-as-EOF yields exit0/523264 bytes and fails the independent oracle;
+restored source passes with one and three receivers.
+
+The handle fixture first fails EMFILE with two request slots and 32 idle open
+directories. Shared entry-bounded file/directory admission permits all 32, rejects
+an extra directory or file with EMFILE, still delivers the existing directory
+contents, and releases open ownership after unmount. This does not retrospectively
+attribute every target EMFILE to the server; preserve client/resource evidence.
+
+**Known progress limitation:** the strict 8192-file/2048-inode flat fixture still
+fails ENOMEM. Its expected full size is 8388608 bytes; explicit ENOMEM is not a
+pass. Invalidation is not a synchronous capacity-release handshake. Both attempted
+pending-PLUS headroom and continuous finite notification batches remained RED and
+were reverted. The three baseline-reproduced native failures documented below
+remain separate; the whole opt-in native suite is not green.
+
+Source-frozen default and all-feature suites each pass 526 active tests with 30
+explicit opt-in ignores across 61 targets. The opt-in directory suite has 15 passes
+and four failures with one/three default-allocator receivers and three
+system-allocator receivers: the strict flat gate plus the three baseline gaps.
+Both all-target denied-warning Clippy configurations, fmt, 16 project Python
+tests, 159 benchmark tests (two native opt-in skips) and the 388-package
+public-source audit pass. These scopes do not establish target traversal,
+completed physical L2 recycling or sustained Go-relative acceptance.
+
+```bash
+timeout 180s cargo +1.99.1 test --locked --test directory_pages --test metrics
+timeout 90s cargo +1.99.1 test --locked --test fuse_directory native_pressure_prefixes_advance_exhausted_pages_without_false_eof -- --ignored --exact --nocapture
+GEESEFS_TEST_FUSE_THREADS=3 timeout 90s cargo +1.99.1 test --locked --test fuse_directory live_directory_handles_use_the_handle_budget_not_request_concurrency -- --ignored --exact --nocapture
+timeout 180s cargo +1.99.1 test --locked --test fuse_directory -- --ignored --test-threads=1
+```
+
 ## L2 region observations and mirror selection — 2026-11-12
 
 The existing real-filesystem L2 metrics fixture first fails because the region

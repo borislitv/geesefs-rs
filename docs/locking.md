@@ -34,7 +34,7 @@ and inode-state locks; validation and extent/generation publication stay atomic.
 | --- | --- | --- |
 | `Inode::state` | Metadata, generation, counters, sparse extents and upload reconciliation; no network await | Necessary atomic object state. Snapshots/commit may clone or filter up to the configured extent/cut bounds; a heavily mutated single inode can contend. Namespace-to-state transactions can propagate this delay to name operations. |
 | `Inode::flush` | Async per-object commit/rename/delete gate, deliberately spans backend I/O | Serializes conflicting durability operations, not independent files. Multi-inode rename acquires gates in inode order. Removing it would weaken commit/delete ordering. |
-| `Inode::preload` | Async per-directory single-flight, spans one metadata request | Concurrent cold lookups of the same directory can wait up to the request timeout. Other directories remain independent. |
+| `Inode::preload` | Async per-directory single-flight, spans LIST and yielding admission | The namespace mutex is released between bounded scan batches. Publication rechecks epoch/binding after each admission; same-directory waiters remain subject to the request deadline. |
 | `Inode::pattern`, `OpenFile::pattern` | Small adaptive-history updates, at most 64 samples | Per-handle policy in normal FUSE reads; legacy inode-only API has a per-inode pattern. No backend work or payload copy under the lock. |
 | `Inode::read_fills` | Register/query/retire bounded in-flight intervals; notify followers | Per-inode metadata only. Overlapping same-generation reads deliberately wait on a watch channel after unlocking; disjoint fills proceed independently. |
 | FUSE `Directory` cursor | Async per-open-handle pagination/cookie gate, spans LIST and bounded attribute refresh | Same-handle readdir is serialized to preserve cursor semantics; separate handles are independent. Attribute requests within a PLUS page overlap while replies retain cookie/name order. |
@@ -51,9 +51,11 @@ Metrics use try-lock snapshots and return unavailable instead of joining a queue
 
 ## Residual scaling risks
 
-- Full-capacity namespace eviction still searches canonical owners; all-pinned
-  pressure can cost O(cached inodes) under the namespace mutex. The weak upgrade
-  race is safe, but this is not a constant-time eviction algorithm.
+- Full-capacity namespace eviction still searches canonical owners. Async admission
+  yields after at most 128 examined nodes; only public synchronous installation
+  completes its finite scan synchronously. Each admission starts after the last
+  successful victim and wraps once to its own initial high-water mark. All-pinned
+  pressure still costs O(cached inodes) overall, not constant-time eviction.
 - Nonempty PLUS prefixes and detached invalidation do not ensure that actual
   `FORGET` catches up with new kernel ownership. The over-capacity flat native
   traversal remains a failing progress gate; do not release fake lookup owners

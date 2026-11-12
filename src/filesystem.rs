@@ -1044,12 +1044,14 @@ impl Filesystem {
             if Instant::now() >= deadline {
                 return Err(Error::Timeout("metadata admission"));
             }
-            if (!new_inode || !self.lock_namespace().count_full())
-                && let Ok(charge) = self.metadata.charge(bytes)
-            {
-                return Ok(charge);
-            }
-            if !cleared && self.metadata.usage().limit.is_some() {
+            let byte_pressure = match self.try_charge_metadata(bytes, new_inode) {
+                Ok(Some(charge)) => return Ok(charge),
+                Ok(None) => false,
+                Err(_) => true,
+            };
+            // Count-only reclamation must retain cached listing backings. Drop
+            // them only when their byte charges actually prevent admission.
+            if !cleared && byte_pressure {
                 self.directory_pages.invalidate_all();
                 self.subtree_pages.invalidate_all();
                 self.preloaded_directories.invalidate_all();
@@ -1059,17 +1061,7 @@ impl Filesystem {
                 cleared = true;
                 continue;
             }
-            let reclaimed = {
-                let mut ns = self.lock_namespace();
-                let reclaimed = ns.reclaim_batch(&mut reclaim_scan);
-                if matches!(reclaimed, crate::namespace::Reclaim::Exhausted)
-                    && new_inode
-                    && ns.count_full()
-                {
-                    ns.capacity_failures += 1;
-                }
-                reclaimed
-            };
+            let reclaimed = self.reclaim_metadata(&mut reclaim_scan, new_inode);
             match reclaimed {
                 crate::namespace::Reclaim::Exhausted => return Err(Error::Fs(libc::ENOMEM)),
                 crate::namespace::Reclaim::More | crate::namespace::Reclaim::Removed => {
@@ -1077,6 +1069,32 @@ impl Filesystem {
                 }
             }
         }
+    }
+
+    fn try_charge_metadata(
+        &self,
+        bytes: usize,
+        new_inode: bool,
+    ) -> Result<Option<crate::metadata_budget::MetadataCharge>> {
+        let charge = self.metadata.charge(bytes)?;
+        if new_inode && self.lock_namespace().count_full() {
+            return Ok(None);
+        }
+        Ok(Some(charge))
+    }
+
+    fn reclaim_metadata(
+        &self,
+        scan: &mut crate::namespace::ReclaimScan,
+        new_inode: bool,
+    ) -> crate::namespace::Reclaim {
+        let mut ns = self.lock_namespace();
+        let reclaimed = ns.reclaim_batch(scan);
+        if matches!(reclaimed, crate::namespace::Reclaim::Exhausted) && new_inode && ns.count_full()
+        {
+            ns.capacity_failures += 1;
+        }
+        reclaimed
     }
     // A failed/cancelled directory move may already have drained source keys.
     // Keep mutators from resurrecting them until that bounded move is retried.
@@ -1371,82 +1389,139 @@ impl Filesystem {
     async fn preload_directory(&self, parent: u64) -> Result<()> {
         let node = self.node(parent)?;
         let _gate = node.preload.lock().await;
-        let (prefix, epoch) = {
-            let ns = self.lock_namespace();
-            if self
-                .preloaded_directories
-                .get(&parent)
-                .is_some_and(|fetched| fetched.0.elapsed() < self.config.stat_cache_ttl)
-            {
-                return Ok(());
-            }
-            let state = node.state.lock().unwrap();
-            if state.deleted || ns.is_moving(&state.key) || ns.is_deleting(&state.key) {
-                return Err(self.again("preload_binding_busy"));
-            }
-            let prefix = if state.key.is_empty() {
-                String::new()
-            } else {
-                format!("{}/", state.key)
-            };
-            (prefix, ns.epoch)
+        let Some((prefix, epoch)) = self.preload_snapshot(&node)? else {
+            return Ok(());
         };
         let fetched = std::time::Instant::now();
         let page = self.store.list(&prefix, Some("/"), None).await;
-        let mut ns = self.lock_namespace();
-        if ns.epoch != epoch {
-            return Err(self.again("preload_epoch_changed"));
-        }
-        // This records an attempt, not an authoritative negative listing.
-        if let Ok(charge) = self
-            .metadata
-            .charge(std::mem::size_of::<(u64, Instant)>() + crate::metadata_budget::LINKS)
         {
-            self.preloaded_directories
-                .insert(parent, Arc::new((fetched, charge)));
+            let mut ns = self.lock_namespace();
+            if ns.epoch != epoch {
+                return Err(self.again("preload_epoch_changed"));
+            }
+            // This records an attempt, not an authoritative negative listing.
+            if let Ok(charge) = self
+                .metadata
+                .charge(std::mem::size_of::<(u64, Instant)>() + crate::metadata_budget::LINKS)
+            {
+                self.preloaded_directories
+                    .insert(parent, Arc::new((fetched, charge)));
+            }
+            ns.hidden("");
         }
-        ns.hidden("");
         for object in page?
             .objects
             .into_iter()
             .take(crate::backend::extended_list::MAX_PAGE_ENTRIES)
         {
-            let Some(name) = object.key.strip_prefix(&prefix) else {
-                return Err(Error::InvalidResponse("preload prefix escape".into()));
-            };
-            if name.is_empty()
-                || name.contains('/')
-                || ns.tombstones.contains_key(&object.key)
-                || ns.is_moving(&object.key)
-                || ns.is_deleting(&object.key)
-                || ns.named(&object.key).is_some()
-            {
-                continue;
-            }
-            child(prefix.trim_end_matches('/'), name)?;
-            if object.metadata.is_none() || object.etag.as_ref().is_none_or(|etag| etag.is_empty())
-            {
-                continue;
-            }
-            let (key, entry) = listed_object(object, fetched, &self.metadata)?;
-            let charge = self
-                .metadata
-                .charge_with(|| Inode::metadata_estimate(&key, None))?;
-            ns.try_install_reclaiming(&key, |ino| {
-                let node = Inode::cached_admitted(
-                    ino,
-                    key.clone(),
-                    false,
-                    entry.head,
-                    entry.last_modified,
-                    &self.config,
-                    charge,
-                )?;
-                node.state.lock().unwrap().fetched = fetched;
-                Ok(node)
-            })?;
+            self.preload_object(object, &prefix, epoch, fetched).await?;
         }
         Ok(())
+    }
+
+    fn preload_snapshot(&self, node: &Inode) -> Result<Option<(String, u64)>> {
+        let ns = self.lock_namespace();
+        if self
+            .preloaded_directories
+            .get(&node.ino)
+            .is_some_and(|fetched| fetched.0.elapsed() < self.config.stat_cache_ttl)
+        {
+            return Ok(None);
+        }
+        let state = node.state.lock().unwrap();
+        if state.deleted || ns.is_moving(&state.key) || ns.is_deleting(&state.key) {
+            return Err(self.again("preload_binding_busy"));
+        }
+        let prefix = if state.key.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", state.key)
+        };
+        Ok(Some((prefix, ns.epoch)))
+    }
+
+    fn preload_missing(&self, ns: &Namespace, key: &str, epoch: u64) -> Result<bool> {
+        if ns.epoch != epoch {
+            return Err(self.again("preload_epoch_changed"));
+        }
+        Ok(!ns.tombstones.contains_key(key)
+            && !ns.is_moving(key)
+            && !ns.is_deleting(key)
+            && ns.named(key).is_none())
+    }
+
+    async fn preload_object(
+        &self,
+        object: crate::backend::extended_list::ListedObject,
+        prefix: &str,
+        epoch: u64,
+        fetched: Instant,
+    ) -> Result<()> {
+        if !Self::preload_regular_object(&object, prefix)? {
+            return Ok(());
+        }
+        if !self.preload_missing(&self.lock_namespace(), &object.key, epoch)? {
+            return Ok(());
+        }
+        let (key, entry) = listed_object(object, fetched, &self.metadata)?;
+        // Speculation uses the same yielding admission as authoritative lookups;
+        // never retain the namespace mutex across this cancellable scan.
+        let charge = self
+            .admit_metadata(
+                if self.metadata.enabled() {
+                    Inode::metadata_estimate(&key, None)
+                } else {
+                    0
+                },
+                true,
+            )
+            .await?;
+        self.install_preloaded(key, entry, fetched, epoch, charge)
+    }
+
+    fn install_preloaded(
+        &self,
+        key: crate::metadata_budget::SharedKey,
+        entry: DirectoryMetadata,
+        fetched: Instant,
+        epoch: u64,
+        charge: crate::metadata_budget::MetadataCharge,
+    ) -> Result<()> {
+        let mut ns = self.lock_namespace();
+        if !self.preload_missing(&ns, &key, epoch)? {
+            return Ok(());
+        }
+        ns.try_install(&key, |ino| {
+            let node = Inode::cached_admitted(
+                ino,
+                key.clone(),
+                false,
+                entry.head,
+                entry.last_modified,
+                &self.config,
+                charge,
+            )?;
+            node.state.lock().unwrap().fetched = fetched;
+            Ok(node)
+        })?;
+        Ok(())
+    }
+
+    fn preload_regular_object(
+        object: &crate::backend::extended_list::ListedObject,
+        prefix: &str,
+    ) -> Result<bool> {
+        let Some(name) = object.key.strip_prefix(prefix) else {
+            return Err(Error::InvalidResponse("preload prefix escape".into()));
+        };
+        if name.is_empty() || name.contains('/') {
+            return Ok(false);
+        }
+        child(prefix.trim_end_matches('/'), name)?;
+        if object.metadata.is_none() || object.etag.as_ref().is_none_or(|etag| etag.is_empty()) {
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     pub fn forget(&self, ino: u64, count: u64) {

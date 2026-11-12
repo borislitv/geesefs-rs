@@ -5,6 +5,29 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-12: yield optional preload and reuse finite reclamation progress
+
+A full namespace exposed two independent progress defects: speculative preload
+finished a complete synchronous scan under the namespace mutex, and consecutive
+admissions repeatedly scanned the same long kernel-owned prefix. Public lookup
+regressions first fail on the original source. Preload now uses bounded yielding
+admission without retaining the namespace mutex, then revalidates the publication
+epoch and binding. A mutation during that yield must preserve local dirty bytes
+and obtain the unrelated target's current metadata rather than publish the old LIST.
+
+Keep a shared last-successful-victim hint, not a shared in-progress scan. Each
+admission retains its own initial high-water mark and wraps once, so a released
+prefix remains reachable and interleaved all-pinned scans still terminate. Count
+pressure alone retains cached listing backings; invalidate them only on actual
+byte-charge pressure. Existing metadata-reuse, no-HEAD and writer controls remain.
+
+This fixes the isolated stalls, not the strict flat-directory capacity gate.
+Adaptive READDIRPLUS and a larger notification quantum both failed that oracle
+and were reverted. The latest opt-in suite additionally exposes a directory-open
+count retained after unmount; preserve its failure rather than retry it away.
+See [verification](testing.md#yielding-preload-and-reclaim-continuation--2026-11-12).
+Full target traversal, physical L2 reuse and acceptance remain outstanding.
+
 ## 2026-11-12: preserve active directory owners and bounded traversal semantics
 
 A small native inode bound exposes successful but truncated `du`: an active

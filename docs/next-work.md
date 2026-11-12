@@ -64,6 +64,13 @@ guarantee that real kernel `FORGET` keeps pace. Preserve successful-partial-outp
 ENOMEM, backend failure and EMFILE receipts separately. Do not manufacture progress
 with fake FORGET, discarded metadata, higher cache limits or accepted partial `du`.
 
+The later namespace-stall correction makes speculative preload yield and avoids
+repeated pinned-prefix scans while retaining finite admission-local continuation.
+Qualify the delivered source on the withdrawn target before attributing the stalled
+trial to those defects alone. Investigate the latest native post-unmount directory
+open-count failure and retain all three older PLUS assertions separately; local
+lookup regression success does not close the flat traversal or L2 reuse gates.
+
 ## 2. Target access and large-namespace memory
 
 Explicit `allow_other` wiring and the three local cross-UID cases are complete;

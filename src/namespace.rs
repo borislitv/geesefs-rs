@@ -26,17 +26,19 @@ pub struct Namespace {
     pub evictions: u64,
     pub capacity_failures: u64,
     next_ino: u64,
+    reclaim_cursor: u64,
     limit: usize,
     operation_charge: MetadataCharge,
 }
 
 /// Admission-local continuation: concurrent admissions must not advance each
-/// other's scan. The initial high-water mark keeps the scan finite even while
-/// other callers install new inodes between batches.
+/// other's scan. Each admission starts after the last successful victim, wraps
+/// once, and retains its own high-water mark while other callers install nodes.
 #[derive(Default)]
 pub(crate) struct ReclaimScan {
     cursor: u64,
     end: Option<u64>,
+    wrap_end: u64,
 }
 
 pub(crate) enum Reclaim {
@@ -71,6 +73,7 @@ impl Namespace {
             evictions: 0,
             capacity_failures: 0,
             next_ino: 2,
+            reclaim_cursor: 0,
             limit,
             operation_charge,
         }
@@ -392,21 +395,14 @@ impl Namespace {
         entries
     }
 
-    /// Examine at most 128 inodes. The caller retains its scan across yields,
-    /// starting at the beginning for each admission, not at a prior scan's tail.
+    /// Examine at most 128 inodes. The caller retains its own scan across yields;
+    /// a shared successful-victim hint avoids rescanning a long pinned prefix.
     /// Never wait on an inode or retain a resolver pin between batches.
     pub(crate) fn reclaim_batch(&mut self, scan: &mut ReclaimScan) -> Reclaim {
-        use std::ops::Bound::{Excluded, Included};
-        let end = *scan.end.get_or_insert(self.next_ino - 1);
         for _ in 0..128 {
-            let Some((&ino, node)) = self
-                .nodes
-                .range((Excluded(scan.cursor), Included(end)))
-                .next()
-            else {
+            let Some((ino, node)) = self.next_reclaim_inode(scan) else {
                 return Reclaim::Exhausted;
             };
-            scan.cursor = ino;
             if ino == 1 || Arc::strong_count(node) != 1 {
                 continue;
             }
@@ -422,6 +418,7 @@ impl Namespace {
             match Arc::try_unwrap(owner) {
                 Ok(node) => {
                     self.evictions += 1;
+                    self.reclaim_cursor = ino;
                     self.inodes.pin().remove(&ino);
                     let key = node.state.into_inner().unwrap().key;
                     if self.names.get(&key) == Some(&ino) {
@@ -435,6 +432,32 @@ impl Namespace {
             }
         }
         Reclaim::More
+    }
+
+    fn next_reclaim_inode(&self, scan: &mut ReclaimScan) -> Option<(u64, &Arc<Inode>)> {
+        use std::ops::Bound::{Excluded, Included};
+        if scan.end.is_none() {
+            scan.cursor = self.reclaim_cursor;
+            scan.wrap_end = self.reclaim_cursor;
+            scan.end = Some(self.next_ino - 1);
+        }
+        let Some((&ino, node)) = self
+            .nodes
+            .range((Excluded(scan.cursor), Included(scan.end.unwrap())))
+            .next()
+        else {
+            if scan.wrap_end == 0 {
+                return None;
+            }
+            scan.cursor = 0;
+            scan.end = Some(scan.wrap_end);
+            scan.wrap_end = 0;
+            // At most one wrap, bounded by this admission's initial high-water
+            // mark rather than another caller's moving scan position.
+            return self.next_reclaim_inode(scan);
+        };
+        scan.cursor = ino;
+        Some((ino, node))
     }
 
     /// Synchronous callers have no continuation across EAGAIN. Finish one

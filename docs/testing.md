@@ -5,6 +5,40 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Yielding preload and reclaim continuation — 2026-11-12
+
+Three new `namespace_progress` regressions exercise public lookup/read behavior:
+optional preload yields before completing a pinned-prefix scan; a second admission
+reuses successful-victim progress; mutation during a yield rejects stale LIST
+publication while retaining independent local dirty bytes. The first two are
+assertion-RED on the prior source. Removing the post-yield epoch check makes the
+third return the old three-byte size instead of the independently specified sixteen
+bytes. Restored source passes these checks and the existing released-prefix,
+interleaved exhaustion, no-HEAD and cached-metadata-backing controls.
+
+Four selected scan-wrap mutants produce three kills and one survivor: changing the
+wrapped cursor from zero to one skips only the protected root, which reclamation
+already excludes. This is not a whole-file mutation score. Complexity and duplicate
+reports retain their actual file/function scope; coverage and CRAP are unavailable.
+The final default all-target suite passes 529 active tests with 30 opt-in ignores;
+the all-feature suite also passes before the final publication-helper extraction.
+Final focused checks and all-feature denied-warning Clippy pass after extraction.
+
+The opt-in directory run remains **14 passed / 5 failed**: the strict flat gate,
+the three previously recorded baseline assertions, and a nonzero directory-open
+count after unmount. The flat oracle still requires exactly 8388608 bytes; ENOMEM
+and partial output are failures. Adaptive READDIRPLUS and page-sized retirement
+experiments failed and were reverted. No target traversal/recycling success follows
+from the local namespace corrections.
+
+```bash
+timeout 180s cargo +1.99.1 test --locked --offline --test namespace_progress --test namespace_install --test metadata_limits --test metadata_compaction --test lookup_preload --test namespace_review_regressions --test directory_pages
+timeout 360s cargo +1.99.1 test --locked --offline --all-targets
+timeout 360s cargo +1.99.1 test --locked --offline --all-targets --all-features
+timeout 160s cargo +1.99.1 clippy --locked --offline --all-targets --all-features -- -D warnings
+timeout 180s cargo +1.99.1 test --locked --offline --test fuse_directory -- --ignored --test-threads=1
+```
+
 ## Directory ownership and progress — 2026-11-12
 
 `tests/directory_pages.rs` retains a pending remainder and then a second cached

@@ -455,6 +455,7 @@ impl ReadFallback {
 
 #[derive(Debug)]
 pub struct Stats {
+    pub regions: super::RegionStats,
     pub active_read_jobs: usize,
     pub active_spill_jobs: usize,
     pub queued_reads: u64,
@@ -845,6 +846,7 @@ impl DiskCache {
         // until explicit close (dropping it would close its Store). NEVER call
         // HybridCache insert/writer/eviction APIs; flush-on-close stays disabled.
         let builder = HybridCacheBuilder::new()
+            .with_metrics_registry(Box::new(recent.regions().clone()))
             .with_flush_on_close(false)
             .memory(1)
             .storage()
@@ -913,6 +915,7 @@ impl DiskCache {
     pub fn stats(&self) -> Stats {
         let i = self.inner();
         Stats {
+            regions: i.recent.regions().snapshot(),
             active_read_jobs: JOBS - i.read_jobs.available_permits(),
             active_spill_jobs: JOBS - i.jobs.available_permits(),
             queued_reads: i.queued_reads.load(Ordering::Relaxed),

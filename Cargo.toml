@@ -33,6 +33,7 @@ http-body-util = "=0.1.5"
 hyper = { version = "=1.12.0", features = ["server", "http1"] }
 hyper-util = { version = "=0.1.21", features = ["tokio"] }
 prometheus-client = "=0.25.2"
+mixtrics = "=0.2.6"
 futures-util = { version = "0.3", default-features = false, features = ["std", "io"] }
 getrandom = "=0.4.3"
 s3s-sigv2 = "=0.17.0"

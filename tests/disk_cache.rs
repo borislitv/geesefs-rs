@@ -864,11 +864,83 @@ async fn optional_read_deadline_returns_miss_without_releasing_live_io_funding()
 }
 
 #[tokio::test]
+async fn region_observations_distinguish_inflight_and_completed_recycling() {
+    use std::sync::atomic::Ordering;
+
+    let dir = support::directory();
+    let resources = Budget::new(32 * MIB).unwrap();
+    let gate = support::IoGate::new();
+    let cache = support::gated(dir.path(), &resources, gate.clone()).await;
+    // Recovery has finished. With no caller reads, the next disk read belongs
+    // to a real region reclaimer after the fixed data pool fills.
+    gate.hold_reads.store(true, Ordering::SeqCst);
+    let writer = tokio::spawn({
+        let cache = cache.clone();
+        async move {
+            for n in 0..128 {
+                let key = DiskKey::new(
+                    b"test",
+                    format!("{n}.rpm").as_bytes(),
+                    b"v",
+                    MAX_PAYLOAD_BYTES as u64,
+                    0,
+                    MAX_PAYLOAD_BYTES,
+                )
+                .unwrap();
+                assert_eq!(
+                    cache.try_demote(key, block(&vec![n as u8; MAX_PAYLOAD_BYTES])),
+                    Demotion::Admitted
+                );
+                cache.drain(DEADLINE).await.unwrap();
+            }
+        }
+    });
+    let entered = tokio::time::timeout(DEADLINE, gate.entered.acquire()).await;
+    let during = cache.stats().regions;
+    gate.hold_reads.store(false, Ordering::SeqCst);
+    gate.release.add_permits(1);
+    tokio::time::timeout(DEADLINE, writer)
+        .await
+        .unwrap()
+        .unwrap();
+    let completed = cache.stats().regions;
+    cache.close(DEADLINE).await.unwrap();
+    // Assert after unblocking and joining the actual owner, including fault runs.
+    assert!(
+        entered.is_ok(),
+        "capacity pressure never reached the reclaimer"
+    );
+    assert_eq!(during.reclaiming, 1);
+    assert_eq!(
+        during.clean + during.writing + during.evictable + during.reclaiming,
+        15
+    );
+    assert_eq!(completed.reclaiming, 0);
+    assert!(
+        completed.clean > 0,
+        "recycled capacity must become reusable"
+    );
+    assert_eq!(
+        completed.clean + completed.writing + completed.evictable,
+        15
+    );
+}
+
+#[tokio::test]
 async fn bounded_index_and_recent_hints_survive_capacity_pressure_with_hot_payload() {
     let dir = support::directory();
     let resources = Budget::new(32 * MIB).unwrap();
     let output = Budget::new(MIB).unwrap();
     let cache = open(dir.path(), &resources).await;
+    let empty = cache.stats().regions;
+    assert_eq!(
+        (empty.total, empty.clean, empty.size_bytes),
+        (15, 15, MIB as u64)
+    );
+    assert_eq!(
+        (empty.writing, empty.evictable, empty.reclaiming),
+        (0, 0, 0)
+    );
     let numbered = |n: u64| {
         DiskKey::new(
             b"test",
@@ -907,6 +979,18 @@ async fn bounded_index_and_recent_hints_survive_capacity_pressure_with_hot_paylo
         let stats = cache.stats();
         assert!(stats.index_entries <= cache.funding().index_entries);
         assert!(stats.recent_entries <= cache.funding().recent_entries);
+        let regions = stats.regions;
+        assert_eq!(
+            regions.total, 15,
+            "data-region capacity must not grow during reuse"
+        );
+        assert_eq!(
+            regions.clean + regions.writing + regions.evictable + regions.reclaiming,
+            15,
+            "quiescent region states must partition the fixed pool at record {n}"
+        );
+        assert_eq!(regions.reclaiming, 0, "drain joins region reclamation");
+        assert!(regions.clean < 15, "populated storage is not an empty pool");
     }
     assert_eq!(
         cache
@@ -923,6 +1007,10 @@ async fn bounded_index_and_recent_hints_survive_capacity_pressure_with_hot_paylo
     assert!(
         cache.stats().region_reclaims_started > 0,
         "real capacity pressure invokes region callbacks"
+    );
+    assert!(
+        cache.stats().regions.clean > 0,
+        "completed recycling returns clean regions"
     );
     assert_eq!(
         std::fs::metadata(dir.path().join("payload-v1.cache"))

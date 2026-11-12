@@ -194,6 +194,76 @@ fn regex_policy_uses_literal_case_sensitive_mount_relative_paths() {
 }
 
 #[test]
+fn mirror_payload_policy_selects_images_archives_and_packages_not_metadata_or_sidecars() {
+    let fixture = Fixture::new();
+    let mut args = fixture.args();
+    args[8] = include_str!("../docs/mirror-payload.regex").trim().into();
+    let config = Config::try_parse_from(args).unwrap();
+    let policy = config.disk_cache_regex.unwrap();
+    for path in [
+        "/releases/installer.iso",
+        "/releases/INSTALLER.ISO",
+        "/cloud/disk.qcow2",
+        "/cloud/disk.qcow",
+        "/cloud/disk.vhdx",
+        "/cloud/disk.vmdk",
+        "/cloud/disk.vdi",
+        "/cloud/disk.img.xz",
+        "/cloud/disk.raw.zst",
+        "/live/root.squashfs",
+        "/images/disk.dmg",
+        "/appliances/vm.ova",
+        "/sources/source.tar",
+        "/sources/source.tar.gz",
+        "/sources/source.tar.xz",
+        "/sources/source.tar.zst",
+        "/sources/source.tgz",
+        "/sources/source.tbz2",
+        "/sources/source.txz",
+        "/sources/source.zip",
+        "/sources/source.7z",
+        "/pool/package.deb",
+        "/pool/package.udeb",
+        "/pool/package.RPM",
+        "/pool/package.apk",
+        "/pool/application.AppImage",
+        "/installers/driver.run",
+        "/installers/setup.exe",
+        "/installers/setup.msi",
+        "/packages/module.whl",
+        "/packages/application.jar",
+        "/packages/library.crate",
+    ] {
+        assert!(policy.matches(path), "payload omitted: {path}");
+    }
+    for path in [
+        "installer.iso",
+        "/Release",
+        "/repodata/repomd.xml",
+        "/repodata/primary.xml.gz",
+        "/Packages.gz",
+        "/Packages.xz",
+        "/Sources.xz",
+        "/index.html",
+        "/SHA256SUMS",
+        "/image.iso.sha256",
+        "/image.iso.asc",
+        "/image.iso.torrent",
+        "/source.tar.gz.sig",
+        "/package.rpm.md5",
+        "/disk.img.part",
+        "/folder.iso/README",
+        "/folder.rpm/metadata",
+        "/installer.isox",
+        "/installerXiso",
+        "/installer.iso/",
+        "",
+    ] {
+        assert!(!policy.matches(path), "non-payload selected: {path}");
+    }
+}
+
+#[test]
 fn rejects_invalid_pcre_and_bounded_regex_compilation() {
     let fixture = Fixture::new();
     for pattern in ["[", r"(deb)\1", r"(?=deb)", r"(?<=/)deb", r"\p{L}{10000}"] {

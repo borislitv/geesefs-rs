@@ -118,6 +118,7 @@ async fn fresh_attachment_reserves_funding_without_constructing_an_unused_engine
     assert!(fs.disk_cache_stats().is_none());
     let metrics = geesefs_rs::metrics::render(&fs).unwrap();
     assert!(metrics.contains("geesefs_disk_cache_state{state=\"prepared\"} 1"));
+    assert!(!metrics.contains("geesefs_disk_cache_region_used_bytes "));
     assert!(metrics.contains("geesefs_disk_cache_stats_available 0"));
     assert!(
         !metrics

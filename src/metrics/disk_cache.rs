@@ -2,7 +2,7 @@
 use super::{Observation, Snapshot, counter, gauge};
 use crate::{
     backend::cache_scope::CacheBypass,
-    disk_cache::{Funding, LatencyStats, State, Stats},
+    disk_cache::{Funding, LatencyStats, RegionStats, State, Stats},
     filesystem::Filesystem,
 };
 use prometheus_client::{
@@ -115,6 +115,9 @@ fn states(registry: &mut Registry, state: Option<State>, bypass: Option<CacheByp
 }
 
 fn adapter(registry: &mut Registry, stats: Option<&Stats>) {
+    if let Some(stats) = stats {
+        regions(registry, stats.regions);
+    }
     let fallbacks = Family::<Vec<(&str, &str)>, Counter>::default();
     for reason in crate::disk_cache::ReadFallback::ALL {
         fallbacks
@@ -152,7 +155,7 @@ fn adapter(registry: &mut Registry, stats: Option<&Stats>) {
         ),
         (
             "geesefs_disk_cache_index_entries",
-            "Current guarded record-index entries; not measured index heap bytes",
+            "Current guarded record-index slots including pending updates and tombstones; not distinct S3 objects or index heap bytes",
             stats.map_or(0, |s| s.index_entries),
         ),
         (
@@ -283,6 +286,46 @@ fn adapter(registry: &mut Registry, stats: Option<&Stats>) {
     }
 }
 
+fn regions(registry: &mut Registry, stats: RegionStats) {
+    let counts = Family::<Vec<(&str, &str)>, Observation>::default();
+    for (state, count) in [
+        ("clean", stats.clean),
+        ("writing", stats.writing),
+        ("evictable", stats.evictable),
+        ("reclaiming", stats.reclaiming),
+    ] {
+        counts
+            .get_or_create(&vec![("state", state)])
+            .set(count as f64);
+    }
+    registry.register("geesefs_disk_cache_regions",
+        "Engine data-region ownership; independent observations can straddle transitions; evictable is not empty and reclaiming is not completed recycling", counts);
+    for (name, help, value) in [
+        (
+            "geesefs_disk_cache_region_size_bytes",
+            "Size of one engine data region, not a cached payload record",
+            stats.size_bytes,
+        ),
+        (
+            "geesefs_disk_cache_region_capacity_bytes",
+            "Actual data-region capacity excluding the tombstone log and unusable file tail",
+            stats.total * stats.size_bytes,
+        ),
+        (
+            "geesefs_disk_cache_region_free_bytes",
+            "Capacity of clean reusable regions, not free filesystem space",
+            stats.clean * stats.size_bytes,
+        ),
+        (
+            "geesefs_disk_cache_region_used_bytes",
+            "Non-clean reserved region capacity, including unused tails and obsolete records; not live payload bytes or file allocation",
+            (stats.total - stats.clean) * stats.size_bytes,
+        ),
+    ] {
+        gauge(registry, name, help, value);
+    }
+}
+
 fn operation_latency(registry: &mut Registry, operation: &str, value: LatencyStats) {
     counter(
         registry,
@@ -403,6 +446,8 @@ fn instrumentation(registry: &mut Registry, stats: Option<&Stats>) {
         "allocated_bytes",
         "index_heap_bytes",
         "latency_quantiles",
+        "payload_bytes",
+        "object_count",
     ] {
         available
             .get_or_create(&vec![("observation", observation)])
@@ -414,6 +459,7 @@ fn instrumentation(registry: &mut Registry, stats: Option<&Stats>) {
         "write_latency",
         "recovery_duration",
         "region_reclaims_started",
+        "region_occupancy",
     ] {
         available
             .get_or_create(&vec![("observation", observation)])

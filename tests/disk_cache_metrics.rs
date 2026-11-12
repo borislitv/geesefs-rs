@@ -72,6 +72,7 @@ async fn disabled_prepared_and_bypass_are_not_fake_ready_or_measured_allocations
         0.
     );
     assert_eq!(sample(&text, "geesefs_disk_cache_stats_available"), 0.);
+    assert!(!text.contains("geesefs_disk_cache_region_used_bytes "));
     assert_eq!(sample(&text, "geesefs_disk_cache_hits_total"), 0.);
     assert_eq!(sample(&text, "geesefs_disk_cache_hit_bytes_total"), 0.);
     assert_eq!(sample(&text, "geesefs_disk_cache_funding_bytes"), 0.);
@@ -269,6 +270,22 @@ async fn real_eviction_recovery_and_aligned_l2_read_have_exact_count_and_byte_me
     store.seed("private-package.rpm", &vec![0x39; READ_BLOCK_BYTES]);
     let config = configured(dir.path(), mount.path());
     let fs = attach(config.clone(), store.clone()).await;
+    let empty = render(&fs).unwrap();
+    // The 16-MiB file also contains the tombstone log: only fifteen complete
+    // 1-MiB data regions exist. Preallocation must not look like a full cache.
+    assert_eq!(
+        sample(&empty, "geesefs_disk_cache_region_capacity_bytes"),
+        (15 * MIB) as f64
+    );
+    assert_eq!(
+        sample(&empty, "geesefs_disk_cache_region_free_bytes"),
+        (15 * MIB) as f64
+    );
+    assert_eq!(sample(&empty, "geesefs_disk_cache_region_used_bytes"), 0.);
+    assert_eq!(
+        sample(&empty, "geesefs_disk_cache_regions{state=\"clean\"}"),
+        15.
+    );
     let package = fs.lookup(1, "private-package.rpm").await.unwrap();
     assert_eq!(
         fs.read(package.ino, 0, READ_BLOCK_BYTES)
@@ -303,6 +320,22 @@ async fn real_eviction_recovery_and_aligned_l2_read_have_exact_count_and_byte_me
     assert_eq!(sample(&text, "geesefs_disk_cache_hit_bytes_total"), 0.);
     assert!(sample(&text, "geesefs_disk_cache_io_write_bytes_total") > READ_BLOCK_BYTES as f64);
     assert_eq!(sample(&text, "geesefs_disk_cache_index_entries"), 1.);
+    assert_eq!(
+        sample(&text, "geesefs_disk_cache_region_size_bytes"),
+        MIB as f64
+    );
+    assert_eq!(
+        sample(&text, "geesefs_disk_cache_region_used_bytes"),
+        MIB as f64
+    );
+    assert_eq!(
+        sample(&text, "geesefs_disk_cache_region_free_bytes"),
+        (14 * MIB) as f64
+    );
+    assert_eq!(
+        sample(&text, "geesefs_disk_cache_regions{state=\"writing\"}"),
+        1.
+    );
     assert_eq!(
         sample(&text, "geesefs_disk_cache_admitted_demotions_total"),
         1.
@@ -349,6 +382,19 @@ async fn real_eviction_recovery_and_aligned_l2_read_have_exact_count_and_byte_me
     config.read_ahead_small = 0;
     config.read_ahead_large = 0;
     let fs = attach(config, store.clone()).await;
+    let recovered = render(&fs).unwrap();
+    assert_eq!(
+        sample(&recovered, "geesefs_disk_cache_region_used_bytes"),
+        MIB as f64
+    );
+    assert_eq!(
+        sample(&recovered, "geesefs_disk_cache_region_free_bytes"),
+        (14 * MIB) as f64
+    );
+    assert_eq!(
+        sample(&recovered, "geesefs_disk_cache_regions{state=\"writing\"}"),
+        0.
+    );
     let package = fs.lookup(1, "private-package.rpm").await.unwrap();
     let source_gets = store.read_calls.load(Ordering::Relaxed);
     assert_eq!(
@@ -373,6 +419,29 @@ async fn real_eviction_recovery_and_aligned_l2_read_have_exact_count_and_byte_me
         sample(&text, "geesefs_disk_cache_state{state=\"ready\"}"),
         1.
     );
+    // Foyer's drain fence reserves an empty writer region even without payload
+    // I/O. Report that ownership separately from the recovered populated region.
+    assert_eq!(
+        sample(&text, "geesefs_disk_cache_region_used_bytes"),
+        (2 * MIB) as f64
+    );
+    assert_eq!(
+        sample(&text, "geesefs_disk_cache_region_free_bytes"),
+        (13 * MIB) as f64
+    );
+    assert_eq!(
+        sample(&text, "geesefs_disk_cache_regions{state=\"evictable\"}"),
+        1.
+    );
+    assert_eq!(
+        sample(&text, "geesefs_disk_cache_regions{state=\"writing\"}"),
+        1.
+    );
+    assert_eq!(
+        sample(&text, "geesefs_disk_cache_regions{state=\"reclaiming\"}"),
+        0.
+    );
+    assert_eq!(sample(&text, "geesefs_disk_cache_io_write_bytes_total"), 0.);
     assert_eq!(sample(&text, "geesefs_disk_cache_stats_available"), 1.);
     assert_eq!(sample(&text, "geesefs_disk_cache_hits_total"), 1.);
     assert_eq!(sample(&text, "geesefs_disk_cache_misses_total"), 0.);
@@ -447,6 +516,7 @@ async fn real_eviction_recovery_and_aligned_l2_read_have_exact_count_and_byte_me
         "write_latency",
         "recovery_duration",
         "region_reclaims_started",
+        "region_occupancy",
     ] {
         assert_eq!(
             sample(

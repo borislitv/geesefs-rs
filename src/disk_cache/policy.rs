@@ -18,6 +18,7 @@ pub(crate) struct Recent(Arc<RecentState>);
 struct RecentState {
     references: Mutex<References>,
     region_reclaims_started: AtomicU64,
+    regions: super::regions::Regions,
 }
 #[derive(Debug)]
 struct References {
@@ -32,6 +33,7 @@ impl Recent {
                 remaining: 0,
             }),
             region_reclaims_started: AtomicU64::new(0),
+            regions: super::regions::Regions::default(),
         }))
     }
     pub(crate) fn touch(&self, hash: u64) {
@@ -42,6 +44,9 @@ impl Recent {
     }
     pub(crate) fn region_reclaims_started(&self) -> u64 {
         self.0.region_reclaims_started.load(Ordering::Relaxed)
+    }
+    pub(crate) fn regions(&self) -> &super::regions::Regions {
+        &self.0.regions
     }
     pub(crate) fn picker(&self) -> impl EvictionPicker {
         CopyBoundedFifo {
@@ -79,6 +84,7 @@ struct CopyBoundedFifo {
 }
 impl EvictionPicker for CopyBoundedFifo {
     fn init(&mut self, blocks: &[u32], block_size: usize) {
+        self.recent.regions().init(blocks.len(), block_size);
         self.copy_limit = block_size / 4;
         self.fifo.init(blocks, block_size);
     }

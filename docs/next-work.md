@@ -47,6 +47,15 @@ also fail on the pristine baseline under the current development kernel; see
 Preserve failures from other mounts/proxies separately, without changing runtime
 limits or claiming whole-system acceptance.
 
+Finish the separately authorized full configured L2 capacity/recycling trial with
+concurrent complete `du -sh`, retaining traversal/read errors and daemon/client/
+cgroup/kernel memory independently. Preallocation and cumulative writes alone do
+not establish a full live cache or complete physical-pool turnover. Deploy the
+[region observations and broader mirror policy](disk-cache-operations.md) only in
+a separately recorded phase after the frozen workload; preserve inventory and
+verify recovery/independent bytes. Streaming zstd is an inspection topic, not an
+enabled codec or accepted memory/performance improvement.
+
 ## 2. Target access and large-namespace memory
 
 Explicit `allow_other` wiring and the three local cross-UID cases are complete;

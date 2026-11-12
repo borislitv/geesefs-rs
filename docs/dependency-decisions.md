@@ -7,6 +7,29 @@ translated, vendored or linked. This package forbids unsafe code in every target
 License declarations are checked; the complete binary-distribution notice audit
 remains outstanding. See LICENSE and NOTICE for source attribution.
 
+## Disk region occupancy observations — 2026-11-12
+
+Reuse the pinned Foyer engine's existing `clean`, `writing`, `evictable` and
+`reclaiming` gauges through `HybridCacheBuilder::with_metrics_registry`, and its
+`EvictionPicker::init` geometry. The callback sees the actual data-region count
+after the tombstone-log partition, unlike configured file capacity. Neither
+opening-time `st_blocks` nor cumulative I/O measures current region occupancy.
+
+Promote already-locked Apache-2.0 [mixtrics 0.2.6](https://docs.rs/mixtrics/0.2.6/mixtrics/)
+to a direct dependency, without enabling an additional metrics backend. Its
+maintained Prometheus-client adapters support versions 0.22–0.24, not this
+package's existing 0.25.2. They also register all Foyer counters/histograms, whereas
+this boundary needs only four fixed gauges. Use a small `RegistryOps`/`GaugeOps`
+adapter backed by the existing Prometheus-client gauges; delegate unselected
+metrics to mixtrics' `NoopMetricsRegistry`. Do not add a second exporter, a global
+registry, storage scans, per-object accounting maps or engine/fork changes.
+
+Sources: [Foyer registry hook](https://docs.rs/foyer/0.22.6/foyer/struct.HybridCacheBuilder.html#method.with_metrics_registry),
+[mixtrics registry API](https://docs.rs/mixtrics/0.2.6/mixtrics/metrics/trait.RegistryOps.html),
+[pinned region manager](https://github.com/borislitv/foyer/blob/d60dd0462c1de1e0853590791371208b659c90bf/foyer-storage/src/engine/block/manager.rs).
+The result measures reserved data-region capacity, including unused tails and
+obsolete records, not useful payload bytes or distinct S3 objects.
+
 ## FUSE request backpressure — 2026-11-12
 
 Retain public MIT-licensed fuser 0.18.0 and Tokio 1.54.1. Use fuser's fixed

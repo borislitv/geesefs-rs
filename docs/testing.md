@@ -5,6 +5,42 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## L2 region observations and mirror selection — 2026-11-12
+
+The existing real-filesystem L2 metrics fixture first fails because the region
+capacity gauge is missing. It then verifies an empty preallocated 16-MiB file has
+only fifteen 1-MiB data regions, one populated writer region consumes its entire
+reservation, and recovery restores occupancy independently of reset I/O counters.
+An empty drain fence can reserve another writer region without writing payload;
+the test distinguishes that reservation from the recovered evictable region.
+Prepared/disabled snapshots omit unavailable region gauges, and repeated scrapes
+do not perform storage/S3 I/O or change ownership.
+
+Real fixed-pool pressure exercises repeated recycling. A gated real-file reclaimer
+shows one in-progress region, then clean reusable capacity after actual completion.
+Removing decrements fails the fifteen-region conservation assertion; dropping the
+reclaiming gauge fails the in-progress assertion. Both fault tests clean up actual
+owners before asserting. Four selected occupancy-arithmetic mutants are reported
+killed; 62 discovered sites are not a whole-file mutation score. The new bridge and
+region exporter have CC at most three; coverage/CRAP remain unmeasured. After
+delegating required no-op trait methods to mixtrics, Dryer finds no candidates at
+score >=0.8 in the two scoped files.
+
+The checked-in mirror regex is parsed through the real CLI. The initial deb/rpm
+policy fails the ISO example; the expanded policy accepts disk-image/archive and
+package examples while rejecting metadata, sidecars, partial names and a matching
+directory with a nonmatching child. This is filename selection, not a size filter.
+
+```bash
+timeout 180s cargo +1.99.1 test --locked --test disk_cache --test disk_cache_metrics --test disk_cache_lazy --test disk_cache_config
+timeout 180s cargo +1.99.1 test --locked --all-features --test disk_cache --test disk_cache_metrics --test disk_cache_lazy --test disk_cache_config
+```
+
+No measured target improvement or complete-object residency follows from these
+fixtures. Distinct-object counts and useful live payload byte totals remain
+unavailable. The ongoing target workload retains its source/configuration until
+its own recorded completion/restart phase.
+
 ## FUSE admission backpressure — 2026-11-12
 
 `tests/fuse_admission.rs` mounts disposable real FUSE fixtures. With one request

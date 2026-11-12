@@ -5,6 +5,23 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-12: expose data-region fullness and broaden mirror selection
+
+Configured file capacity, index counts and cumulative I/O did not show how much
+of the L2 data-region pool remained reusable. Connect the pinned engine's existing
+four state gauges and actual partition geometry to the Prometheus endpoint through
+its supported metrics/picker APIs. Report used/free data-region capacity separately
+from file allocation, indexed records and useful payload bytes. Empty preallocated,
+populated, recovered and actively recycling real-file fixtures verify the boundary;
+scraping performs no cache I/O. No engine format, compression or budget changes.
+
+The prior deb/rpm-only operating example excludes ISO images and other mirror
+payloads. Add a checked-in, CLI-tested case-insensitive policy for images, archives
+and packages, retaining metadata/sidecar exclusions. The generic regex remains
+explicit and matches mount-relative paths. See [operation and selection](disk-cache-operations.md).
+Apply an operating-policy change as a separately recorded restart phase; local
+tests and these observations do not complete the ongoing full-capacity/du trial.
+
 ## 2026-11-12: backpressure at saturated FUSE request admission
 
 Real buffered-read and sendfile regressions reproduce EIO from immediate

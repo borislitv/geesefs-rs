@@ -89,6 +89,9 @@ retention policy, span count and process RSS are different quantities.
 
 ### Persistent payload tier
 
+See [selection and operation](disk-cache-operations.md) for the checked-in mirror
+payload regex and the distinction between whole files and cached records.
+
 These observations are separate from RAM ownership and process memory. The
 `geesefs_disk_cache_state{state}` vocabulary is `disabled`, `prepared`,
 `recovering`, `ready`, `closing`, `closed`, `bypass`. A proven-new Prepared cache
@@ -107,8 +110,40 @@ omitted, not fabricated zero occupancy or a successful Ready observation.
 | `geesefs_disk_cache_admitted_demotions_total` / `geesefs_disk_cache_engine_admitted_demotions_total` | Admitted copy and accepted engine enqueue, respectively; neither is a durability acknowledgement |
 | `geesefs_disk_cache_read_operation_hits_total` / `geesefs_disk_cache_hits_total` | Worker-completed copies versus caller-delivered adapter results; a later generation check may still reject delivery |
 | `geesefs_disk_cache_hit_bytes_total` | Validated bytes delivered into the read pipeline, including alignment/read-ahead; not requested client bytes |
+| `geesefs_disk_cache_index_entries` / `geesefs_disk_cache_index_entry_limit` | Guarded index slots and their bound, including pending updates/tombstones; not distinct files or S3 objects |
+| `geesefs_disk_cache_managed_capacity_bytes` | Configured file/engine capacity, including storage overhead; not current occupancy |
+| `geesefs_disk_cache_regions{state}` | Current data regions: `clean` (reusable), `writing` (reserved by a flusher), `evictable` (sealed/recovered), `reclaiming` (being recycled) |
+| `geesefs_disk_cache_region_size_bytes` | One data-region allocation unit; independent of the up-to-128-KiB cached payload records |
+| `geesefs_disk_cache_region_capacity_bytes` | Actual data-region pool, excluding the tombstone log and unusable file tail |
+| `geesefs_disk_cache_region_free_bytes` | Clean reusable region capacity; not free filesystem space |
+| `geesefs_disk_cache_region_used_bytes` | Non-clean reserved region capacity, including unused region tails and obsolete records; not useful live payload bytes |
 | `geesefs_disk_cache_region_reclaims_started_total` | Region-picker callbacks, not completed per-record evictions or reclaimed bytes |
 | `geesefs_disk_cache_opened_file_allocated_bytes` | Opening-time file allocation observation, not current physical occupancy |
+| `geesefs_disk_cache_io_read_bytes_total` / `geesefs_disk_cache_io_write_bytes_total` | Cumulative engine I/O, including record overhead; reset on restart, can exceed capacity after reuse |
+| `geesefs_disk_cache_dropped_total` / `geesefs_disk_cache_errors_total` | Best-effort demotion refusals versus adapter/storage/decode errors; drops are not capacity evictions |
+
+Two different fullness limits must remain visible:
+
+```promql
+100 * geesefs_disk_cache_index_entries / geesefs_disk_cache_index_entry_limit
+100 * geesefs_disk_cache_region_used_bytes / geesefs_disk_cache_region_capacity_bytes
+```
+
+Interpret these only with `geesefs_disk_cache_state{state="ready"} == 1` and
+`geesefs_disk_cache_stats_available == 1`. Region gauges are omitted before an
+adapter exists, including disabled/prepared/bypass states, rather than presenting
+a misleading zero. `geesefs_disk_cache_instrumentation_available{observation="region_occupancy"}`
+reports availability. Independent state-gauge updates may straddle a transition;
+the pool capacity is fixed separately from the actual picker initialization.
+
+Recovery restores occupied-region observations even though session I/O counters
+restart at zero. A writer can reserve a clean region before writing bytes; even
+an empty drain fence can do this. `evictable` includes useful, obsolete and partially
+filled regions, not just garbage. Do not interpret region fullness as payload
+density, a count of complete cached objects, or evidence that every region has
+already been written. Exact useful payload bytes and distinct-object count remain
+unavailable (`payload_bytes` and `object_count` availability observations are zero).
+The bounded index limits live record slots independently of physical-region reuse.
 
 Request-correlated debug records include `l2_read_eligibility` and adapter
 decisions without object keys or dynamic metric labels. Use eligibility and

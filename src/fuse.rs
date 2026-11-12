@@ -132,11 +132,18 @@ struct File {
     _permit: OwnedSemaphorePermit,
 }
 struct Directory {
+    node: Arc<crate::inode::Inode>,
     _permit: OwnedSemaphorePermit,
     _metadata_charge: crate::metadata_budget::MetadataCharge,
     last: crate::metadata_budget::MetadataString,
     page_after: crate::metadata_budget::MetadataString,
     cookie: u64,
+}
+
+impl Drop for Directory {
+    fn drop(&mut self) {
+        self.node.state.lock().unwrap().opens -= 1;
+    }
 }
 
 impl Directory {
@@ -830,6 +837,8 @@ impl fuser::Filesystem for Fuse {
                     .await
                     .map_err(|_| Error::Cancelled)?;
                 self.files.lock().unwrap().clear();
+                let directories = std::mem::take(&mut *self.directories.lock().unwrap());
+                drop(directories);
                 self.fs.shutdown().await
             })
             .await
@@ -1316,8 +1325,8 @@ impl fuser::Filesystem for Fuse {
         }
     }
     fn opendir(&self, _: &Request, ino: INodeNo, _: OpenFlags, reply: ReplyOpen) {
-        match self.fs.node(ino.0) {
-            Ok(node) if node.attr().kind == FileType::Directory => {}
+        let node = match self.fs.node(ino.0) {
+            Ok(node) if node.attr().kind == FileType::Directory => node,
             Ok(_) => {
                 reply.error(Errno::ENOTDIR);
                 return;
@@ -1326,7 +1335,7 @@ impl fuser::Filesystem for Fuse {
                 reply.error(errno(error));
                 return;
             }
-        }
+        };
         let permit = match self.reserve_handle() {
             Ok(permit) => permit,
             Err(error) => {
@@ -1356,6 +1365,7 @@ impl fuser::Filesystem for Fuse {
         directories.insert(
             handle,
             Arc::new(tokio::sync::Mutex::new(Directory {
+                node,
                 _permit: permit,
                 _metadata_charge: charge,
                 last: Default::default(),
@@ -1408,17 +1418,9 @@ impl fuser::Filesystem for Fuse {
             ),
         );
     }
-    fn releasedir(
-        &self,
-        _: &Request,
-        ino: INodeNo,
-        fh: FileHandle,
-        _: OpenFlags,
-        reply: ReplyEmpty,
-    ) {
+    fn releasedir(&self, _: &Request, _: INodeNo, fh: FileHandle, _: OpenFlags, reply: ReplyEmpty) {
         let directory = self.directories.lock().unwrap().remove(&fh.0);
         drop(directory);
-        self.fs.release(ino.0);
         reply.ok();
     }
     fn getxattr(&self, _: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {

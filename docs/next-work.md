@@ -67,8 +67,8 @@ with fake FORGET, discarded metadata, higher cache limits or accepted partial `d
 The later namespace-stall correction makes speculative preload yield and avoids
 repeated pinned-prefix scans while retaining finite admission-local continuation.
 Qualify the delivered source on the withdrawn target before attributing the stalled
-trial to those defects alone. Investigate the latest native post-unmount directory
-open-count failure and retain all three older PLUS assertions separately; local
+trial to those defects alone. Directory-open teardown now has a deterministic
+protocol regression and an owner-lifetime correction; retain all three older PLUS assertions separately. Local
 lookup regression success does not close the flat traversal or L2 reuse gates.
 
 ## 2. Target access and large-namespace memory

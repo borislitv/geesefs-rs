@@ -131,6 +131,29 @@ impl Drop for Session {
     }
 }
 
+#[test]
+fn destroy_releases_directory_handles_without_releasedir() {
+    let store = support::MemoryStore::new();
+    store.seed("file", b"independent file bytes");
+    let fs = store.filesystem(32);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut session = Session::new(fs.clone(), &runtime);
+    for _ in 0..32 {
+        session.send(27, 1, &[0; 8]); // OPENDIR with read-only flags.
+        assert_eq!(errno(&session.receive()), 0);
+    }
+    assert_eq!(fs.node(1).unwrap().state.lock().unwrap().opens, 32);
+    // Unmount may omit individual RELEASEDIR requests. DESTROY must drop the
+    // actual admitted owners, not depend on every kernel close arriving first.
+    session.close();
+    assert_eq!(fs.node(1).unwrap().state.lock().unwrap().opens, 0);
+    assert_eq!(store.bytes("file"), b"independent file bytes");
+}
+
 fn destroy_packet() -> Vec<u8> {
     let mut packet = vec![0u8; 40];
     packet[..4].copy_from_slice(&40u32.to_ne_bytes());

@@ -5,6 +5,20 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-12: tie directory-open lifetime to the admitted owner
+
+Native teardown intermittently retained directory opens after unmount. A real
+fuser-protocol regression deterministically opens 32 directories, omits individual
+RELEASEDIR requests, then observes 32 opens after DESTROY instead of zero. Each
+directory handle now pins its inode and releases its open count when the actual
+cursor owner drops. Shutdown drains the registry after admitted requests finish;
+normal release no longer decrements before an in-flight cursor relinquishes it.
+The protocol regression and native handle controls pass with one/three receivers.
+
+Stable CI additionally reports `needless_bool` on the preload validation helper;
+use the equivalent positive predicate rather than suppressing the lint. This
+correction leaves the strict flat traversal and three baseline PLUS gaps open.
+
 ## 2026-11-12: yield optional preload and reuse finite reclamation progress
 
 A full namespace exposed two independent progress defects: speculative preload

@@ -1518,10 +1518,7 @@ impl Filesystem {
             return Ok(false);
         }
         child(prefix.trim_end_matches('/'), name)?;
-        if object.metadata.is_none() || object.etag.as_ref().is_none_or(|etag| etag.is_empty()) {
-            return Ok(false);
-        }
-        Ok(true)
+        Ok(object.metadata.is_some() && object.etag.as_ref().is_some_and(|etag| !etag.is_empty()))
     }
 
     pub fn forget(&self, ino: u64, count: u64) {

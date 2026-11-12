@@ -5,6 +5,22 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Directory-open teardown — 2026-11-12
+
+`destroy_releases_directory_handles_without_releasedir` uses fuser's actual
+parser and reply owners: 32 OPENDIR requests followed by DESTROY, with no invented
+individual close requests. The original adapter fails with 32 opens instead of
+zero. Attaching the decrement to the actual cursor owner and draining admitted
+directory handles restores zero and preserves independent file bytes. Native
+handle-budget/EMFILE controls pass with one and three receiver threads.
+
+Default and all-feature all-target suites each pass **530 tests**, with 30 explicit
+opt-in ignores. Denied-warning all-feature Clippy and fmt pass. The full opt-in
+directory suite returns to **15 passed / 4 failed**: strict flat ENOMEM and the
+three baseline PLUS assertions remain. Publishing partial admitted backend pages,
+occupancy-based early pressure and a finite multi-batch notification pass also
+failed the strict oracle and were reverted; none is claimed as a traversal fix.
+
 ## Yielding preload and reclaim continuation — 2026-11-12
 
 Three new `namespace_progress` regressions exercise public lookup/read behavior:

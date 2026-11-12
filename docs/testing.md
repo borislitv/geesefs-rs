@@ -5,6 +5,70 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## FUSE admission backpressure — 2026-11-12
+
+`tests/fuse_admission.rs` mounts disposable real FUSE fixtures. With one request
+slot, an early read reply leaves a gated read-ahead owner active; a second native
+buffered read or safe rustix sendfile requests independently specified L1 bytes.
+Both fail with EIO on the pre-fix adapter and pass with receiver-thread
+backpressure, including one and three fuser receivers. The fixture disables only
+kernel speculative readahead; application read-ahead and its ownership remain on.
+
+Protocol tests use fuser's actual parser/reply owners to check queued lookup
+success, a shared admission/execution deadline on an explicitly driven paused
+current-thread runtime, expired WRITE input cleanup without mutation, O_SYNC
+failure followed by successful fsync recovery, and shutdown queued behind saturated
+admission. DESTROY acknowledgement precedes the filesystem drain hook, so the
+fixture separately joins actual shutdown and rejects extra replies. Existing
+post-reply/deadline/logging checks remain; warning fixtures use real namespace
+EAGAIN conflicts rather than obsolete overload rejection.
+
+The pre-existing early-reply test raced a real 100-ms deadline during a parallel
+full-suite run: its live-owner observation occurred after valid cancellation.
+Keep the deadline and assertions, synchronize on the actual gated tail, then
+advance the paused clock to expiry. This is deterministic cancellation evidence,
+not a latency measurement or an increased timeout.
+
+Three source-addressed fault controls prove sensitivity: changing expiry `>=`
+to `>` admits a WRITE at its deadline; renewing the execution budget after waiting
+violates the total deadline; dropping the permit before job completion violates
+both native ownership assertions. All fail the intended assertions, then the
+correct source is restored. Mutator's selected boundary result is corroborated by
+the explicit assertion log; its 187 discovered sites are not 187 executed tests.
+
+Final source-frozen default and all-feature suites each pass **522 tests**, with
+26 explicit opt-in ignores across 61 targets. Native admission passes separately
+with one/three receivers and with system-allocator features. All-target Clippy
+with denied warnings passes in both configurations, as do fmt, the 16 project
+Python tests, 159 benchmark tests (two native opt-in skips) and the 388-package
+public-source audit. Crapper reports CC5/6/7 for `spawn_traced`/`admit`/`run_job`;
+coverage and CRAP remain N/A. Dryer finds no score >=0.8 candidates in the two
+changed runtime files. The native limitations below remain separate failures.
+
+```bash
+timeout 180s cargo +1.99.1 test --locked --test fuse_admission -- --ignored --test-threads=1
+GEESEFS_TEST_FUSE_THREADS=3 timeout 180s cargo +1.99.1 test --locked --test fuse_admission -- --ignored --test-threads=1
+timeout 180s cargo +1.99.1 test --locked --test fuse_deadline_review --test fuse_lifecycle --test fuse_errors
+timeout 180s cargo +1.99.1 test --locked --test fuse_directory -- --ignored --test-threads=1
+```
+
+**Known native limitation:** on kernel `7.3.1-070301-generic`, the broader directory
+suite has 12 passes and three failures with both one and three receivers. A pristine
+`420f30330a8b69d23241805722cce7cc26c3be72` worktree independently reproduces the
+same three assertions with three receivers:
+
+- `failed_plus_buffer_does_not_transfer_unsent_lookup_references`: unexpected
+  successful directory iteration despite the injected metadata failure;
+- `plus_common_prefixes_preserve_directory_marker_permissions_and_ownership`:
+  zero observed lookup references where one is expected;
+- `plus_pages_deliver_attributes_and_lookup_ownership_without_overlapping_lists`:
+  11 root LIST calls instead of ten.
+
+These checks remain unchanged and failing; this is not a fully passing native
+compatibility suite. No new target deployment or sustained Go/A-A campaign is part
+of this correction. The [HDD checkpoint](target-disk-cache-functional.md) retains
+its historical failures independently of the local admission proof.
+
 ## Metadata compaction and persistent L2 — 2026-11-11
 
 Default and system-allocator configurations pass 518 active tests, with 24

@@ -90,15 +90,27 @@ impl Session {
 
     fn close(&mut self) {
         self.send(38, 0, &[]);
+        self.join();
+    }
+
+    fn join(&mut self) {
+        self.join_worker();
+        // Exactly one reply remains: DESTROY. A deadline after early READ
+        // publication must not enqueue another reply for that READ request.
+        assert_eq!(errno(&self.receive()), 0);
+        self.assert_no_reply();
+    }
+
+    fn join_worker(&mut self) {
         self.finished
             .recv_timeout(Duration::from_secs(3))
             .expect("session destroy must drain admission")
             .unwrap();
         self.worker.take().unwrap().join().unwrap();
         assert!(self.shutdown_error.lock().unwrap().is_none());
-        // Exactly one reply remains: DESTROY. A deadline after early READ
-        // publication must not enqueue another reply for that READ request.
-        assert_eq!(errno(&self.receive()), 0);
+    }
+
+    fn assert_no_reply(&self) {
         self.peer.set_nonblocking(true).unwrap();
         assert_eq!(
             self.peer.recv(&mut [0u8; 256]).unwrap_err().kind(),
@@ -507,6 +519,17 @@ fn configured_fixture(
         .enable_all()
         .build()
         .unwrap();
+    fixture_on(runtime, configure)
+}
+
+fn fixture_on(
+    runtime: tokio::runtime::Runtime,
+    configure: impl FnOnce(&mut geesefs_rs::config::Config),
+) -> (
+    tokio::runtime::Runtime,
+    Arc<support::MemoryStore>,
+    Arc<Filesystem>,
+) {
     let store = support::MemoryStore::new();
     let mut config = support::MemoryStore::config(32);
     config.request_timeout = Duration::from_millis(100);
@@ -530,6 +553,15 @@ fn metric(fs: &Filesystem, name: &str) -> f64 {
             (key == name).then(|| value.parse().unwrap())
         })
         .unwrap_or_else(|| panic!("missing metric {name}"))
+}
+
+async fn wait_until(message: &str, condition: impl Fn() -> bool) {
+    // A real watchdog also bounds tests with Tokio's clock explicitly paused.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while !condition() {
+        assert!(std::time::Instant::now() < deadline, "{message}");
+        tokio::task::yield_now().await;
+    }
 }
 
 #[test]
@@ -587,7 +619,13 @@ fn lookup_deadline_returns_etimedout_and_returns_the_request_slot() {
 }
 
 fn open(session: &mut Session, ino: u64) -> u64 {
-    session.send(14, ino, &[0u8; 8]);
+    open_with_flags(session, ino, libc::O_RDONLY)
+}
+
+fn open_with_flags(session: &mut Session, ino: u64, flags: i32) -> u64 {
+    let mut body = flags.to_ne_bytes().to_vec();
+    body.extend_from_slice(&[0u8; 4]);
+    session.send(14, ino, &body);
     let reply = session.receive();
     assert_eq!(errno(&reply), 0);
     u64::from_ne_bytes(reply[16..24].try_into().unwrap())
@@ -603,6 +641,17 @@ fn read_range(session: &mut Session, ino: u64, handle: u64, offset: u64, size: u
     body.extend_from_slice(&size.to_ne_bytes());
     body.extend_from_slice(&[0u8; 20]);
     session.send(15, ino, &body)
+}
+
+fn write(session: &mut Session, ino: u64, handle: u64, data: &[u8], flags: i32) -> u64 {
+    let mut body = handle.to_ne_bytes().to_vec();
+    body.extend_from_slice(&0u64.to_ne_bytes());
+    body.extend_from_slice(&(data.len() as u32).to_ne_bytes());
+    body.extend_from_slice(&[0u8; 12]); // write_flags and lock_owner
+    body.extend_from_slice(&flags.to_ne_bytes());
+    body.extend_from_slice(&[0u8; 4]);
+    body.extend_from_slice(data);
+    session.send(16, ino, &body)
 }
 
 #[test]
@@ -623,7 +672,14 @@ fn read_deadline_before_publication_returns_etimedout_and_drops_payload_owners()
 
 #[test]
 fn read_deadline_after_publication_preserves_bytes_without_a_second_reply() {
-    let (runtime, store, fs) = fixture();
+    let (runtime, store, fs) = fixture_on(
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap(),
+        |_| {},
+    );
     store.seed("file", &vec![73u8; 1024 * 1024]);
     let ino = runtime.block_on(fs.lookup(1, "file")).unwrap().ino;
     let tail = Arc::new(tokio::sync::Semaphore::new(0));
@@ -635,40 +691,61 @@ fn read_deadline_after_publication_preserves_bytes_without_a_second_reply() {
     let mut session = Session::new(fs.clone(), &runtime);
     let handle = open(&mut session, ino);
     let request = read(&mut session, ino, handle);
-    let reply = session.receive();
-    assert_eq!(unique(&reply), request);
-    assert_eq!(errno(&reply), 0);
-    assert_eq!(&reply[16..], &[73u8; 128]);
-    runtime.block_on(runtime.spawn(async {})).unwrap();
-    assert_eq!(
-        metric(
-            &fs,
-            "geesefs_fuse_reply_duration_seconds_count{opcode=\"read\"}"
-        ),
-        1.
-    );
-    assert_eq!(
-        metric(
-            &fs,
-            "geesefs_fuse_replies_total{opcode=\"read\",errno=\"OK\"}"
-        ),
-        1.
-    );
-    assert_eq!(
-        metric(
-            &fs,
-            "geesefs_fuse_inflight{opcode=\"read\",state=\"reply_pending\"}"
-        ),
-        0.
-    );
-    assert_eq!(
-        metric(
-            &fs,
-            "geesefs_fuse_inflight{opcode=\"read\",state=\"after_reply\"}"
-        ),
-        1.
-    );
-    session.close();
+    runtime.block_on(async {
+        // Observe the actual early reply and gated tail before advancing the same
+        // 100 ms deadline. Real scheduler/metrics overhead must not race this state.
+        wait_until("early READ did not reach its gated tail", || {
+            store.read_calls.load(std::sync::atomic::Ordering::SeqCst) == 2
+                && metric(
+                    &fs,
+                    "geesefs_fuse_inflight{opcode=\"read\",state=\"after_reply\"}",
+                ) == 1.
+        })
+        .await;
+        let reply = session.receive();
+        assert_eq!(unique(&reply), request);
+        assert_eq!(errno(&reply), 0);
+        assert_eq!(&reply[16..], &[73u8; 128]);
+        assert_eq!(
+            metric(
+                &fs,
+                "geesefs_fuse_reply_duration_seconds_count{opcode=\"read\"}"
+            ),
+            1.
+        );
+        assert_eq!(
+            metric(
+                &fs,
+                "geesefs_fuse_replies_total{opcode=\"read\",errno=\"OK\"}"
+            ),
+            1.
+        );
+        assert_eq!(
+            metric(
+                &fs,
+                "geesefs_fuse_inflight{opcode=\"read\",state=\"reply_pending\"}"
+            ),
+            0.
+        );
+        assert_eq!(
+            metric(
+                &fs,
+                "geesefs_fuse_inflight{opcode=\"read\",state=\"after_reply\"}"
+            ),
+            1.
+        );
+        tokio::time::advance(fs.config.request_timeout).await;
+        wait_until("expired post-reply READ retained its owner", || {
+            metric(
+                &fs,
+                "geesefs_fuse_inflight{opcode=\"read\",state=\"after_reply\"}",
+            ) == 0.
+        })
+        .await;
+        tokio::task::spawn_blocking(move || session.close())
+            .await
+            .unwrap();
+    });
     assert_eq!(
         metric(
             &fs,
@@ -700,8 +777,10 @@ fn read_deadline_after_publication_preserves_bytes_without_a_second_reply() {
 }
 
 #[test]
-fn full_admission_is_attributed_without_inventing_a_backend_failure() {
-    let (runtime, store, fs) = fixture();
+fn full_admission_waits_without_inventing_a_backend_failure() {
+    let (runtime, store, fs) = configured_fixture(|config| {
+        config.request_timeout = Duration::from_secs(5);
+    });
     store.seed("slow", b"independent bytes");
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
     *store.head_gate.lock().unwrap() = Some(gate.clone());
@@ -724,13 +803,15 @@ fn full_admission_is_attributed_without_inventing_a_backend_failure() {
             "geesefs_fuse_oldest_seconds{opcode=\"lookup\",state=\"reply_pending\"}"
         ) > 0.
     );
-    let rejected = session.send(1, 1, b"slow\0");
-    let reply = session.receive();
-    assert_eq!((unique(&reply), errno(&reply)), (rejected, -libc::EAGAIN));
+    let waiting = session.send(1, 1, b"slow\0");
+    runtime.block_on(wait_until(
+        "second lookup did not wait for admission",
+        || metric(&fs, "geesefs_stage_inflight{stage=\"fuse_admission\"}") == 1.,
+    ));
     assert_eq!(
         metric(
             &fs,
-            "geesefs_diagnostic_events_total{reason=\"admission_full\"}"
+            "geesefs_diagnostic_events_total{reason=\"admission_wait\"}"
         ),
         1.
     );
@@ -739,15 +820,247 @@ fn full_admission_is_attributed_without_inventing_a_backend_failure() {
             &fs,
             "geesefs_fuse_replies_total{opcode=\"lookup\",errno=\"EAGAIN\"}"
         ),
-        1.
+        0.
     );
     gate.add_permits(1);
     let reply = session.receive();
     assert_eq!((unique(&reply), errno(&reply)), (first, 0));
+    let reply = session.receive();
+    assert_eq!((unique(&reply), errno(&reply)), (waiting, 0));
     session.close();
     assert_eq!(
         store.head_starts.load(std::sync::atomic::Ordering::SeqCst),
         1
+    );
+}
+
+#[test]
+fn admission_and_execution_share_one_deadline_on_a_driven_current_thread_runtime() {
+    use std::sync::atomic::Ordering;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .unwrap();
+    let store = support::MemoryStore::new();
+    store.seed("first", b"first bytes");
+    store.seed("second", b"second bytes");
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *store.head_gate.lock().unwrap() = Some(gate.clone());
+    let mut config = support::MemoryStore::config(32);
+    config.max_requests = 1;
+    config.request_timeout = Duration::from_secs(10);
+    config.metrics_listen = Some("127.0.0.1:0".parse().unwrap());
+    let fs = Filesystem::new(config, store.clone()).unwrap();
+    runtime.block_on(async {
+        let mut session = Session::new(fs.clone(), &runtime);
+        let first = session.send(1, 1, b"first\0");
+        wait_until("first HEAD did not start", || {
+            store.head_starts.load(Ordering::SeqCst) == 1
+        })
+        .await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        let second = session.send(1, 1, b"second\0");
+        wait_until("second lookup did not wait for admission", || {
+            metric(&fs, "geesefs_stage_inflight{stage=\"fuse_admission\"}") == 1.
+        })
+        .await;
+        tokio::time::advance(Duration::from_secs(6)).await;
+        gate.add_permits(1);
+        wait_until("second HEAD did not start after capacity returned", || {
+            store.head_starts.load(Ordering::SeqCst) == 2
+        })
+        .await;
+        let reply = session.receive();
+        assert_eq!((unique(&reply), errno(&reply)), (first, 0));
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert_eq!(store.active_heads.load(Ordering::SeqCst), 1);
+        // Second callback arrived at t=3 and began work at t=9. Its deadline
+        // remains t=13, not t=19; advance beyond it without real-time sleeps.
+        tokio::time::advance(Duration::from_secs(1) + Duration::from_millis(1)).await;
+        wait_until(
+            "admission wait incorrectly renewed the execution deadline",
+            || {
+                metric(
+                    &fs,
+                    "geesefs_fuse_replies_total{opcode=\"lookup\",errno=\"ETIMEDOUT\"}",
+                ) == 1.
+            },
+        )
+        .await;
+        let reply = session.receive();
+        assert_eq!((unique(&reply), errno(&reply)), (second, -libc::ETIMEDOUT));
+        assert_eq!(store.active_heads.load(Ordering::SeqCst), 0);
+        assert_eq!(fs.effective_budgets().metadata_resolution_jobs_in_use, 0);
+        gate.add_permits(1);
+        let recovered = session.send(1, 1, b"second\0");
+        wait_until(
+            "next request did not complete after timed-out owner",
+            || {
+                metric(
+                    &fs,
+                    "geesefs_fuse_replies_total{opcode=\"lookup\",errno=\"OK\"}",
+                ) == 2.
+            },
+        )
+        .await;
+        let reply = session.receive();
+        assert_eq!((unique(&reply), errno(&reply)), (recovered, 0));
+        // Keep driving the current-thread runtime while fuser drains shutdown.
+        tokio::task::spawn_blocking(move || session.close())
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
+fn expired_queued_writes_do_not_mutate_or_retain_ingress() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .unwrap();
+    let store = support::MemoryStore::new();
+    store.seed("file", b"original bytes");
+    let mut config = support::MemoryStore::config(32);
+    config.max_requests = 1;
+    config.request_timeout = Duration::from_secs(10);
+    config.metrics_listen = Some("127.0.0.1:0".parse().unwrap());
+    let fs = Filesystem::new(config, store.clone()).unwrap();
+    let ino = runtime.block_on(fs.lookup(1, "file")).unwrap().ino;
+    let mut session = Session::new(fs.clone(), &runtime);
+    let handle = open_with_flags(&mut session, ino, libc::O_RDWR);
+    // The executor is deliberately not polled yet. One request owns its permit
+    // and the other waits in the sole receiver, both with already-funded input.
+    let first = write(&mut session, ino, handle, b"first overwrite", libc::O_RDWR);
+    let second = write(&mut session, ino, handle, b"second overwrite", libc::O_RDWR);
+    let watchdog = std::time::Instant::now() + Duration::from_secs(3);
+    while metric(&fs, "geesefs_stage_inflight{stage=\"fuse_admission\"}") != 1. {
+        assert!(
+            std::time::Instant::now() < watchdog,
+            "second WRITE did not wait"
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        fs.ingress.used(),
+        b"first overwrite".len() + b"second overwrite".len()
+    );
+    runtime.block_on(async {
+        tokio::time::advance(Duration::from_secs(10)).await;
+        wait_until("expired WRITE jobs did not return timeout", || {
+            metric(
+                &fs,
+                "geesefs_fuse_replies_total{opcode=\"write\",errno=\"ETIMEDOUT\"}",
+            ) == 2.
+        })
+        .await;
+        let mut replies = [session.receive(), session.receive()];
+        replies.sort_by_key(|reply| unique(reply));
+        assert_eq!(
+            (unique(&replies[0]), errno(&replies[0])),
+            (first, -libc::ETIMEDOUT)
+        );
+        assert_eq!(
+            (unique(&replies[1]), errno(&replies[1])),
+            (second, -libc::ETIMEDOUT)
+        );
+        assert_eq!(fs.ingress.used(), 0);
+        assert_eq!(fs.effective_budgets().data_used_bytes, 0);
+        fs.fsync(ino).await.unwrap();
+        assert_eq!(store.bytes("file"), b"original bytes");
+        assert_eq!(store.put_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        tokio::task::spawn_blocking(move || session.close())
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
+fn admitted_sync_write_preserves_failure_and_fsync_recovery() {
+    use std::sync::atomic::Ordering;
+    let (runtime, store, fs) = configured_fixture(|config| {
+        config.request_timeout = Duration::from_secs(5);
+    });
+    store.seed("file", b"old bytes");
+    store.seed("slow", b"independent bytes");
+    let ino = runtime.block_on(fs.lookup(1, "file")).unwrap().ino;
+    let mut session = Session::new(fs.clone(), &runtime);
+    let handle = open_with_flags(&mut session, ino, libc::O_RDWR | libc::O_SYNC);
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *store.head_gate.lock().unwrap() = Some(gate.clone());
+    let first = session.send(1, 1, b"slow\0");
+    runtime.block_on(wait_until("blocking lookup did not start", || {
+        store.active_heads.load(Ordering::SeqCst) == 1
+    }));
+    store.fail_put.store(true, Ordering::SeqCst);
+    let written = write(
+        &mut session,
+        ino,
+        handle,
+        b"new bytes",
+        libc::O_RDWR | libc::O_SYNC,
+    );
+    runtime.block_on(wait_until("WRITE did not wait for admission", || {
+        metric(&fs, "geesefs_stage_inflight{stage=\"fuse_admission\"}") == 1.
+    }));
+    assert_eq!(fs.ingress.used(), b"new bytes".len());
+    assert_eq!(store.put_calls.load(Ordering::SeqCst), 0);
+    gate.add_permits(1);
+    let reply = session.receive();
+    assert_eq!((unique(&reply), errno(&reply)), (first, 0));
+    let reply = session.receive();
+    assert_eq!((unique(&reply), errno(&reply)), (written, -libc::EIO));
+    assert_eq!(store.bytes("file"), b"old bytes");
+    store.fail_put.store(false, Ordering::SeqCst);
+    *store.head_gate.lock().unwrap() = None;
+    let mut body = handle.to_ne_bytes().to_vec();
+    body.extend_from_slice(&[0u8; 8]);
+    let synced = session.send(20, ino, &body);
+    let reply = session.receive();
+    assert_eq!((unique(&reply), errno(&reply)), (synced, 0));
+    session.close();
+    assert_eq!(store.bytes("file"), b"new bytes");
+    assert_eq!(fs.ingress.used(), 0);
+}
+
+#[test]
+fn destroy_behind_saturated_admission_drains_expired_owners() {
+    let (runtime, store, fs) = fixture();
+    store.seed("first", b"first bytes");
+    store.seed("second", b"second bytes");
+    *store.head_gate.lock().unwrap() = Some(Arc::new(tokio::sync::Semaphore::new(0)));
+    let mut session = Session::new(fs.clone(), &runtime);
+    let first = session.send(1, 1, b"first\0");
+    runtime.block_on(wait_until("blocking lookup did not start", || {
+        store.active_heads.load(std::sync::atomic::Ordering::SeqCst) == 1
+    }));
+    let second = session.send(1, 1, b"second\0");
+    runtime.block_on(wait_until(
+        "second request did not wait for admission",
+        || metric(&fs, "geesefs_stage_inflight{stage=\"fuse_admission\"}") == 1.,
+    ));
+    let destroy = session.send(38, 0, &[]);
+    // fuser acknowledges DESTROY before invoking the filesystem drain hook;
+    // the final pending reply may arrive after that acknowledgement.
+    let mut replies = [session.receive(), session.receive(), session.receive()];
+    replies.sort_by_key(|reply| unique(reply));
+    for (reply, expected) in replies.iter().zip([
+        (first, -libc::ETIMEDOUT),
+        (second, -libc::ETIMEDOUT),
+        (destroy, 0),
+    ]) {
+        assert_eq!((unique(reply), errno(reply)), expected);
+    }
+    session.join_worker();
+    session.assert_no_reply();
+    assert_eq!(
+        store.active_heads.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(
+        metric(&fs, "geesefs_stage_inflight{stage=\"fuse_admission\"}"),
+        0.
     );
 }
 
@@ -1153,15 +1466,28 @@ fn diagnostic_records_preserve_journal_priorities_only_on_the_matching_stream() 
                 .await
                 .unwrap();
         });
-        let rejected = session.send(1, 1, b"private-priority-rejected\0");
-        let reply = session.receive();
-        assert_eq!((unique(&reply), errno(&reply)), (rejected, -libc::EAGAIN));
         gate.add_permits(1);
         let reply = session.receive();
         assert_eq!((unique(&reply), errno(&reply)), (first, 0));
         runtime.block_on(runtime.spawn(async {})).unwrap();
         *store.head_gate.lock().unwrap() = None;
         *store.head_delay.lock().unwrap() = Duration::ZERO;
+        // A real namespace-generation conflict still returns EAGAIN/warn.
+        // Capacity now waits, so it is no longer a warning fixture.
+        let (started, release) = store.pause_head();
+        let rejected = session.send(1, 1, b"private-priority-rejected\0");
+        runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(1), started)
+                .await
+                .unwrap()
+                .unwrap();
+            fs.create(1, "local-generation", libc::S_IFREG | 0o644, None, 0)
+                .await
+                .unwrap();
+        });
+        release.send(()).unwrap();
+        let reply = session.receive();
+        assert_eq!((unique(&reply), errno(&reply)), (rejected, -libc::EAGAIN));
         store
             .fail_head_once
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1640,38 +1966,28 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
             gate.add_permits(1);
             let reply = session.receive();
             assert_eq!((unique(&reply), errno(&reply)), (request, 0));
-        } else if mode == "admission" {
-            store.seed("private-request-path", b"fixture");
-            let gate = Arc::new(tokio::sync::Semaphore::new(0));
-            *store.head_gate.lock().unwrap() = Some(gate.clone());
-            let started = store.head_started.notified();
-            let first = session.send(1, 1, b"private-request-path\0");
-            runtime.block_on(async {
-                tokio::time::timeout(Duration::from_secs(1), started)
+        } else if mode == "generation" || mode == "generation_burst" {
+            for index in 0..if mode == "generation_burst" { 20 } else { 1 } {
+                let (started, release) = store.pause_head();
+                session.send(1, 1, b"private-request-path\0");
+                runtime.block_on(async {
+                    tokio::time::timeout(Duration::from_secs(1), started)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    fs.create(
+                        1,
+                        &format!("local-generation-{index}"),
+                        libc::S_IFREG | 0o644,
+                        None,
+                        0,
+                    )
                     .await
                     .unwrap();
-            });
-            for _ in 0..20 {
-                let rejected = session.send(1, 1, b"private-request-path\0");
-                let reply = session.receive();
-                assert_eq!((unique(&reply), errno(&reply)), (rejected, -libc::EAGAIN));
+                });
+                release.send(()).unwrap();
+                assert_eq!(errno(&session.receive()), -libc::EAGAIN);
             }
-            gate.add_permits(1);
-            assert_eq!(unique(&session.receive()), first);
-        } else if mode == "generation" {
-            let (started, release) = store.pause_head();
-            session.send(1, 1, b"private-request-path\0");
-            runtime.block_on(async {
-                tokio::time::timeout(Duration::from_secs(1), started)
-                    .await
-                    .unwrap()
-                    .unwrap();
-                fs.create(1, "local-generation", libc::S_IFREG | 0o644, None, 0)
-                    .await
-                    .unwrap();
-            });
-            release.send(()).unwrap();
-            assert_eq!(errno(&session.receive()), -libc::EAGAIN);
         } else {
             assert!(["backend", "backend_off", "backend_warn"].contains(&mode.as_str()));
             store
@@ -1681,9 +1997,9 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
             assert_eq!(errno(&session.receive()), -libc::EIO);
         }
         session.close();
-        if mode == "admission" {
+        if mode == "generation_burst" {
             // Socket delivery precedes diagnostic accounting; joined session
-            // shutdown establishes completion of every synchronous rejection.
+            // shutdown establishes completion of every generation rejection.
             assert_eq!(metric(&fs, "geesefs_diagnostic_logs_suppressed_total"), 19.);
         }
         if mode == "backend_off" {
@@ -1757,9 +2073,9 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
             true,
         ),
         (
-            "admission",
+            "generation_burst",
             "fuse_reply",
-            "admission_full",
+            "missing_epoch_changed",
             libc::EAGAIN,
             true,
         ),
@@ -1889,7 +2205,7 @@ fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
             record["level"],
             if mode == "slow_info" {
                 "info"
-            } else if mode == "admission" || mode == "generation" {
+            } else if mode == "generation_burst" || mode == "generation" {
                 "warn"
             } else {
                 "error"

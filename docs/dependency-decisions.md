@@ -7,6 +7,33 @@ translated, vendored or linked. This package forbids unsafe code in every target
 License declarations are checked; the complete binary-distribution notice audit
 remains outstanding. See LICENSE and NOTICE for source attribution.
 
+## FUSE request backpressure — 2026-11-12
+
+Retain public MIT-licensed fuser 0.18.0 and Tokio 1.54.1. Use fuser's fixed
+receiver threads and Tokio's existing owned semaphore, `Handle::block_on` and
+`timeout_at`; no new queue, executor, transport or dependency is needed. Inspecting
+the pinned fuser source confirms one receive buffer per configured worker.
+`KernelConfig` background/congestion controls do not bound all foreground calls;
+the experimental Tokio adapter spawns callback tasks without this admission bound.
+Increasing receiver count or request capacity does not correct overload errno.
+
+The thin adapter waits before spawning work, holds no application mutex while
+waiting, and retains permits until actual job completion. Blocking happens on
+fuser's threads, not Tokio workers. Current-thread runtimes need a separately
+driven `Runtime::block_on`; `Handle::block_on` alone does not drive their timers.
+Only tests enable Tokio's supported `test-util` clock to verify deadline equality
+and shared admission/execution budgets without timing sleeps. The Cargo lockfile
+and runtime dependency versions are unchanged. Native regression uses existing
+MIT/Apache-2.0 rustix 1.1.5 safe `fadvise` and `sendfile` APIs.
+
+Sources: [fuser configuration](https://docs.rs/fuser/0.18.0/fuser/struct.Config.html),
+[fuser session](https://github.com/cberner/fuser/blob/v0.18.0/src/session.rs),
+[Tokio Handle](https://docs.rs/tokio/1.54.1/tokio/runtime/struct.Handle.html#method.block_on),
+[Tokio timeout](https://docs.rs/tokio/1.54.1/tokio/time/fn.timeout_at.html),
+[Linux buffered FUSE reads](https://github.com/torvalds/linux/blob/v7.0/fs/fuse/file.c).
+The public v0.18.0 tag exists; a missing GitHub release object and empty targeted
+backpressure/EAGAIN issue searches do not prove upstream has no related defects.
+
 ## Throttling in the existing extension adapter — 2026-11-08
 
 The supported aws-smithy-types 1.9.0 RetryConfig API already provides exponential

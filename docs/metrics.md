@@ -183,7 +183,7 @@ while owned read-ahead continues. A later error/deadline neither changes that
 reply nor adds a second failed reply. Completed histograms alone hide unfinished
 work: inspect inflight/oldest and active phases as well.
 
-Source reasons separate `admission_full`/`closing`, `deadline_before_reply`/
+Source reasons separate `admission_wait`/`admission_timeout`/`closing`, `deadline_before_reply`/
 `deadline_after_reply`, `s3_get_timeout`, and `read_ahead_timeout`/
 `read_ahead_cancelled`/`read_ahead_error`. Namespace EAGAIN sources identify the
 operation and condition, such as `lookup_moving`, `lookup_binding_busy`,
@@ -191,6 +191,12 @@ operation and condition, such as `lookup_moving`, `lookup_binding_busy`,
 `directory_generation_changed`, and `rename_listing_repeated`. They retain the
 existing EAGAIN contract. Source events can precede a caller retry or a background
 outcome; do not add them to terminal failures.
+
+`admission_wait` counts callbacks that encounter full request capacity, including
+ones that later succeed; it is not an error. `admission_timeout` identifies an
+expired semaphore wait before a job starts. The `fuse_admission` stage exposes
+its duration and live waiters separately from the admitted executor queue.
+Historical `admission_full` EAGAIN records describe the pre-backpressure adapter.
 
 ### Phase and remote-work observations
 
@@ -202,6 +208,7 @@ cancellation error, is `error`; dropping its future is `cancelled`.
 
 | Stage | Boundary and limitations |
 | --- | --- |
+| `fuse_admission` | Saturated request-slot wait on a fixed fuser receiver; excludes immediate acquisitions and kernel queueing |
 | `cache_read` | Initial payload-cache lookup and reply assembly/copy |
 | `fill_wait` | Waiting for an overlapping fill to publish/change; not an additional GET |
 | `payload_admission` | Only the pressured required-admission branch, including reclamation/flush/wait; fast reservations are excluded |
@@ -366,9 +373,9 @@ them or client delivery/kernel queueing by themselves.
 
 Start with the following hypotheses:
 
-- High executor delay or `admission_full`: dispatch/admission pressure, rather
-  than assuming every EAGAIN came from S3. Namespace source events identify a
-  different retry mechanism.
+- High executor delay or sustained `fuse_admission` waits: dispatch/admission
+  pressure. Historical `admission_full` records identify the old rejection path;
+  namespace EAGAIN events identify a different retry mechanism.
 - High sampled namespace waits/holds, `cache_read`, `fill_wait`, or pressured
   admission with ordinary S3 phases: investigate local locks, copies, pinned
   owners and payload pressure using matching CPU/off-CPU profiles.

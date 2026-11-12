@@ -5,6 +5,24 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-12: backpressure at saturated FUSE request admission
+
+Real buffered-read and sendfile regressions reproduce EIO from immediate
+`admission_full` EAGAIN while a previous READ has replied but still owns gated
+read-ahead. Wait on the existing semaphore in fixed fuser receiver threads before
+spawning; keep pending WRITE bytes funded and actual jobs responsible for their
+permits. One absolute deadline includes waiting, with an explicit expiry check
+before starting a job. No runtime limit or durability contract is relaxed.
+
+Native byte/ownership controls and protocol tests cover total-deadline expiry,
+already-expired writes, fsync failure/recovery and draining shutdown. Deliberate
+early permit release, deadline renewal and expiry-boundary faults fail their
+assertions. The broader native directory suite retains three baseline-reproduced
+READDIRPLUS failures on the development kernel. Full scopes and reproduction
+commands are in [testing](testing.md#fuse-admission-backpressure--2026-11-12).
+This correction neither rewrites the earlier HDD measurements nor establishes
+sustained target acceptance or traffic readmission.
+
 ## 2026-11-11: record the withdrawn-reader HDD functional trial
 
 The operator accepts single-user downloaded-copy semantics without an extra KMS

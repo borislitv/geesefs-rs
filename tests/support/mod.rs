@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+pub mod native;
 use aws_sdk_s3::{primitives::ByteStream, types::CompletedPart};
 use clap::Parser;
 use geesefs_rs::{

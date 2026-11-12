@@ -3,7 +3,7 @@
 use crate::{
     error::Error,
     filesystem::{Filesystem as Core, OpenFile},
-    metrics::{self, Opcode, Trace},
+    metrics::{self, Opcode, Stage, Trace},
     write::MAX_IO,
 };
 use fuser::*;
@@ -22,6 +22,7 @@ use std::{
 use tokio::{
     runtime::Handle,
     sync::{OwnedSemaphorePermit, Semaphore},
+    time::Instant,
 };
 
 pub fn errno(error: Error) -> Errno {
@@ -411,29 +412,28 @@ impl Fuse {
         );
     }
 
-    fn spawn_traced<R, F, T>(&self, mut reply: DeadlineReply<R>, job: F)
+    fn spawn_traced<R, F, T>(&self, reply: DeadlineReply<R>, job: F)
     where
         R: Failure,
         F: FnOnce(Arc<Core>, DeadlineReply<R>) -> T + Send + 'static,
         T: Future<Output = ()> + Send + 'static,
     {
-        let admitted = {
-            let admission = self.admission.lock().unwrap();
-            if admission.closing {
-                Err((Errno::EINTR, "closing"))
-            } else {
-                admission
-                    .semaphore
-                    .clone()
-                    .try_acquire_owned()
-                    .map_err(|_| (Errno::EAGAIN, "admission_full"))
-            }
+        let deadline = {
+            // fuser creates its own receiver threads. Use the clock belonging
+            // to the executor that will enforce both admission and job expiry.
+            let _entered = self.runtime.enter();
+            Instant::now() + self.fs.config.request_timeout
         };
-        let permit = match admitted {
+        let permit = match self.admit(deadline, reply.trace.clone()) {
             Ok(permit) => permit,
-            Err((error, reason)) => {
+            Err(error) => {
+                let reason = if matches!(error, Error::Timeout(_)) {
+                    "admission_timeout"
+                } else {
+                    "closing"
+                };
                 self.fs.diagnostics.event(reason);
-                reply.error_reason(error, reason);
+                reply.error_reason(errno(error), reason);
                 return;
             }
         };
@@ -446,38 +446,92 @@ impl Fuse {
                 if let (Some(trace), Some(queued)) = (&context, queued) {
                     trace.polled(queued);
                 }
-                let deadline = fs.config.request_timeout;
-                let diagnostics = fs.diagnostics.clone();
-                let expired = Arc::new(AtomicBool::new(false));
-                let mut after_reply = false;
-                let timed_out = {
-                    reply.expired = Some(expired.clone());
-                    let future = job(fs, reply);
-                    tokio::pin!(future);
-                    // Timeout borrows the job, so mark expiry BEFORE dropping its
-                    // reply/backend work. No detached operation or second reply owner.
-                    let timed_out = tokio::time::timeout(deadline, &mut future).await.is_err();
-                    if timed_out {
-                        after_reply = context.as_ref().is_some_and(|trace| trace.replied());
-                        expired.store(true, Ordering::Relaxed);
-                    }
-                    timed_out
-                };
-                // Destroy the job (and send any deadline reply) before logging.
-                if timed_out {
-                    diagnostics.event(if after_reply {
-                        "deadline_after_reply"
-                    } else {
-                        "deadline_before_reply"
-                    });
-                    if after_reply && let Some(trace) = &context {
-                        trace.background_deadline();
-                    }
-                    if !diagnostics.enabled() {
-                        eprintln!("FUSE request deadline exceeded");
-                    }
-                }
+                Self::run_job(fs, reply, job, deadline).await;
             }));
+    }
+
+    async fn run_job<R, F, T>(fs: Arc<Core>, mut reply: DeadlineReply<R>, job: F, deadline: Instant)
+    where
+        R: Failure,
+        F: FnOnce(Arc<Core>, DeadlineReply<R>) -> T,
+        T: Future<Output = ()>,
+    {
+        // Tokio timeouts poll the inner future first. An already-expired
+        // callback must not start even an immediately-ready mutation.
+        if Instant::now() >= deadline {
+            fs.diagnostics.event("deadline_before_reply");
+            reply.error_reason(Errno::ETIMEDOUT, "deadline");
+            return;
+        }
+        let context = reply.trace.clone();
+        let diagnostics = fs.diagnostics.clone();
+        let expired = Arc::new(AtomicBool::new(false));
+        let mut after_reply = false;
+        let timed_out = {
+            reply.expired = Some(expired.clone());
+            let future = job(fs, reply);
+            tokio::pin!(future);
+            // Timeout borrows the job, so mark expiry BEFORE dropping its
+            // reply/backend work. No detached operation or second reply owner.
+            let timed_out = tokio::time::timeout_at(deadline, &mut future)
+                .await
+                .is_err();
+            if timed_out {
+                after_reply = context.as_ref().is_some_and(|trace| trace.replied());
+                expired.store(true, Ordering::Relaxed);
+            }
+            timed_out
+        };
+        // Destroy the job (and send any deadline reply) before logging.
+        if timed_out {
+            diagnostics.event(if after_reply {
+                "deadline_after_reply"
+            } else {
+                "deadline_before_reply"
+            });
+            if after_reply && let Some(trace) = &context {
+                trace.background_deadline();
+            }
+            if !diagnostics.enabled() {
+                eprintln!("FUSE request deadline exceeded");
+            }
+        }
+    }
+
+    fn admit(
+        &self,
+        deadline: Instant,
+        context: Option<Arc<Trace>>,
+    ) -> crate::error::Result<OwnedSemaphorePermit> {
+        let semaphore = {
+            let admission = self.admission.lock().unwrap();
+            if admission.closing {
+                return Err(Error::Cancelled);
+            }
+            if let Ok(permit) = admission.semaphore.clone().try_acquire_owned() {
+                return Ok(permit);
+            }
+            admission.semaphore.clone()
+        };
+        // Fixed fuser receiver threads provide backpressure to the kernel: at
+        // most one pending callback (including funded WRITE bytes) per receiver.
+        // Do not spawn semaphore waiters or hold the admission mutex here. The
+        // async workers remain free to finish the actual owners, including work
+        // after an early READ reply; notification work uses a separate slot.
+        self.fs.diagnostics.event("admission_wait");
+        let permit = self.runtime.block_on(metrics::scope(context, async {
+            metrics::observe(&self.fs.diagnostics, Stage::FuseAdmission, async {
+                tokio::time::timeout_at(deadline, semaphore.acquire_owned())
+                    .await
+                    .map_err(|_| Error::Timeout("FUSE admission"))?
+                    .map_err(|_| Error::Cancelled)
+            })
+            .await
+        }))?;
+        if self.admission.lock().unwrap().closing {
+            return Err(Error::Cancelled);
+        }
+        Ok(permit)
     }
     fn flags(&self) -> FopenFlags {
         if self.fs.config.read_only_direct_io {

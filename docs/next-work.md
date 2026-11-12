@@ -37,11 +37,15 @@ current native/served HEAD parity is not historical full-payload acceptance.
 
 The [HDD functional checkpoint](target-disk-cache-functional.md) adds a completed
 hourly replay with five common-mount body truncations, despite successful explicit
-byte/recovery controls. Reproduce the `spawn_traced` admission boundary through
-native buffered reads/sendfile and implement bounded foreground backpressure
-without unbounded queued owners or early release of actual-work credits. Preserve
-the original failures and distinguish them from other mounts/proxy errors before
-changing runtime limits or claiming a fix.
+byte/recovery controls. Native buffered-read/sendfile regressions now reproduce
+immediate `spawn_traced` rejection as EIO and verify bounded receiver-thread
+backpressure with unchanged work credits and a shared deadline. Qualify that
+correction under authorized sustained target traffic; local fixtures do not close
+the recorded serving failures. Investigate the three READDIRPLUS assertions that
+also fail on the pristine baseline under the current development kernel; see
+[the verification scope](testing.md#fuse-admission-backpressure--2026-11-12).
+Preserve failures from other mounts/proxies separately, without changing runtime
+limits or claiming whole-system acceptance.
 
 ## 2. Target access and large-namespace memory
 

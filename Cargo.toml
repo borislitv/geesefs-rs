@@ -65,7 +65,7 @@ tracing-appender = "=0.2.5"
 foyer-storage = { git = "https://github.com/borislitv/foyer", rev = "d60dd0462c1de1e0853590791371208b659c90bf", features = ["test_utils"] }
 rcgen = "0.14"
 tempfile = "3"
-tokio = { version = "=1.54.1", features = ["process"] }
+tokio = { version = "=1.54.1", features = ["process", "test-util"] }
 flate2 = "1"
 tiny_http = { version = "=0.12.0", features = ["ssl-rustls"] }
 

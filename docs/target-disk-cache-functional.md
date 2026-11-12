@@ -153,6 +153,8 @@ remain available for the operator's decision; traffic admission was not restored
 Raw logs, commands, failed attempts, hashes, 1,518 monitoring samples and consumer
 snapshots remain in private ignored evidence. All 37 copied top-level remote
 evidence files match their origin hashes. No credentials or operational host
-identities are included here. Tracked changes after the measured revision are
-documentation-only; prior unit/CI verification is not a substitute for resolving
-the serving failures above.
+identities are included here. Commit `420f303` recorded this checkpoint without
+runtime changes. The subsequent [admission correction](testing.md#fuse-admission-backpressure--2026-11-12)
+reproduces and removes immediate overload EIO in local buffered-read/sendfile
+fixtures. It was not part of this trial; unit/native/CI results do not rewrite
+the serving failures or substitute for sustained target verification.

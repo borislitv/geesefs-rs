@@ -24,10 +24,25 @@ statistics. Startup multipart expiry is prefix-confined and must be explicitly
 disabled for a read-only diagnostic requiring no backend mutation.
 
 `Fuse::spawn` admits at most `max_requests` active jobs. Closing admission returns
-EINTR; saturation returns EAGAIN. A job owns its reply and permit until completion
-or the request deadline. Timeout drops the future and returns ETIMEDOUT for an
-unsent reply. A reply published before read-ahead is already terminal and cannot
-be sent again during cancellation. There is no unbounded application request queue.
+EINTR. Saturation waits on the existing semaphore in the fixed fuser receiver
+threads, instead of returning EAGAIN that Linux buffered reads can expose as EIO.
+There is at most one pending callback per receiver in addition to admitted jobs;
+no detached waiter queue is created. Pending WRITE input remains ingress-funded.
+No admission, file-registry or namespace mutex spans this wait.
+
+One absolute deadline starts at request admission and covers capacity wait,
+executor queueing and execution. Already-expired jobs cannot begin a mutation.
+A job owns its reply and permit until actual completion or cancellation, including
+read-ahead after an early reply. Timeout returns ETIMEDOUT for an unsent reply;
+an already-published reply stays terminal and cannot be sent again.
+
+Waiting on a receiver deliberately delays later callbacks, including metadata
+and FORGET on a single receiver. Admitted async jobs progress independently of
+that receiver; kernel notification work has a separate slot and blocking worker.
+This is bounded backpressure, not priority scheduling or a bound on time still
+queued in the kernel. Synchronous non-yielding work remains non-preemptible.
+The executable uses a multithreaded Tokio runtime; tests using a current-thread
+runtime must continue driving it while fuser waits, as for other async callbacks.
 
 File-handle slots are reserved before create can mutate the namespace. A registry
 entry owns its slot and `Arc<OpenFile>`; admitted reads retain that open inode until

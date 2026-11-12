@@ -45,6 +45,7 @@ vocabulary!(Opcode, OPCODES,
     Mutation => "mutation", Other => "other",
 );
 vocabulary!(Stage, STAGES,
+    FuseAdmission => "fuse_admission",
     PayloadAdmission => "payload_admission", FillWait => "fill_wait", CacheRead => "cache_read",
     NamespaceWait => "namespace_wait_sampled", NamespaceHold => "namespace_hold_sampled",
     MetadataSlots => "metadata_slots", S3Head => "s3_head", S3List => "s3_list",

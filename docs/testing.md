@@ -5,6 +5,39 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Interrupted extended LIST transport — 2026-11-13
+
+Five `backend_options` regressions use the public S3 backend and real, bounded
+loopback HTTP/TCP connections. Closure before headers and incomplete successful
+HTTP bodies fail honestly on the earlier source, then recover through the configured
+retry. A parseable stale XML page inside a truncated HTTP body must be discarded;
+only the independently specified recovered key and seven-byte size are returned.
+Both requests retain the exact signed page, mounted prefix, delimiter and token.
+Zero/two configured retries produce exactly one/three attempts on repeated failure.
+
+Complete invalid XML and complete HTTP responses containing truncated gzip remain
+terminal. Adding unconditional I/O UnexpectedEof retries fails the gzip fixture with
+three attempts instead of one; the fault is reverted. Transport backoff cannot
+extend the original 200-ms aggregate budget. A mutation extending only the inner
+LIST deadline survives because the enclosing metadata deadline enforces the same
+bound; this redundant-guard survivor is retained, not claimed as a kill. Eight
+selected attempt-limit/boolean mutations are killed by the extension controls;
+this is not whole-file coverage or a complete mutation score.
+
+Default and all-feature all-target suites each pass **535 tests**, with 30 opt-in
+ignores. All-feature denied-warning Clippy, fmt, diff checks and the public-source
+audit (388 packages, zero errors) pass. Crapper reports classifier CC8 and existing
+extended-list function CC29; coverage/CRAP are unavailable. Dryer finds no candidates
+at threshold0.8 within the changed source/test files. No target traversal/recycling
+or strict flat-directory progress pass follows from these local checks.
+
+```bash
+timeout 160s cargo +1.99.1 test --locked --offline --test backend_options extension_
+timeout 380s cargo +1.99.1 test --locked --offline --all-targets
+timeout 380s cargo +1.99.1 test --locked --offline --all-targets --all-features
+timeout 160s cargo +1.99.1 clippy --locked --offline --all-targets --all-features -- -D warnings
+```
+
 ## Directory listing fixture contracts — 2026-11-13
 
 Three earlier native PLUS failures were stale fixture assumptions, not three

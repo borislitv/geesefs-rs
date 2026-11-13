@@ -5,6 +5,25 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-13: retry interrupted extended LIST transport within its existing budget
+
+Target traversal retained failures where extended LIST request errors exhausted
+only one attempt, alongside independent LIST/HEAD deadline failures. Real loopback
+TCP regressions reproduce two missing retry cases: closure before headers and a
+successful response ending before its declared Content-Length. Both are assertion-RED
+on the previous source. Even complete XML from an incomplete HTTP message must be
+discarded, not published as a successful page.
+
+Classify supported reqwest/hyper error sources and retry the same signed page within
+the existing attempt count, backoff and aggregate deadlines. Hyper represents a
+truncated Content-Length body as an UnexpectedEof I/O source; gzip decoder EOF must
+remain terminal when the HTTP message itself completed. Five public-backend tests
+cover recovery, exact page/token preservation, configured exhaustion, deadline
+cancellation and permanent decoding failures. Full default/all-feature suites each
+pass 535 active tests. See [verification](testing.md#interrupted-extended-list-transport--2026-11-13).
+This does not resolve every target timeout or the strict flat-directory capacity
+gate, and does not establish completed physical L2 reuse or acceptance.
+
 ## 2026-11-13: correct native directory fixtures for flat metadata reuse
 
 Three preserved native failures assumed the older listing path: the request count

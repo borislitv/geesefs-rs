@@ -1138,6 +1138,205 @@ async fn extension_retry_count_is_configured_and_access_errors_are_never_retried
     assert_eq!(task.join().unwrap().len(), 1);
 }
 
+fn extension_wire_response(body: &[u8], missing_bytes: usize, gzip: bool) -> Vec<u8> {
+    let encoding = if gzip {
+        "Content-Encoding: gzip\r\n"
+    } else {
+        ""
+    };
+    let mut response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\n{encoding}Content-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len() + missing_bytes
+    ).into_bytes();
+    response.extend_from_slice(body);
+    response
+}
+
+fn interrupted_extension_response(before_headers: bool) -> Vec<u8> {
+    if before_headers {
+        Vec::new()
+    } else {
+        // Parseable XML cannot be published before HTTP framing completes.
+        extension_wire_response(
+            b"<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>prefix/folder/stale</Key><Size>1</Size></Contents></ListBucketResult>",
+            100,
+            false,
+        )
+    }
+}
+
+async fn extension_wire_server(
+    replies: Vec<Vec<u8>>,
+) -> (
+    String,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Vec<String>>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, mut stopped) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        loop {
+            let (mut stream, _) = tokio::select! {
+                _ = &mut stopped => break,
+                accepted = tokio::time::timeout(Duration::from_secs(3), listener.accept()) => {
+                    accepted.expect("bounded fixture accept").unwrap()
+                }
+            };
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                assert!(headers.len() < 16384, "bounded request headers");
+                headers.push(
+                    tokio::time::timeout(Duration::from_secs(2), stream.read_u8())
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                );
+            }
+            let request = String::from_utf8(headers).unwrap();
+            assert!(request.starts_with("GET "));
+            requests.push(request.split_whitespace().nth(1).unwrap().to_owned());
+            let response = replies
+                .get(requests.len() - 1)
+                .expect("unexpected LIST attempt");
+            tokio::time::timeout(Duration::from_secs(2), stream.write_all(response))
+                .await
+                .unwrap()
+                .unwrap();
+            stream.shutdown().await.unwrap();
+        }
+        requests
+    });
+    (endpoint, stop, task)
+}
+
+#[tokio::test]
+async fn extension_retries_interrupted_headers_and_discards_incomplete_success_bodies() {
+    for before_headers in [false, true] {
+        let (endpoint, stop, task) = extension_wire_server(vec![
+            interrupted_extension_response(before_headers),
+            extension_wire_response(
+                b"<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>prefix/folder/recovered</Key><Size>7</Size></Contents></ListBucketResult>",
+                0,
+                false,
+            ),
+        ]).await;
+        let mut c = config(&endpoint, &["--list-type=ext-v1"]);
+        c.sdk_max_retries = 1;
+        let page = store(&endpoint, &c)
+            .list_after("folder/", Some("/"), Some("cursor"), Some("ignored"))
+            .await;
+        stop.send(()).unwrap();
+        let requests = task.await.unwrap();
+        let page = page.expect("an interrupted idempotent LIST must retry within its budget");
+        assert_eq!(page.objects.len(), 1);
+        assert_eq!(page.objects[0].key, "folder/recovered");
+        assert_eq!(page.objects[0].size, 7);
+        assert_eq!(requests.len(), 2, "one configured retry");
+        assert_eq!(requests[0], requests[1], "retry the same page and token");
+        let url = reqwest::Url::parse(&format!("{endpoint}{}", requests[0])).unwrap();
+        let query = url.query_pairs().collect::<BTreeMap<_, _>>();
+        assert_eq!(query["list-type"], "ext-v1");
+        assert_eq!(query["prefix"], "prefix/folder/");
+        assert_eq!(query["delimiter"], "/");
+        assert_eq!(query["continuation-token"], "cursor");
+        assert!(!query.contains_key("start-after"));
+    }
+}
+
+#[tokio::test]
+async fn extension_interrupted_transport_preserves_configured_attempt_limits() {
+    for before_headers in [true, false] {
+        for retries in [0, 2] {
+            let (endpoint, stop, task) =
+                extension_wire_server(vec![
+                    interrupted_extension_response(before_headers);
+                    retries as usize + 1
+                ])
+                .await;
+            let mut c = config(&endpoint, &["--list-type=ext-v1"]);
+            c.sdk_max_retries = retries;
+            let error = store(&endpoint, &c)
+                .list("folder/", None, None)
+                .await
+                .unwrap_err();
+            stop.send(()).unwrap();
+            let requests = task.await.unwrap();
+            assert!(matches!(error, Error::Backend { .. }));
+            assert_eq!(requests.len(), retries as usize + 1);
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| request.contains("list-type=ext-v1"))
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn extension_transport_backoff_cannot_extend_the_original_operation_budget() {
+    let (endpoint, stop, task) =
+        extension_wire_server(vec![interrupted_extension_response(false); 9]).await;
+    let mut c = config(&endpoint, &["--list-type=ext-v1"]);
+    c.sdk_max_retries = 8;
+    c.http_timeout = Duration::from_millis(200);
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        store(&endpoint, &c).list("folder/", None, None),
+    )
+    .await;
+    stop.send(()).unwrap();
+    let requests = task.await.unwrap();
+    assert!(
+        matches!(result, Ok(Err(Error::Timeout(_)))),
+        "aggregate budget: {result:?}"
+    );
+    assert!(
+        (2..9).contains(&requests.len()),
+        "deadline must cancel remaining attempts"
+    );
+}
+
+#[tokio::test]
+async fn extension_complete_http_with_truncated_gzip_is_not_retried() {
+    use std::io::Write;
+
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(b"<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>")
+        .unwrap();
+    let mut gzip = encoder.finish().unwrap();
+    gzip.truncate(gzip.len() - 4);
+    let (endpoint, stop, task) =
+        extension_wire_server(vec![extension_wire_response(&gzip, 0, true); 3]).await;
+    let mut c = config(&endpoint, &["--list-type=ext-v1"]);
+    c.sdk_max_retries = 2;
+    let result = store(&endpoint, &c).list("", None, None).await;
+    stop.send(()).unwrap();
+    let requests = task.await.unwrap();
+    assert!(matches!(
+        result,
+        Err(Error::Backend {
+            operation: "ext-v1 body",
+            ..
+        })
+    ));
+    assert_eq!(requests.len(), 1, "decoder EOF is not HTTP framing EOF");
+}
+
+#[tokio::test]
+async fn extension_complete_invalid_xml_is_not_a_retryable_transport_failure() {
+    let (endpoint, task) = server(vec![xml("not a listing")]);
+    let mut c = config(&endpoint, &["--list-type=ext-v1"]);
+    c.sdk_max_retries = 2;
+    let error = store(&endpoint, &c).list("", None, None).await.unwrap_err();
+    assert!(matches!(error, Error::InvalidResponse(_)));
+    assert_eq!(task.join().unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn extension_retries_transient_status_even_when_its_gzip_error_body_is_invalid() {
     for status in [429, 500, 503] {

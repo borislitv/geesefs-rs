@@ -213,6 +213,39 @@ fn request_failure_kind(error: &reqwest::Error) -> &'static str {
     }
 }
 
+fn retryable_extension_transport(error: &reqwest::Error) -> bool {
+    if error.is_connect() || error.is_timeout() {
+        return true;
+    }
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(cause) = source {
+        if let Some(error) = cause.downcast_ref::<hyper::Error>()
+            && (error.is_incomplete_message()
+                || error.is_closed()
+                // Hyper reports truncated Content-Length bodies as an I/O
+                // UnexpectedEof source, not as is_incomplete_message(). Keep
+                // gzip decoder EOF outside this HTTP framing classification.
+                || std::error::Error::source(error)
+                    .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+                    .is_some_and(|cause| cause.kind() == std::io::ErrorKind::UnexpectedEof))
+        {
+            return true;
+        }
+        if let Some(error) = cause.downcast_ref::<std::io::Error>()
+            && matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+            )
+        {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
+}
+
 impl S3 {
     /// Available only after startup discovery has selected the effective client.
     pub fn persistent_cache_scope(&self) -> Result<super::cache_scope::CacheScope> {
@@ -1234,7 +1267,7 @@ impl S3 {
             .await
             .map_err(|_| backend("ext-v1 presign", None, "SDK could not presign extension"))?;
         // The presigned URL is a credential. Never include it in logs/errors.
-        for attempt in 0..self.extension_attempts {
+        'attempts: for attempt in 0..self.extension_attempts {
             let mut request = self.extension_http.get(signed.uri());
             for (name, value) in signed.headers() {
                 request = request.header(name, value);
@@ -1245,7 +1278,7 @@ impl S3 {
                 Ok(response) => response,
                 Err(error)
                     if attempt + 1 < self.extension_attempts
-                        && (error.is_connect() || error.is_timeout()) =>
+                        && retryable_extension_transport(&error) =>
                 {
                     tokio::time::sleep(extension_delay(attempt, false, Duration::ZERO)?).await;
                     continue;
@@ -1276,6 +1309,19 @@ impl S3 {
                         xml.clear();
                         body_failure = Some(request_failure_kind(&error));
                         break;
+                    }
+                    Err(error)
+                        if status.is_success()
+                            && attempt + 1 < self.extension_attempts
+                            && retryable_extension_transport(&error) =>
+                    {
+                        // HTTP framing must complete before XML publication.
+                        // Release this attempt's response and partial bytes;
+                        // the original operation deadline also bounds backoff.
+                        drop(response);
+                        drop(xml);
+                        tokio::time::sleep(extension_delay(attempt, false, Duration::ZERO)?).await;
+                        continue 'attempts;
                     }
                     Err(error) => {
                         self.list_failure(attempt, Some(status), request_failure_kind(&error));

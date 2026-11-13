@@ -7,6 +7,29 @@ translated, vendored or linked. This package forbids unsafe code in every target
 License declarations are checked; the complete binary-distribution notice audit
 remains outstanding. See LICENSE and NOTICE for source attribution.
 
+## Interrupted extended LIST responses — 2026-11-13
+
+Retain MIT/Apache-2.0 reqwest0.12.28 and already-direct hyper1.12.0. Reqwest's
+supported retry classifier handles request/response headers, not later consumption
+of a successful response body. Reuse the existing bounded extension retry loop,
+its configured attempt count, jitter and aggregate deadline. No retry framework,
+transport, dependency, timeout increase or SDK replacement is added.
+
+Inspect public error sources through `std::error::Error`, hyper's supported
+`is_incomplete_message`/`is_closed` predicates and concrete I/O connection-reset,
+connection-aborted/broken-pipe errors. Reqwest can classify incomplete HTTP bodies
+as decode errors, so `is_decode` alone cannot distinguish framing interruption
+from malformed gzip. Do not retry complete invalid XML/gzip, permission failures
+or page-limit violations. Discard partial bytes before retrying the same signed
+idempotent LIST page; never log the signed URI. Existing HTTP throttling and
+Retry-After handling remain authoritative for error statuses.
+
+Sources: [reqwest retry API](https://docs.rs/reqwest/0.12.28/reqwest/retry/index.html),
+[hyper error API](https://docs.rs/hyper/1.12.0/hyper/struct.Error.html),
+[pinned hyper implementation](https://github.com/hyperium/hyper/blob/v1.12.0/src/error.rs).
+Real loopback TCP fixtures intentionally close before headers or before declared
+Content-Length; complete XML in an incomplete HTTP body must never be published.
+
 ## Disk region occupancy observations — 2026-11-12
 
 Reuse the pinned Foyer engine's existing `clean`, `writing`, `evictable` and

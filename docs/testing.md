@@ -5,6 +5,85 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Metadata backing and live xattrs — 2026-11-13
+
+Six `fsync_xattrs` cases preserve uppercase/binary/ASCII values through same-inode
+fsync, a second no-op fsync and another partial write, with metadata admission both
+enabled and disabled. Four lossy cases are assertion-RED on the previous source;
+two ASCII controls already pass. Wire metadata is checked separately from live
+bytes rather than using the normalized projection as the expected live result.
+
+Three `directory_page_expiry` cases cover zero TTL, positive real-clock expiry on
+a different cache key, and ownership retained by an active response under count
+pressure. The positive-TTL test permits the pinned Moka timer-wheel granularity.
+Removing only builder expiry, while retaining maintenance and skipped expired
+publication, fails the backing assertion (`before=992, after=1176`); restoring the
+exact source returns all three tests to green. Raw setup failures and full source
+fingerprints remain in ignored evidence.
+
+`namespace_representation` verifies clean refresh followed by sparse writes,
+failed durability and retry, rename, independent fresh-reader bytes and retained
+snapshots. `rename_backing_refresh` synchronizes a real public-store LIST boundary,
+concurrent authoritative listing and byte pressure. Before correction, a move
+rejected before COPY/DELETE strands a child's subsequent fsync with EAGAIN; after
+correction that child's new bytes are durable. No private helper is the oracle.
+
+On isolated Linux with official Rust/Cargo 1.96.0, default and all-feature
+all-target suites each pass **546 tests / 0 failures / 31 opt-in ignores**.
+Both denied-warning Clippy configurations and fmt pass. Native FUSE and full
+target/S3 acceptance are separate; the strict flat-directory gate remains open.
+The sparse-writer control rejects an omitted remote-size clamp: shrink/grow returns
+`UV12YZ\0` instead of `UV12\0\0\0`; restoring the exact source returns it to green.
+Static analysis covers the four changed runtime files: new expiry callbacks have
+CC1 and writer-admission helpers CC1/5/7. Coverage/CRAP remain unavailable. Dryer
+retains one pre-existing identical-constructor pair; mutation discovery is not a
+whole-file mutation score. Existing high-complexity rename/flush code remains.
+
+```bash
+timeout 180s cargo test --offline --locked --test fsync_xattrs --test directory_page_expiry --test namespace_representation --test rename_backing_refresh
+timeout 1800s cargo test --offline --locked --all-targets -j 8
+timeout 1800s cargo test --offline --locked --all-features --all-targets -j 8
+timeout 1800s cargo clippy --offline --locked --all-targets -j 8 -- -D warnings
+timeout 1800s cargo clippy --offline --locked --all-features --all-targets -j 8 -- -D warnings
+```
+
+The explicitly ignored `clean_refresh_and_writer_residency_diagnostic` reports
+allocator, process and container scopes for a synthetic flat namespace. Run each
+budget mode in a fresh process. Its seeded fake backend remains accounted for;
+phase increments and total RSS must not be conflated. Use exactly the same fixture,
+support files, compiler and allocator for historical and candidate executables.
+This Rust-relative diagnostic does not supply independent mounts or Go acceptance.
+
+Against runtime source `f0391ccaa14beaaa68fd685e8624293de3fe9853`, identical current
+fixtures and default jemalloc, eight A/A and eight A/B fresh-process pairs per
+budget mode cover 100000 empty files, one clean refresh per inode and 10% sparse
+writers. All 64 measured processes retain the full namespace. Official Rust 1.96
+uses the unoptimized test profile, identical 8-CPU/16-GiB/swap0 containers and no
+forced collection/cache drop. The following are medians, not serving measurements:
+
+| Metric | Metadata charging disabled: baseline → candidate | Enabled: baseline → candidate |
+| --- | ---: | ---: |
+| Clean added jemalloc allocation, MiB | 95.465 → 78.698 | 95.470 → 78.694 |
+| Clean process RSS, MiB | 146.533 → 129.062 | 146.838 → 129.182 |
+| Observed process peak through writer checkpoint, MiB | 146.982 → 130.361 | 147.219 → 130.480 |
+| Work-interval process user/system CPU, seconds | 4.930/0.300 → 4.655/0.260 | 6.235/0.335 → 5.940/0.295 |
+| Work-interval cgroup CPU, seconds | 5.213 → 4.915 | 6.542 → 6.252 |
+| Checkpoint cgroup current/observed peak, MiB | 132.812/132.812 → 116.045/116.045 | 132.738/132.738 → 116.074/116.074 |
+| Checkpoint cgroup anon/file/kernel, MiB | 131.428/0/1.014 → 113.625/0/0.977 | 131.586/0/1.012 → 114.881/0/0.980 |
+
+Added allocation excludes the seeded fake backend; RSS includes it. Paired clean
+heap ratios are approximately 0.824, and RSS ratios 0.880; pair-bootstrap 95% RSS
+intervals are [0.8792,0.8813] disabled and [0.8789,0.8802] enabled. Same-executable
+A/A memory noise is below 0.3% at this scale. CPU/wall controls are noisier, so no
+general speed or Go-relative win is accepted. Cgroup throttling is zero; these
+container observations exclude Docker-daemon/host/serving-reader resources.
+Long-lived native ownership, representative names, payload caches and serving
+p50/p95/p99 are unmeasured. Raw samples, hashes and adverse attempts remain private.
+
+```bash
+GEESEFS_REPRESENTATION_ENTRIES=100000 GEESEFS_REPRESENTATION_BUDGET=disabled timeout 360s cargo test --offline --locked --test namespace_representation clean_refresh_and_writer_residency_diagnostic -- --ignored --exact --nocapture --test-threads=1
+```
+
 ## Interrupted extended LIST transport — 2026-11-13
 
 Five `backend_options` regressions use the public S3 backend and real, bounded

@@ -100,6 +100,17 @@ so a retrospective unchanged-budget reuse comparison is unavailable.
 Measure observer overhead separately and keep cgroup pressure and user-visible
 errors/tails alongside cache reuse. This feature does not supply a heap profile.
 
+The [metadata-backing correction](testing.md#metadata-backing-and-live-xattrs--2026-11-13)
+removes always-inline writer state and expires page-cache owners without weakening
+active ownership. Qualify its effect on a long-lived native namespace separately
+from the synthetic fresh-process diagnostic. Count-limited identities, all three
+namespace indexes, kernel references and remaining fixed inode fields still need
+an actual memory envelope; smaller layouts do not make whole-reader RSS bounded.
+For subsequent compression work, compare searchable immutable prefix/FST segments
+with bounded mutable overlays and decoded caches before adding zstd. Measure
+random-lookup CPU/p99, pinned old segments and compaction peaks, not only serialized
+compression ratios. Keep full reader/writer and actual FORGET contracts intact.
+
 ## 3. Compatibility and writer behavior
 
 - Complete actual-service IAM, SSE/signing/PATCH, imported multipart layouts and

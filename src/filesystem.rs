@@ -48,7 +48,7 @@ pub struct Filesystem {
     flushers: Arc<Semaphore>,
     upload_admission: write::UploadAdmission,
     metadata_slots: Arc<Semaphore>,
-    directory_pages: moka::sync::Cache<(u64, u64, String, usize), Arc<DirectoryPage>>,
+    directory_pages: moka::sync::Cache<DirectoryPageKey, Arc<DirectoryPage>>,
     subtree_pages: moka::sync::Cache<(u64, String), Arc<SubtreePage>>,
     preloaded_directories:
         moka::sync::Cache<u64, Arc<(std::time::Instant, crate::metadata_budget::MetadataCharge)>>,
@@ -61,6 +61,39 @@ struct DirectoryPage {
     metadata_charge: crate::metadata_budget::MetadataCharge,
     fetched: std::time::Instant,
     entries: Vec<DirEntry>,
+}
+
+type DirectoryPageKey = (u64, u64, String, usize);
+
+struct DirectoryPageExpiry {
+    ttl: Duration,
+}
+
+impl moka::Expiry<DirectoryPageKey, Arc<DirectoryPage>> for DirectoryPageExpiry {
+    fn expire_after_create(
+        &self,
+        _key: &DirectoryPageKey,
+        page: &Arc<DirectoryPage>,
+        created_at: Instant,
+    ) -> Option<Duration> {
+        // Freshness starts at LIST/snapshot time, not cache insertion time.
+        Some(
+            self.ttl
+                .saturating_sub(created_at.saturating_duration_since(page.fetched)),
+        )
+    }
+
+    fn expire_after_update(
+        &self,
+        key: &DirectoryPageKey,
+        page: &Arc<DirectoryPage>,
+        updated_at: Instant,
+        _duration_until_expiry: Option<Duration>,
+    ) -> Option<Duration> {
+        // A replacement has its own fetched time; reads retain the deadline
+        // through Expiry's default expire_after_read implementation.
+        self.expire_after_create(key, page, updated_at)
+    }
 }
 
 // One bounded flat response, shared by the complete directories it covers.
@@ -1181,6 +1214,9 @@ impl Filesystem {
             directory_pages: moka::sync::Cache::builder()
                 .max_capacity(config.entry_limit)
                 .weigher(|_, page: &Arc<DirectoryPage>| page.entries.len().max(1) as u32)
+                .expire_after(DirectoryPageExpiry {
+                    ttl: config.stat_cache_ttl,
+                })
                 .build(),
             subtree_pages: moka::sync::Cache::builder()
                 .max_capacity(config.entry_limit)
@@ -2875,7 +2911,11 @@ impl Filesystem {
         if let Some(node) = ns.named(key) {
             let dirty_descendants = entry.directory && ns.has_dirty_descendants(key);
             let mut state = node.state.lock().unwrap();
-            if !dirty_descendants && state.can_replace_metadata(entry.fetched) {
+            if !ns.is_moving(key)
+                && !ns.is_deleting(key)
+                && !dirty_descendants
+                && state.can_replace_metadata(entry.fetched)
+            {
                 if entry.known {
                     state.replace_metadata(make(node.ino)?.state.into_inner().unwrap())?;
                 } else if entry.directory
@@ -2901,6 +2941,9 @@ impl Filesystem {
         resolve_types: bool,
         resume_after: &str,
     ) -> Result<DirectoryRemainder> {
+        // Reclaim expired cache owners before admitting any listing metadata,
+        // including on a miss for a different directory/page key.
+        self.directory_pages.run_pending_tasks();
         let fetched = std::time::Instant::now();
         let mut snapshot = {
             let ns = self.lock_namespace();
@@ -3428,6 +3471,8 @@ impl Filesystem {
         selected: DirectorySelection,
         resolve_types: bool,
     ) -> Result<(Arc<DirectoryPage>, Vec<Arc<Inode>>)> {
+        // LIST/type resolution may have outlived previously cached pages.
+        self.directory_pages.run_pending_tasks();
         let page_charge = self.metadata.charge(
             std::mem::size_of::<DirectoryPage>()
                 + std::mem::size_of::<(u64, u64, String, usize)>()
@@ -3492,7 +3537,7 @@ impl Filesystem {
         {
             return Err(self.again("directory_generation_changed"));
         }
-        if resolve_types {
+        if resolve_types && page.fetched.elapsed() < self.config.stat_cache_ttl {
             self.directory_pages
                 .insert((ino, snapshot.epoch, after.into(), limit), page.clone());
             self.directory_pages.run_pending_tasks();
@@ -3617,7 +3662,9 @@ impl Filesystem {
         ns.changed(&key);
         let mut state = node.state.lock().unwrap();
         state.deleted = true;
-        state.extents.clear();
+        if let Some(writer) = state.writer.as_deref_mut() {
+            writer.extents.clear();
+        }
         state.durable = state.version;
         ns.track_dirty(node.ino, &state);
         Ok(())
@@ -3777,10 +3824,23 @@ impl Filesystem {
                         + 12 * new_len
                         + 2 * state.metadata_bytes()
                         + 4 * crate::metadata_budget::LINKS
+                        + if state.writer.is_none() {
+                            std::mem::size_of::<crate::inode::WriterState>()
+                        } else {
+                            0
+                        }
                 })
                 .sum()
         })?;
         let tombstone_credit = self.lock_namespace().reserve_tombstone(&old)?;
+        // Fund every cached participant's backing before COPY/DELETE or a dirty
+        // flush can commit. Later backing-key publication must not admit late.
+        for node in &pinned {
+            node.state
+                .lock()
+                .unwrap()
+                .writer_mut_from(&mut move_credit)?;
+        }
         let mut published = false;
         let mut publish_move = |move_credit: &mut crate::metadata_budget::MetadataCharge| {
             if published {
@@ -3799,11 +3859,14 @@ impl Filesystem {
                 return Err(Error::Fs(libc::EBUSY));
             }
             state.admit_metadata_from(move_credit, destination.len())?;
+            // Retain the admitted backing across intent publication. Nothing
+            // after begin_pending_move may reacquire it from the global budget.
+            let writer = state.writer_mut_from(move_credit)?;
             if let Err(error) = ns.begin_pending_move(&old, &destination, source.ino) {
                 state.settle_metadata();
                 return Err(error);
             }
-            state.rename_target = Some(destination.clone());
+            writer.rename_target = Some(destination.clone());
             state.settle_metadata();
             published = true;
             Ok(())
@@ -3875,8 +3938,8 @@ impl Filesystem {
                         && cached.contains_key(object.key.trim_end_matches('/'))
                     {
                         let node = &cached[object.key.trim_end_matches('/')];
-                        if !copy_heads.contains_key(&node.ino)
-                            && !(node.ino == source.ino && source_was_dirty)
+                        if !(copy_heads.contains_key(&node.ino)
+                            || node.ino == source.ino && source_was_dirty)
                         {
                             return Err(Error::Fs(libc::ESTALE));
                         }
@@ -3917,10 +3980,11 @@ impl Filesystem {
                             state.metadata = remote.metadata.clone();
                         }
                         state.remote = Some(remote);
-                        state.data_key = Some(crate::metadata_budget::SharedKey::from_admitted(
-                            target.trim_end_matches('/').to_owned(),
-                            &mut move_credit,
-                        )?);
+                        state.writer_mut()?.data_key =
+                            Some(crate::metadata_budget::SharedKey::from_admitted(
+                                target.trim_end_matches('/').to_owned(),
+                                &mut move_credit,
+                            )?);
                         state.settle_metadata();
                     }
                     self.store.delete(&object.key).await?;
@@ -3963,10 +4027,11 @@ impl Filesystem {
                     state.metadata = remote.metadata.clone();
                 }
                 state.remote = Some(remote);
-                state.data_key = Some(crate::metadata_budget::SharedKey::from_admitted(
-                    destination.clone(),
-                    &mut move_credit,
-                )?);
+                state.writer_mut()?.data_key =
+                    Some(crate::metadata_budget::SharedKey::from_admitted(
+                        destination.clone(),
+                        &mut move_credit,
+                    )?);
                 state.settle_metadata();
             }
             let mut head = self.store.head(&destination).await?;
@@ -4093,7 +4158,9 @@ impl Filesystem {
         {
             let mut state = target.state.lock().unwrap();
             state.deleted = true;
-            state.extents.clear();
+            if let Some(writer) = state.writer.as_deref_mut() {
+                writer.extents.clear();
+            }
             state.durable = state.version;
         }
         ns.forget_dirty(&destination);
@@ -4104,11 +4171,13 @@ impl Filesystem {
             if let Ok(node) = ns.get(ino) {
                 let mut state = node.state.lock().unwrap();
                 state.key = new;
-                state.data_key = None;
-                state.negative_lookups.clear();
-                if ino == source.ino {
-                    state.rename_target = None;
+                if let Some(writer) = state.writer.as_deref_mut() {
+                    writer.data_key = None;
+                    if ino == source.ino {
+                        writer.rename_target = None;
+                    }
                 }
+                state.negative_lookups.clear();
                 ns.track_dirty(ino, &state);
                 state.settle_metadata();
             }

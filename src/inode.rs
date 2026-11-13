@@ -26,20 +26,36 @@ pub struct Extent {
     pub version: u64,
 }
 
-pub struct State {
-    pub(crate) metadata_charge: MetadataCharge,
-    pub key: crate::metadata_budget::SharedKey,
+#[derive(Default)]
+pub struct WriterState {
     /// Backing object after a known copy, before a retryable rename is published.
     pub data_key: Option<crate::metadata_budget::SharedKey>,
-    pub size: u64,
-    pub remote: Option<CachedRemote>,
-    pub visible_remote_size: u64,
     pub extents: BTreeMap<u64, Extent>,
-    pub version: u64,
-    pub durable: u64,
     pub(crate) pending_upload: Option<std::sync::Arc<crate::write::PendingUpload>>,
     pub truncate_version: u64,
     pub cuts: BTreeMap<u64, u64>,
+    pub rename_target: Option<String>,
+}
+
+// Borrowed reads never allocate, and no mutable reference to this value escapes.
+static EMPTY_WRITER: WriterState = WriterState {
+    data_key: None,
+    extents: BTreeMap::new(),
+    pending_upload: None,
+    truncate_version: 0,
+    cuts: BTreeMap::new(),
+    rename_target: None,
+};
+
+pub struct State {
+    pub(crate) metadata_charge: MetadataCharge,
+    pub key: crate::metadata_budget::SharedKey,
+    pub size: u64,
+    pub remote: Option<CachedRemote>,
+    pub visible_remote_size: u64,
+    pub version: u64,
+    pub durable: u64,
+    pub(crate) writer: Option<Box<WriterState>>,
     pub metadata: CachedMetadata,
     pub mode: u32,
     pub uid: u32,
@@ -51,11 +67,66 @@ pub struct State {
     pub opens: u64,
     pub metadata_known: bool,
     pub fetched: std::time::Instant,
-    pub rename_target: Option<String>,
     pub negative_lookups: std::collections::BTreeMap<String, std::time::Instant>,
 }
 
+impl std::ops::Deref for State {
+    type Target = WriterState;
+    fn deref(&self) -> &WriterState {
+        self.writer.as_deref().unwrap_or(&EMPTY_WRITER)
+    }
+}
+
 impl State {
+    /// Admit the backing before exposing mutable writer fields. Preserve any
+    /// earlier prepaid mutation allowance rather than settling it away here.
+    pub(crate) fn writer_mut(&mut self) -> Result<&mut WriterState> {
+        self.writer_mut_with(0)
+    }
+
+    pub(crate) fn writer_mut_with(&mut self, growth: usize) -> Result<&mut WriterState> {
+        if growth == 0 && self.writer.is_some() {
+            return Ok(self.writer.as_deref_mut().unwrap());
+        }
+        if self.metadata_budget().enabled() {
+            let backing = if self.writer.is_none() {
+                std::mem::size_of::<WriterState>()
+            } else {
+                0
+            };
+            self.metadata_charge.resize(
+                self.metadata_charge
+                    .bytes()
+                    .max(self.metadata_bytes().saturating_add(growth))
+                    .saturating_add(backing),
+            )?;
+        }
+        if self.writer.is_none() {
+            self.writer = Some(Box::default());
+        }
+        Ok(self.writer.as_deref_mut().unwrap())
+    }
+
+    pub(crate) fn writer_mut_from(
+        &mut self,
+        credit: &mut MetadataCharge,
+    ) -> Result<&mut WriterState> {
+        if self.writer.is_none() && self.metadata_budget().enabled() {
+            self.metadata_charge.ensure_from(
+                self.metadata_charge
+                    .bytes()
+                    .max(self.metadata_bytes())
+                    .saturating_add(std::mem::size_of::<WriterState>()),
+                credit,
+            )?;
+        }
+        // The backing is now fully admitted, including existing prepaid growth.
+        // Avoid charging it a second time through writer_mut().
+        if self.writer.is_none() {
+            self.writer = Some(Box::default());
+        }
+        Ok(self.writer.as_deref_mut().unwrap())
+    }
     pub(crate) fn cache_remote_from(
         &mut self,
         head: ObjectHead,
@@ -85,6 +156,10 @@ impl State {
     pub(crate) fn metadata_bytes(&self) -> usize {
         std::mem::size_of::<Inode>()
             + 4 * LINKS
+            + self
+                .writer
+                .as_ref()
+                .map_or(0, |_| std::mem::size_of::<WriterState>())
             + self.rename_target.as_ref().map_or(0, String::capacity)
             + self
                 .negative_lookups
@@ -327,16 +402,12 @@ impl Inode {
             state: Mutex::new(State {
                 metadata_charge: charge,
                 key,
-                data_key: None,
                 size,
                 remote,
                 visible_remote_size: size,
-                extents: BTreeMap::new(),
                 version: 0,
                 durable: 0,
-                pending_upload: None,
-                truncate_version: 0,
-                cuts: BTreeMap::new(),
+                writer: None,
                 metadata,
                 mode,
                 uid,
@@ -348,7 +419,6 @@ impl Inode {
                 opens: 0,
                 metadata_known: true,
                 fetched: std::time::Instant::now(),
-                rename_target: None,
                 negative_lookups: std::collections::BTreeMap::new(),
             }),
             flush: std::sync::Arc::new(tokio::sync::Mutex::new(())),

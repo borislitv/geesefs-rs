@@ -47,9 +47,6 @@ pub fn insert_extent(state: &mut State, offset: u64, block: Block) -> Result<()>
     if state.extents.len() >= 65536 {
         return Err(Error::Fs(libc::ENOMEM));
     }
-    state.admit_metadata(
-        3 * (std::mem::size_of::<(u64, Extent)>() + crate::metadata_budget::LINKS),
-    )?;
     let _temporary = state
         .metadata_budget()
         .charge(2 * state.extents.len() * std::mem::size_of::<(u64, Extent)>())?;
@@ -59,10 +56,13 @@ pub fn insert_extent(state: &mut State, offset: u64, block: Block) -> Result<()>
         .filter(|(_, e)| e.end > offset)
         .map(|(&start, e)| (start, e.clone()))
         .collect();
+    state.writer_mut_with(
+        3 * (std::mem::size_of::<(u64, Extent)>() + crate::metadata_budget::LINKS),
+    )?;
     for (start, extent) in overlaps {
-        state.extents.remove(&start);
+        state.writer_mut()?.extents.remove(&start);
         if start < offset {
-            state.extents.insert(
+            state.writer_mut()?.extents.insert(
                 start,
                 Extent {
                     end: offset,
@@ -71,7 +71,7 @@ pub fn insert_extent(state: &mut State, offset: u64, block: Block) -> Result<()>
             );
         }
         if extent.end > end {
-            state.extents.insert(
+            state.writer_mut()?.extents.insert(
                 end,
                 Extent {
                     data_offset: extent.data_offset + (end - start) as usize,
@@ -81,13 +81,14 @@ pub fn insert_extent(state: &mut State, offset: u64, block: Block) -> Result<()>
         }
     }
     state.version += 1;
-    state.extents.insert(
+    let version = state.version;
+    state.writer_mut()?.extents.insert(
         offset,
         Extent {
             end,
             data: block,
             data_offset: 0,
-            version: state.version,
+            version,
         },
     );
     state.size = state.size.max(end);
@@ -103,16 +104,17 @@ pub fn truncate(state: &mut State, size: u64) -> Result<()> {
     if size < state.size && state.cuts.len() >= 65536 {
         return Err(Error::Fs(libc::ENOMEM));
     }
-    state.admit_metadata(std::mem::size_of::<(u64, u64)>() + crate::metadata_budget::LINKS)?;
+    state.writer_mut_with(std::mem::size_of::<(u64, u64)>() + crate::metadata_budget::LINKS)?;
     state.version += 1;
     if size < state.size {
         if state.cuts.len() >= 65536 {
             return Err(Error::Fs(libc::ENOMEM));
         }
-        state.truncate_version = state.version;
-        state.cuts.insert(state.version, size);
+        let version = state.version;
+        state.writer_mut()?.truncate_version = version;
+        state.writer_mut()?.cuts.insert(version, size);
         state.visible_remote_size = state.visible_remote_size.min(size);
-        state.extents.retain(|&start, e| {
+        state.writer_mut()?.extents.retain(|&start, e| {
             e.end = e.end.min(size);
             start < size
         });
@@ -316,6 +318,8 @@ pub fn snapshot(node: &Inode, config: &Config) -> Result<Option<Snapshot>> {
     if state.version == state.durable {
         return Ok(None);
     }
+    // Pending upload/reconciliation fields must exist before any backend mutation.
+    state.writer_mut()?;
     // Admission may have waited while writes changed both version and mtime.
     // Generated attributes and payload must describe the same locked generation.
     prepare_metadata(config, &mut state)?;
@@ -481,7 +485,7 @@ pub(crate) async fn flush_locked_before(
                     .map_err(|_| Error::Cancelled)?;
             let body = crate::upload_body::stream(store, &snapshot, 0, snapshot.size, lane)?;
             will_mutate(&mut before)?;
-            node.state.lock().unwrap().pending_upload = Some(pending.clone());
+            node.state.lock().unwrap().writer_mut()?.pending_upload = Some(pending.clone());
             store
                 .put(&snapshot.key, body, expected.metadata.clone())
                 .await?
@@ -604,7 +608,7 @@ pub(crate) async fn flush_locked_before(
                 }
                 // Set before the request: cancellation can lose an applied
                 // completion's response just as an explicit transport error can.
-                node.state.lock().unwrap().pending_upload = Some(pending.clone());
+                node.state.lock().unwrap().writer_mut()?.pending_upload = Some(pending.clone());
                 store
                     .complete_upload(&snapshot.key, &upload, parts.into_values().collect())
                     .await
@@ -640,7 +644,9 @@ pub(crate) async fn flush_locked_before(
             &mut pending.progress_credit.lock().unwrap(),
         )?;
         progress_version(node, snapshot.version, remote.clone());
-        node.state.lock().unwrap().pending_upload = None;
+        if let Some(writer) = node.state.lock().unwrap().writer.as_deref_mut() {
+            writer.pending_upload = None;
+        }
         let head = store.head(&snapshot.key).await?;
         if head.size != upload_size || head.etag != committed {
             return Err(Error::InvalidResponse(
@@ -682,9 +688,8 @@ fn retire(node: &Inode, snapshot: &Snapshot, remote: CachedRemote) -> Result<()>
     if state.deleted {
         return Err(Error::Fs(libc::ENOENT));
     }
-    if state.version == snapshot.version {
-        state.metadata = remote.metadata.clone();
-    }
+    // Keep live xattr names/bytes: wire normalization is lossy. The remote
+    // baseline retains its independently decoded metadata for reconciliation.
     state.remote = Some(remote);
     state.visible_remote_size = state
         .cuts
@@ -693,8 +698,10 @@ fn retire(node: &Inode, snapshot: &Snapshot, remote: CachedRemote) -> Result<()>
         .min()
         .unwrap_or(snapshot.size)
         .min(snapshot.size);
-    state.cuts.retain(|&version, _| version > snapshot.version);
-    state.extents.retain(|_, e| e.version > snapshot.version);
+    if let Some(writer) = state.writer.as_deref_mut() {
+        writer.cuts.retain(|&version, _| version > snapshot.version);
+        writer.extents.retain(|_, e| e.version > snapshot.version);
+    }
     state.durable = snapshot.version;
     // A verified commit is a newer authoritative observation than a LIST that
     // was already in flight. Its metadata must not replace this generation.
@@ -770,7 +777,9 @@ async fn reconcile_upload(store: &Arc<dyn Store>, node: &Inode) -> Result<()> {
             if previous.is_none() && matches!(code.as_str(), "NoSuchKey" | "NotFound") => {}
         Err(error) => return Err(error),
     }
-    node.state.lock().unwrap().pending_upload = None;
+    if let Some(writer) = node.state.lock().unwrap().writer.as_deref_mut() {
+        writer.pending_upload = None;
+    }
     Ok(())
 }
 
@@ -853,9 +862,9 @@ async fn refresh_conflict(
         .map(|(&offset, extent)| (offset, extent.clone()))
         .collect();
     for (offset, extent) in overlapping {
-        state.extents.remove(&offset);
+        state.writer_mut()?.extents.remove(&offset);
         if offset < start {
-            state.extents.insert(
+            state.writer_mut()?.extents.insert(
                 offset,
                 Extent {
                     end: start,
@@ -864,7 +873,7 @@ async fn refresh_conflict(
             );
         }
         if extent.end > end {
-            state.extents.insert(
+            state.writer_mut()?.extents.insert(
                 end,
                 Extent {
                     data_offset: extent.data_offset + (end - offset) as usize,

@@ -16,7 +16,7 @@ use crate::{
 pub(crate) const LINKS: usize = size_of::<[usize; 8]>();
 
 #[derive(Clone, Default)]
-pub struct MetadataBudget(Option<Budget>);
+pub struct MetadataBudget(Option<std::sync::Arc<Budget>>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct MetadataUsage {
@@ -48,13 +48,15 @@ impl MetadataBudget {
         self.charge(self.estimate(bytes))
     }
     pub fn new(limit: Option<usize>) -> Result<Self> {
-        Ok(Self(limit.map(Budget::new).transpose()?))
+        Ok(Self(
+            limit.map(Budget::new).transpose()?.map(std::sync::Arc::new),
+        ))
     }
 
     pub fn usage(&self) -> MetadataUsage {
         MetadataUsage {
-            limit: self.0.as_ref().map(Budget::limit),
-            charged: self.0.as_ref().map_or(0, Budget::used),
+            limit: self.0.as_ref().map(|budget| budget.limit()),
+            charged: self.0.as_ref().map_or(0, |budget| budget.used()),
         }
     }
 

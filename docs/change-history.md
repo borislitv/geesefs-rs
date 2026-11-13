@@ -5,6 +5,28 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-13: preserve live xattrs and release avoidable metadata backing
+
+A verified fsync replaced live xattrs with the remote wire projection, losing
+uppercase names and non-UTF-8 bytes. Keep live metadata independently of the
+normalized remote baseline. Six public filesystem regressions first fail on the
+previous source and then preserve the same inode's values, durable bytes and
+subsequent writes. The existing wire codec and reopen normalization are unchanged.
+
+Move untouched inodes' writer-only fields into lazily admitted backing and share
+one compact budget handle across metadata charges. Admit backing before mutation
+or remote side effects. An independently reproduced rename/LIST race additionally
+requires protecting moving identities from clean metadata replacement and funding
+writer backing before publishing retry intent.
+
+Use Moka's supported per-entry expiry from the page's original fetched time and
+drive maintenance before listing admission. Already-expired pages are not cached;
+an active response retains its own ownership. Removing only cache expiry makes
+the positive-TTL regression retain two backings instead of one. See the
+[verification scope](testing.md#metadata-backing-and-live-xattrs--2026-11-13).
+These corrections do not establish a whole-reader memory bound or resolve the
+strict native flat-directory progress gate.
+
 ## 2026-11-13: retry interrupted extended LIST transport within its existing budget
 
 Target traversal retained failures where extended LIST request errors exhausted

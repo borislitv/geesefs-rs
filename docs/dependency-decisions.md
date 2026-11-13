@@ -7,6 +7,35 @@ translated, vendored or linked. This package forbids unsafe code in every target
 License declarations are checked; the complete binary-distribution notice audit
 remains outstanding. See LICENSE and NOTICE for source attribution.
 
+## Compact metadata owners and fetched-time page expiry — 2026-11-13
+
+Retain the standard library's `Arc`, `Option<Box<_>>` and existing independent
+budget reservations. One shared budget handle removes repeated inline limit state;
+lazy writer backing removes empty writer containers from read-only inodes. These
+are representation changes, not a new allocator, cache or accounting framework.
+Backing remains explicitly admitted before mutation and is charged while retained.
+No dependency or lockfile change is needed.
+
+Retain sync Moka 0.12.16 and its public
+[`Expiry`](https://docs.rs/moka/0.12.16/moka/trait.Expiry.html) and
+[`run_pending_tasks`](https://docs.rs/moka/0.12.16/moka/sync/struct.Cache.html#method.run_pending_tasks)
+APIs. Compute create/update expiry from the original fetched instant; ordinary
+reads preserve that deadline. Maintenance is deferred, not an exact idle-time
+freeing guarantee, and external response owners legitimately retain their charges.
+The pinned [timer wheel](https://github.com/moka-rs/moka/blob/v0.12.16/src/common/timer_wheel.rs)
+explains the real-clock regression's maintenance allowance. Do not add a custom
+timer, background sweeper or cache replacement for this requirement.
+
+Namespace compression remains research. LevelDB's public BSD-licensed
+[restart-prefix blocks](https://github.com/google/leveldb/blob/1.23/table/block_builder.cc)
+separate searchable prefix representation from block compression. Zstd 1.5.7's
+[seekable format](https://github.com/facebook/zstd/blob/v1.5.7/contrib/seekable_format/README.md)
+documents the decode-amplification/index/ratio tradeoff. Evaluate maintained
+searchable immutable-index crates before any custom format. A tiny per-inode zstd
+frame cannot compress locks, owner headers or tree nodes; a compressed copy plus
+the unchanged decoded namespace is not a memory reduction. No codec or namespace
+dependency is selected or enabled by this correction.
+
 ## Interrupted extended LIST responses — 2026-11-13
 
 Retain MIT/Apache-2.0 reqwest0.12.28 and already-direct hyper1.12.0. Reqwest's

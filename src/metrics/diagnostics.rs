@@ -410,6 +410,34 @@ impl Diagnostics {
             self.debug("diagnostic_event", || serde_json::json!({"reason": reason}));
         }
     }
+    /// Bounded background diagnostics, including work outside a FUSE trace.
+    pub(crate) fn warning(&self, event: &'static str, details: impl FnOnce() -> serde_json::Value) {
+        let Some(inner) = &self.0 else {
+            return;
+        };
+        let level = DiagnosticLogLevel::Warn;
+        if inner.log_level < level {
+            return;
+        }
+        let Some(writer) = inner.log_writer(level) else {
+            return;
+        };
+        if !inner.admit_log(level) {
+            return;
+        }
+        let record = format!(
+            "{}{}\n",
+            inner.log_prefix(level),
+            serde_json::json!({
+                "event": event, "level": "warn", "process_id": std::process::id(),
+                "timestamp_unix_seconds": SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|duration| duration.as_secs_f64()),
+                "details": details(),
+            })
+        );
+        // One queue item per complete record, rather than a formatting write for
+        // each JSON token (which can exhaust the bounded queue mid-record).
+        let _ = writer.clone().write_all(record.as_bytes());
+    }
     pub(crate) fn background_error(&self, error: &crate::error::Error) {
         let reason = match error {
             crate::error::Error::Timeout(_) => "read_ahead_timeout",
@@ -797,6 +825,9 @@ impl Trace {
                 Some(details()),
             );
         }
+    }
+    pub(crate) fn cache_warning(&self, reason: &'static str) {
+        self.log(DiagnosticLogLevel::Warn, "l2_read_fallback", 0, reason);
     }
     fn record(
         &self,

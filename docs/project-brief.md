@@ -32,6 +32,12 @@ updating that reader, and migrating its dashboard to the new contract without
 old-schema fallbacks. Assess payload and metadata offload under existing traffic;
 retain the inventory, freshness/durability contract and resource settings.
 
+The subsequent operator clarification prioritizes complete L2 population/reuse,
+honest metrics, bounded diagnostic logs and avoiding unnecessary S3 requests.
+Run short synthetic and functional checks on the development VM; the serving
+reader receives only a verified release followed by bounded live verification.
+Do not resume long population or comparative benchmark campaigns.
+
 Go comparisons and new Go/A-A campaigns are no longer requested acceptance gates.
 Retain historical comparisons and failures with their original scope rather than
 promoting them to passes. Report the new reader's total and peak RSS, allocator

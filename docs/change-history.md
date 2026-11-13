@@ -7,6 +7,24 @@ measurement pages retain their original tables and source scopes.
 
 ## 2026-11-13: account for completed read sources and distinct S3 operations
 
+Eligible eviction bursts could discard most records before background spill work
+was scheduled. A single population pass followed by a fresh-L1 reopen reproduces
+avoidable source GETs. Give required-read reclamation one shared 250-ms maximum
+admission grace, without holding cache/inode locks or increasing existing funding.
+Writer admission and speculative refill remain nonwaiting.
+
+Four raw 128-KiB payloads also exceed the 512-KiB serialization buffer once record
+envelopes are included. Derive spill concurrency from encoded-record bounds and
+cap aggregate engine admission at that buffer size. Count drops by closed reason,
+including keys absent after guarded drain, and log bounded pressure/error details.
+Enqueue acceptance still does not mean publication, durability or a validated hit.
+
+After a neighboring shifted refill completes, an aligned prefix miss could GET
+the already cached tail again. End optional read-ahead at the first cached span,
+while retaining the full requested range. A public read regression records the
+redundant range before correction; a disposable FUSE/SDK/rsync fixture checks
+complete-window reuse after restart, actual HTTP requests and byte counters.
+
 Read-cache misses were counted before L2 validation and coalesced-fill reuse,
 misclassifying successful cached delivery and charging requested bytes to reads
 that failed. Record a successful requested result once, separating L1, validated

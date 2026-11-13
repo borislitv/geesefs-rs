@@ -275,44 +275,57 @@ impl ReadCache {
         block: Block,
         mut evicted: impl FnMut(CapacityVictim),
     ) {
-        if block.as_slice().is_empty() {
-            return;
+        let mut block = Some(block);
+        while let Some(victim) = self.insert_step(inode, generation, offset, &mut block) {
+            evicted(victim);
+        }
+    }
+
+    /// Release the cache lock before handing one funded victim to its caller.
+    /// The incoming owner remains admitted across asynchronous demotion.
+    pub(crate) fn insert_step(
+        &self,
+        inode: u64,
+        generation: u64,
+        offset: u64,
+        block: &mut Option<Block>,
+    ) -> Option<CapacityVictim> {
+        let incoming = block.as_ref().expect("pending cache insertion");
+        if incoming.as_slice().is_empty() {
+            block.take();
+            return None;
         }
         let key = (inode, generation, offset);
-        let length = block.as_slice().len();
+        let length = incoming.as_slice().len();
         let weight = length as u64;
-        loop {
-            let mut state = self.state.lock().unwrap();
-            if let Some(old) = state.entries.pop(&key) {
-                state.replacements += 1;
-                state.removed(key, &old);
-            }
-            if weight > self.capacity {
-                state.oversized += 1;
-                return;
-            }
-            if state.weight > self.capacity - weight
-                || state.entries.len() == state.entries.cap().get()
-            {
-                let victim = state
-                    .capacity_victim()
-                    .expect("capacity pressure owns an entry");
-                drop(state);
-                evicted(victim);
-                continue;
-            }
-            assert!(state.entries.push(key, block).is_none());
-            state.insertions += 1;
-            state.weight += weight;
-            state.index.insert(
-                key,
-                Span {
-                    length,
-                    consumed: 0,
-                },
-            );
-            return;
+        let mut state = self.state.lock().unwrap();
+        if let Some(old) = state.entries.pop(&key) {
+            state.replacements += 1;
+            state.removed(key, &old);
         }
+        if weight > self.capacity {
+            state.oversized += 1;
+            block.take();
+            return None;
+        }
+        if state.weight > self.capacity - weight || state.entries.len() == state.entries.cap().get()
+        {
+            let victim = state
+                .capacity_victim()
+                .expect("capacity pressure owns an entry");
+            return Some(victim);
+        }
+        assert!(state.entries.push(key, block.take().unwrap()).is_none());
+        state.insertions += 1;
+        state.weight += weight;
+        state.index.insert(
+            key,
+            Span {
+                length,
+                consumed: 0,
+            },
+        );
+        None
     }
 
     /// A bounded eviction hint, not a pin: disjoint tail reads cannot advance an

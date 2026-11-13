@@ -132,7 +132,14 @@ filesystem read -> existing RAM L1 -> eligible disk L2 -> conditional S3 range
 
 Use **best-effort write-on-eviction**, matching the selected victim-cache model.
 A healthy disk preserves eligible victims; a full queue or failing disk
-can discard a cache copy. It must not hold up required reads or writer fsync.
+can discard a cache copy. Required-read reclamation gives a whole eviction sweep
+at most 250 ms (or its shorter configured request timeout) to acquire spill slots.
+The deadline is not renewed per record. This prevents synchronous bursts from
+discarding the tail before healthy background work runs. Writer admission and
+speculative refill never wait for optional spills. With L2 enabled, speculative
+refill stops when free admission is exhausted rather than evicting and dropping
+eligible victims; required reads perform the bounded sweep. A stalled disk cannot impose
+an unbounded required-read wait or delay writer fsync for cache population.
 Guaranteed preservation, bounded RAM and nonblocking progress cannot all be
 promised when disk writes stop.
 
@@ -140,8 +147,10 @@ Reserve spill capacity within the existing total payload budget, leaving ingress
 and writer progress reserves intact. Transfer an exclusive complete owner when
 supported; otherwise use an already-admitted bounded copy. Account for complete
 backings and all engine serialization/I/O buffers. Never hold the cache mutex
-across disk I/O. Queue admission is nonblocking and byte/job bounded; skip
-demotion when it cannot be funded. Loan revocation and invalidation are immediate
+across disk I/O. Queue admission is byte/job bounded; skip demotion when it cannot
+be funded within the applicable deadline. Waiters retain the existing charged
+victim, allocating neither a record identity nor a copy before a slot is acquired.
+Loan revocation and invalidation are immediate
 discard paths, not asynchronous spill opportunities.
 
 Report any reduction of effective L1 capacity needed to fund spill/engine buffers;

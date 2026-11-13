@@ -208,6 +208,94 @@ async fn large_window_byte_pressure_preserves_correct_reads_with_bounded_optiona
 }
 
 #[tokio::test]
+async fn healthy_byte_pressure_retains_the_complete_evicted_window_for_source_free_reuse() {
+    let dir = tempfile::tempdir().unwrap();
+    let mount = tempfile::tempdir().unwrap();
+    let store = MemoryStore::new();
+    *store.cache_namespace.lock().unwrap() = Some([85; 32]);
+    let bytes: Vec<_> = (1..=16u8)
+        .flat_map(|value| vec![value; READ_BLOCK_BYTES])
+        .collect();
+    store.seed("reused.rpm", &bytes);
+    store.seed("pressure.txt", &vec![0x71; 48 * MIB]);
+    let mut config = MemoryStore::config(32);
+    config.mountpoint = mount.path().into();
+    config.entry_limit = 100_000;
+    config.disk_cache_dir = Some(dir.path().into());
+    config.disk_cache_max_size = Some(128 * MIB as u64);
+    config.disk_cache_regex = Some(r"\.rpm$".parse().unwrap());
+    config.read_ahead = 2048;
+    config.read_ahead_small = 2048;
+    config.read_ahead_large = 2048;
+    config.read_ahead_parallel = 2048;
+    let fs = attach(config.clone(), store.clone()).await;
+    let package = fs.lookup(1, "reused.rpm").await.unwrap();
+    let block = fs.read(package.ino, 0, READ_BLOCK_BYTES).await.unwrap();
+    assert_eq!(block.as_slice(), &bytes[..READ_BLOCK_BYTES]);
+    drop(block);
+    assert_eq!(fs.disk_cache_stats().unwrap().admitted_demotions, 0);
+    let pressure = fs.lookup(1, "pressure.txt").await.unwrap();
+    // Ordinary reads cause byte admission, with no drain after each read and no
+    // repeated warming rounds. A healthy real engine must retain the whole
+    // eligible victim, including offsets beyond its first four records.
+    for offset in (0..48 * MIB).step_by(2 * MIB) {
+        let block = tokio::time::timeout(
+            DEADLINE,
+            fs.read(pressure.ino, offset as u64, READ_BLOCK_BYTES),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(block.as_slice(), &[0x71; READ_BLOCK_BYTES]);
+    }
+    fs.shutdown().await.unwrap();
+    drop(fs);
+
+    // Reopen the same media with empty L1; source calls must not be hidden by
+    // kernel cache, the old reader, or an in-flight cache submission.
+    let fs = attach(config, store.clone()).await;
+    let package = fs.lookup(1, "reused.rpm").await.unwrap();
+    let gets = store.read_calls.load(Ordering::Relaxed);
+    let heads = store.head_keys.lock().unwrap().len();
+    for offset in (0..bytes.len()).step_by(READ_BLOCK_BYTES) {
+        let block = tokio::time::timeout(
+            DEADLINE,
+            fs.read(package.ino, offset as u64, READ_BLOCK_BYTES),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(block.as_slice(), &bytes[offset..offset + READ_BLOCK_BYTES]);
+    }
+    assert_eq!(
+        store.read_calls.load(Ordering::Relaxed),
+        gets,
+        "a healthy L2 must avoid source GETs for the complete evicted window"
+    );
+    assert_eq!(store.head_keys.lock().unwrap().len(), heads);
+    let text = geesefs_rs::metrics::render(&fs).unwrap();
+    let value = |name: &str| -> u64 {
+        text.lines()
+            .find_map(|line| line.strip_prefix(&format!("{name} ")))
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    assert_eq!(value("geesefs_read_cache_hits_total"), 16);
+    assert_eq!(value("geesefs_read_cache_misses_total"), 0);
+    assert_eq!(
+        value("geesefs_read_delivered_bytes_total{source=\"s3\"}"),
+        0
+    );
+    assert_eq!(
+        value("geesefs_read_delivered_bytes_total{source=\"l1\"}")
+            + value("geesefs_read_delivered_bytes_total{source=\"l2\"}"),
+        bytes.len() as u64
+    );
+    fs.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn repeated_pressure_advances_beyond_already_indexed_fragment_prefix() {
     let dir = tempfile::tempdir().unwrap();
     let mount = tempfile::tempdir().unwrap();

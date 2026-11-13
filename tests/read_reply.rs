@@ -37,6 +37,37 @@ async fn finish(load: tokio::task::JoinHandle<Option<Error>>) -> Option<Error> {
 }
 
 #[tokio::test]
+async fn a_missing_prefix_does_not_refetch_its_already_cached_readahead_tail() {
+    let store = MemoryStore::new();
+    let expected = vec![0x39; 3 * MIB];
+    store.seed("file", &expected);
+    let mut config = MemoryStore::config(32);
+    config.read_ahead = 2048;
+    config.read_ahead_small = 2048;
+    config.read_ahead_large = 2048;
+    config.read_ahead_parallel = 2048;
+    let fs = Filesystem::new(config, store.clone()).unwrap();
+    let node = fs.lookup(1, "file").await.unwrap();
+    assert_eq!(
+        fs.read(node.ino, STEP as u64, STEP)
+            .await
+            .unwrap()
+            .as_slice(),
+        &expected[STEP..2 * STEP]
+    );
+    assert_eq!(
+        fs.read(node.ino, 0, STEP).await.unwrap().as_slice(),
+        &expected[..STEP]
+    );
+    assert_eq!(
+        *store.read_ranges.lock().unwrap(),
+        vec![(STEP as u64, 2 * MIB), (0, STEP)],
+        "a prefix miss must fetch only the missing prefix, not the cached following window"
+    );
+    fs.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn requested_reply_is_published_before_unrelated_prefetch_finishes() {
     let (store, fs, expected) = fixture();
     let node = fs.lookup(1, "file").await.unwrap();

@@ -105,7 +105,7 @@ omitted, not fabricated zero occupancy or a successful Ready observation.
 | `geesefs_effective_l1_policy_bytes` | Remaining retention ceiling including revocable flush loans, not actual residency |
 | `geesefs_disk_cache_eligibility_decisions_total{reason}` | Sixteen fixed required-window decisions/observations; excludes optional touches/demotion. Contention can be followed by successful eligibility |
 | `geesefs_disk_cache_read_fallbacks_total{reason}` | Fourteen fixed admission/I/O/validation outcomes; not mutually exclusive S3 misses |
-| `geesefs_disk_cache_active_read_jobs` / `geesefs_disk_cache_active_spill_jobs` | Actual independently funded owners, at most four of each; includes work outliving its observer |
+| `geesefs_disk_cache_active_read_jobs` / `geesefs_disk_cache_active_spill_jobs` | Actual independently funded owners, at most four reads and three spills; includes work outliving its observer |
 | `geesefs_disk_cache_queued_reads` | Key-free FIFO waiters charged to their read windows |
 | `geesefs_disk_cache_admitted_demotions_total` / `geesefs_disk_cache_engine_admitted_demotions_total` | Admitted copy and accepted engine enqueue, respectively; neither is a durability acknowledgement |
 | `geesefs_disk_cache_read_operation_hits_total` / `geesefs_disk_cache_hits_total` | Worker-completed copies versus caller-delivered adapter results; a later generation check may still reject delivery |
@@ -121,6 +121,19 @@ omitted, not fabricated zero occupancy or a successful Ready observation.
 | `geesefs_disk_cache_opened_file_allocated_bytes` | Opening-time file allocation observation, not current physical occupancy |
 | `geesefs_disk_cache_io_read_bytes_total` / `geesefs_disk_cache_io_write_bytes_total` | Cumulative engine I/O, including record overhead; reset on restart, can exceed capacity after reuse |
 | `geesefs_disk_cache_dropped_total` / `geesefs_disk_cache_errors_total` | Best-effort demotion refusals versus adapter/storage/decode errors; drops are not capacity evictions |
+| `geesefs_disk_cache_spill_drops_total{reason}` | Closed demotion-refusal reasons; their sum equals `dropped_total` outside concurrent scrape skew |
+
+Spill reasons are `jobs`, `timeout`, `state`, `activity`, `invalid_block`, `copy`,
+`engine_no_space`, `engine_error`, and `unindexed_after_drain`. The last means the
+key was absent from the advisory index after a successful drain; concurrent
+eviction can also cause it. Index presence is not validated payload delivery.
+At diagnostic level `warn`, `l2_spill_drop` records the actual reason, cumulative
+drop count and current spill/copy/submission/index ownership. It uses the existing
+bounded nonblocking logger and warning rate limiter, including background errors
+outside a FUSE trace; no object keys or credentials are logged.
+Nonordinary `l2_read_fallback` warnings include timeout, integrity/identity,
+worker and backend failures with their request trace. Normal absent records stay
+debug-only; counters retain all reasons even when log records are rate-limited.
 
 Two different fullness limits must remain visible:
 

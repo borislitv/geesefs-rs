@@ -858,7 +858,7 @@ async fn validated_l1_hit_touches_existing_hot_record_without_populating_cold_re
 }
 
 #[tokio::test]
-async fn saturated_optional_spill_and_revoked_writer_loans_preserve_fsync_progress() {
+async fn bursty_optional_spill_and_revoked_writer_loans_preserve_fsync_progress() {
     for saturated in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let mount = tempfile::tempdir().unwrap();
@@ -913,9 +913,18 @@ async fn saturated_optional_spill_and_revoked_writer_loans_preserve_fsync_progre
             assert_eq!(block.as_slice(), &[0x53; 128]);
         }
         if saturated {
+            // The healthy writer can drain bounded admission between victims.
+            // A burst is not proof of a stalled engine and must not require
+            // rejecting otherwise reusable records to let fsync progress.
+            let stats = fs.disk_cache_stats().unwrap();
             assert!(
-                fs.disk_cache_stats().unwrap().drops > 0,
-                "a synchronous multi-record eviction must drop jobs beyond bounded admission"
+                stats.admitted_demotions > 0,
+                "the selected burst must actually exercise optional spill"
+            );
+            assert_eq!(
+                stats.spill_drops[geesefs_rs::disk_cache::SpillDrop::Jobs as usize],
+                0,
+                "required reads allow bounded spill admission instead of synchronous job rejection"
             );
         } else {
             assert!(fs.effective_budgets().read_cache_loaned_bytes > 0);

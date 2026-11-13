@@ -5,6 +5,33 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Complete L2 eviction and requested metrics — 2026-11-13
+
+The single-pass `disk_cache_pressure` regression reads one selected 2-MiB window,
+applies ordinary byte pressure and reopens the same media with empty L1. Every
+record must return the independently seeded bytes without another source GET;
+per-record drains or repeated warming are not prerequisites. The gated adapter
+test separately checks stalled-worker ownership, timeout/cancellation and survival
+of every accepted record in a healthy encoded batch. Original assertion failures
+and source hashes remain in ignored evidence.
+
+`read_reply` also reproduces an aligned missing prefix followed by an already
+cached shifted read-ahead window. Its source-range oracle requires only the
+missing prefix, rather than a second overlapping full-window GET.
+
+The opt-in `disk_cache_serving` fixture uses disposable Linux FUSE, localhost S3
+with the actual SDK, persistent media and `rsync --checksum`. It checks full bytes,
+nonduplicated cold source requests, complete L2 reuse after remount, one required
+generation HEAD, no warm GET/HEAD/LIST, and metric conservation against actual HTTP
+requests. Two userspace passes deliver 4 MiB from L1+L2 while the first promotion
+consumes 2 MiB of validated L2 pipeline; those scopes must not be conflated.
+This small fixture is not full-inventory, traversal or performance acceptance.
+
+```bash
+timeout 180s cargo test --offline --locked --test disk_cache_pressure --test disk_cache --test disk_cache_metrics --test disk_cache_gap_overlap --test read_reply --test backend_contract --test metrics
+timeout 60s cargo test --offline --locked --test disk_cache_serving -- --ignored --nocapture
+```
+
 ## Metadata backing and live xattrs — 2026-11-13
 
 Six `fsync_xattrs` cases preserve uppercase/binary/ASCII values through same-inode

@@ -5,6 +5,17 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-13: prepare the authorized 0.1.12 release
+
+Package the existing persistent-cache and metadata corrections as 0.1.12 without
+changing dependency revisions or runtime policy. The operator authorized related
+PR merges, the release and the existing withdrawn-reader update. Go comparisons
+are no longer current gates. Continue real-file L2 overflow and complete traversal
+with approximately 2% independent hash sampling, then report total/peak reader
+RSS and separately scoped allocator/cgroup/file/kernel observations. Preserve
+inventory, cumulative workload guards, historical failures and unresolved native
+progress gaps. Target execution results remain separate from release packaging.
+
 ## 2026-11-13: preserve live xattrs and release avoidable metadata backing
 
 A verified fsync replaced live xattrs with the remote wire projection, losing

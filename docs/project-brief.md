@@ -5,9 +5,10 @@
 Implement a Rust replacement for GeeseFS in the separate repository
 `borislitv/geesefs-rs`. BMAD was initially required; the user subsequently made
 its use optional. Keep concise history/reasons in source; retain detailed
-verification evidence in ignored result directories. The primary
-constraint is better memory behavior and faster operation than the Go reference,
-with preserved required behavior. Always look for suitable ready-made Rust
+verification evidence in ignored result directories. The initial primary
+constraint was better memory behavior and faster operation than the Go reference,
+with preserved required behavior. The current operator scope below supersedes
+the Go-relative measurement gates. Always look for suitable ready-made Rust
 crates before implementing a component; in particular, reuse an existing FUSE
 implementation.
 
@@ -16,6 +17,26 @@ acceptance comparisons by the operator on 2026-11-02. Its upstream PR239 was
 closed without merge; native metadata/conditional-response checks also expose
 unequal behavior. Preserve its raw measurements. This does not imply that Go
 cannot be optimized or that Rust automatically improves memory or speed.
+
+## Current operator scope — 2026-11-13
+
+The operator authorized merging the related implementation PRs, publishing the
+next release and updating the existing withdrawn trial reader. Continue its
+functional L2 overflow test and repeat the complete `du` on the same inventory,
+retaining the original cumulative input ceiling, deadline and resource settings.
+Use real files from the existing access-log-derived manifest. Independently check
+current-source/FUSE full hashes for approximately 2% of read events; distinguish
+the remaining complete byte/EOF checks from cryptographic integrity checks.
+
+Go comparisons and new Go/A-A campaigns are no longer requested acceptance gates.
+Retain historical comparisons and failures with their original scope rather than
+promoting them to passes. Report the new reader's total and peak RSS, allocator
+and cgroup/file/kernel memory before, during and after traversal and payload
+tests. Reclaim starts or cumulative traffic alone do not prove completed physical
+region reuse. This scoped release/update authorization does not authorize broader
+rollout, traffic readmission or source-data writes; unresolved compatibility and
+functional failures remain explicit. Earlier statistical gates below are retained
+as the historical measurement contract, not prerequisites for this current task.
 
 ## Target and reference
 

@@ -5,14 +5,22 @@ Overall status is **UNACCEPTED**. Completed mechanisms belong in
 measurements retain their own source and statistical scope. This page lists
 actionable gaps rather than repeating their execution history.
 
-## 1. Sustained read-only acceptance
+## 1. Sustained read-only functionality and memory
 
-Use Go 0.43.9 as the primary reference and the
-[paired protocol](performance-methodology.md): at least eight independent mount
-pairs, actual same-binary/configuration A/A controls, predeclared practical
-non-inferiority margins and independent bytes/generations. Compare under equal
-resources and the accepted negative-cache policy: 64 misses per directory with
-one-minute stat TTL. Immediate external-create visibility beyond Go is not a gate.
+The [2026-11-13 operator scope](project-brief.md#current-operator-scope--2026-11-13)
+authorizes the next release and the existing withdrawn-reader update. Finish its
+same-inventory L2 overflow test and repeat a complete `du`, using real files and
+independent current-source/FUSE hashes for approximately 2% of read events.
+Retain the existing cumulative input/deadline/resource guards. Record total and
+peak reader RSS, allocator and cgroup/file/kernel memory through both workloads
+and after they finish. Traversal failures and incomplete physical-reuse evidence
+remain failures or gaps, not passes.
+
+Go comparisons and new Go/A-A campaigns are no longer current gates. Preserve
+the [paired protocol](performance-methodology.md) and its original measurements
+as historical evidence. Keep the accepted negative-cache contract: 64 misses per
+directory with one-minute stat TTL; immediate external-create visibility is not
+an added requirement.
 
 The [controlled listing result](performance-listing-diagnosis.md) explains the
 default-Rust loss through repeated absent-name probes. The

@@ -1,10 +1,146 @@
 # Dependency decisions
 
 Use public maintained crates and supported APIs before custom infrastructure.
-Cargo.lock pins exact public registry packages; no internal code is copied,
+Cargo.lock pins exact public registry packages and the explicitly authorized
+public Foyer correction below; no internal code is copied,
 translated, vendored or linked. This package forbids unsafe code in every target.
 License declarations are checked; the complete binary-distribution notice audit
 remains outstanding. See LICENSE and NOTICE for source attribution.
+
+## Compact metadata owners and fetched-time page expiry — 2026-11-13
+
+Retain the standard library's `Arc`, `Option<Box<_>>` and existing independent
+budget reservations. One shared budget handle removes repeated inline limit state;
+lazy writer backing removes empty writer containers from read-only inodes. These
+are representation changes, not a new allocator, cache or accounting framework.
+Backing remains explicitly admitted before mutation and is charged while retained.
+No dependency or lockfile change is needed.
+
+Retain sync Moka 0.12.16 and its public
+[`Expiry`](https://docs.rs/moka/0.12.16/moka/trait.Expiry.html) and
+[`run_pending_tasks`](https://docs.rs/moka/0.12.16/moka/sync/struct.Cache.html#method.run_pending_tasks)
+APIs. Compute create/update expiry from the original fetched instant; ordinary
+reads preserve that deadline. Maintenance is deferred, not an exact idle-time
+freeing guarantee, and external response owners legitimately retain their charges.
+The pinned [timer wheel](https://github.com/moka-rs/moka/blob/v0.12.16/src/common/timer_wheel.rs)
+explains the real-clock regression's maintenance allowance. Do not add a custom
+timer, background sweeper or cache replacement for this requirement.
+
+Namespace compression remains research. LevelDB's public BSD-licensed
+[restart-prefix blocks](https://github.com/google/leveldb/blob/1.23/table/block_builder.cc)
+separate searchable prefix representation from block compression. Zstd 1.5.7's
+[seekable format](https://github.com/facebook/zstd/blob/v1.5.7/contrib/seekable_format/README.md)
+documents the decode-amplification/index/ratio tradeoff. Evaluate maintained
+searchable immutable-index crates before any custom format. A tiny per-inode zstd
+frame cannot compress locks, owner headers or tree nodes; a compressed copy plus
+the unchanged decoded namespace is not a memory reduction. No codec or namespace
+dependency is selected or enabled by this correction.
+
+## Interrupted extended LIST responses — 2026-11-13
+
+Retain MIT/Apache-2.0 reqwest0.12.28 and already-direct hyper1.12.0. Reqwest's
+supported retry classifier handles request/response headers, not later consumption
+of a successful response body. Reuse the existing bounded extension retry loop,
+its configured attempt count, jitter and aggregate deadline. No retry framework,
+transport, dependency, timeout increase or SDK replacement is added.
+
+Inspect public error sources through `std::error::Error`, hyper's supported
+`is_incomplete_message`/`is_closed` predicates and concrete I/O connection-reset,
+connection-aborted/broken-pipe errors. Reqwest can classify incomplete HTTP bodies
+as decode errors, so `is_decode` alone cannot distinguish framing interruption
+from malformed gzip. Do not retry complete invalid XML/gzip, permission failures
+or page-limit violations. Discard partial bytes before retrying the same signed
+idempotent LIST page; never log the signed URI. Existing HTTP throttling and
+Retry-After handling remain authoritative for error statuses.
+
+Sources: [reqwest retry API](https://docs.rs/reqwest/0.12.28/reqwest/retry/index.html),
+[hyper error API](https://docs.rs/hyper/1.12.0/hyper/struct.Error.html),
+[pinned hyper implementation](https://github.com/hyperium/hyper/blob/v1.12.0/src/error.rs).
+Real loopback TCP fixtures intentionally close before headers or before declared
+Content-Length; complete XML in an incomplete HTTP body must never be published.
+
+## Disk region occupancy observations — 2026-11-12
+
+Reuse the pinned Foyer engine's existing `clean`, `writing`, `evictable` and
+`reclaiming` gauges through `HybridCacheBuilder::with_metrics_registry`, and its
+`EvictionPicker::init` geometry. The callback sees the actual data-region count
+after the tombstone-log partition, unlike configured file capacity. Neither
+opening-time `st_blocks` nor cumulative I/O measures current region occupancy.
+
+Promote already-locked Apache-2.0 [mixtrics 0.2.6](https://docs.rs/mixtrics/0.2.6/mixtrics/)
+to a direct dependency, without enabling an additional metrics backend. Its
+maintained Prometheus-client adapters support versions 0.22–0.24, not this
+package's existing 0.25.2. They also register all Foyer counters/histograms, whereas
+this boundary needs only four fixed gauges. Use a small `RegistryOps`/`GaugeOps`
+adapter backed by the existing Prometheus-client gauges; delegate unselected
+metrics to mixtrics' `NoopMetricsRegistry`. Do not add a second exporter, a global
+registry, storage scans, per-object accounting maps or engine/fork changes.
+
+Sources: [Foyer registry hook](https://docs.rs/foyer/0.22.6/foyer/struct.HybridCacheBuilder.html#method.with_metrics_registry),
+[mixtrics registry API](https://docs.rs/mixtrics/0.2.6/mixtrics/metrics/trait.RegistryOps.html),
+[pinned region manager](https://github.com/borislitv/foyer/blob/d60dd0462c1de1e0853590791371208b659c90bf/foyer-storage/src/engine/block/manager.rs).
+The result measures reserved data-region capacity, including unused tails and
+obsolete records, not useful payload bytes or distinct S3 objects.
+
+## FUSE request backpressure — 2026-11-12
+
+Retain public MIT-licensed fuser 0.18.0 and Tokio 1.54.1. Use fuser's fixed
+receiver threads and Tokio's existing owned semaphore, `Handle::block_on` and
+`timeout_at`; no new queue, executor, transport or dependency is needed. Inspecting
+the pinned fuser source confirms one receive buffer per configured worker.
+`KernelConfig` background/congestion controls do not bound all foreground calls;
+the experimental Tokio adapter spawns callback tasks without this admission bound.
+Increasing receiver count or request capacity does not correct overload errno.
+
+The thin adapter waits before spawning work, holds no application mutex while
+waiting, and retains permits until actual job completion. Blocking happens on
+fuser's threads, not Tokio workers. Current-thread runtimes need a separately
+driven `Runtime::block_on`; `Handle::block_on` alone does not drive their timers.
+Only tests enable Tokio's supported `test-util` clock to verify deadline equality
+and shared admission/execution budgets without timing sleeps. The Cargo lockfile
+and runtime dependency versions are unchanged. Native regression uses existing
+MIT/Apache-2.0 rustix 1.1.5 safe `fadvise` and `sendfile` APIs.
+
+Sources: [fuser configuration](https://docs.rs/fuser/0.18.0/fuser/struct.Config.html),
+[fuser session](https://github.com/cberner/fuser/blob/v0.18.0/src/session.rs),
+[Tokio Handle](https://docs.rs/tokio/1.54.1/tokio/runtime/struct.Handle.html#method.block_on),
+[Tokio timeout](https://docs.rs/tokio/1.54.1/tokio/time/fn.timeout_at.html),
+[Linux buffered FUSE reads](https://github.com/torvalds/linux/blob/v7.0/fs/fuse/file.c).
+The public v0.18.0 tag exists; a missing GitHub release object and empty targeted
+backpressure/EAGAIN issue searches do not prove upstream has no related defects.
+
+## Kernel lookup ownership under namespace pressure — 2026-11-12
+
+Retain MIT-licensed fuser 0.18.0 and its supported `Notifier::inval_entry`, rather
+than deleting kernel-owned inodes, changing the entry limit or introducing a FUSE
+transport. TTL expiration does not itself send `FORGET`. A native directory walk
+can therefore retain kernel lookup references beyond the application's namespace
+capacity even though the files are clean and closed. Reuse the existing Tokio
+blocking notification slot and shutdown join; no dependency or unsafe code is added.
+
+Invalidation must not be awaited from the related lookup/readdir request: the
+kernel may hold the parent directory lock until that reply completes. Schedule a
+bounded batch independently while admission still has directory-page headroom,
+release all application locks before notification, and retain ordinary lookup
+ownership until the kernel actually sends `FORGET`. Only the active directory
+remainder pins unsent inodes; cached TTL pages continue to store numeric identities.
+
+Sources: [fuser notifier](https://docs.rs/fuser/0.18.0/fuser/struct.Notifier.html#method.inval_entry),
+[pinned implementation](https://github.com/cberner/fuser/blob/v0.18.0/src/notify.rs),
+[Linux entry invalidation](https://github.com/torvalds/linux/blob/v7.0/fs/fuse/dir.c),
+[Go 0.43.9 lookup/forget ownership](https://github.com/yandex-cloud/geesefs/blob/80c214ef14f620d93407454fc76ca01dd71fa25f/core/goofys_fuse.go).
+The inspected fuser [separate-TTL proposal](https://github.com/cberner/fuser/issues/756)
+does not supply this application capacity policy; shortening TTL is not a substitute
+for relinquishing kernel references.
+
+The pinned fuser `ReplyDirectoryPlus::add` and current public master derive both
+wire node ID and directory-entry inode from `attr.ino`, ignoring the separate inode
+argument. They cannot express a zero node ID with a nonzero directory-entry inode.
+Linux v7.0 `fuse_readdir_uncached` also returns READDIRPLUS errors instead of
+providing an ENOSYS downgrade. No custom wire adapter or new FUSE fork is added;
+worst-case flat-directory progress remains unverified. Idle directory handles use
+Tokio's existing owned semaphore, like files, rather than a second request-derived
+cap or a new resource-management component.
 
 ## Throttling in the existing extension adapter — 2026-11-08
 
@@ -21,6 +157,173 @@ policy adapter, not a replacement HTTP/signing/retry framework.
 Sources: [Go SDK retryer](https://github.com/aws/aws-sdk-go/blob/v1.55.8/aws/client/default_retryer.go),
 [Go configuration](https://github.com/yandex-cloud/geesefs/blob/80c214ef14f620d93407454fc76ca01dd71fa25f/core/cfg/conf_s3.go),
 [Rust RetryConfig API](https://docs.rs/aws-smithy-types/1.9.0/aws_smithy_types/retry/struct.RetryConfig.html).
+
+## Selective disk payload cache qualification — 2026-11-09
+
+Evaluate released [Foyer 0.22.6](https://docs.rs/foyer/0.22.6/foyer/) (Apache-2.0)
+first as a development-only dependency. Its supported disk-only writer, single-file
+device, region reclamation, checksum validation and recovery avoid a custom disk
+format or one inode per small payload block. **The released engine fails the
+reinsertion/recovery gate and is not selected for runtime.**
+Qualification must establish memory ownership, recency adaptation, fixed-capacity
+reuse, error/cancellation behavior and persistent inventory costs. Default FIFO
+eviction is not the agreed approximate-LRU policy. The application retains its
+existing charged L1; missing TTL support is irrelevant because payload TTL was
+explicitly removed. Keep raw receipts outside tracked source.
+
+`tests/disk_cache_engine.rs` qualifies the public API with a 16-MiB container,
+1-MiB regions, 128-KiB records, 512-KiB configured buffer pool and one
+flusher/reclaimer. The disk-only roundtrip/reopen and fixed-container recycling
+checks pass. Default eviction loses a continuously read record at cold-scan step
+106. The test-only `StorageFilterCondition`/`EvictionPicker` adapter uses the
+already selected `lru` crate for at most 64 reference hashes and limits copied
+records to one quarter of each reclaimed region. The hot record survives the
+scan, and becomes evictable when access stops. This does not establish an
+aggregate in-flight memory bound or an accepted runtime policy.
+
+The combined persistence test fails: after inserting keys 0–255 while repeatedly
+reading key 0, keys `[0, 210, 211, 212, 213, 214]` are readable after `close()` but
+missing after reopen. This reproduces on both tmpfs and local ext4. The four-test
+qualification result is **three passed, one failed**; the failing test is retained
+without ignoring it or changing its expected behavior.
+
+The crate's recorded upstream revision is
+`dd46245c45071d1036331e4e2c48e15386017b96` (tag `v0.22.6`).
+[Reinsertion preserves the original sequence](https://github.com/foyer-rs/foyer/blob/dd46245c45071d1036331e4e2c48e15386017b96/foyer-storage/src/engine/block/reclaimer.rs#L137-L159),
+whereas [recovery stops a region when sequences decrease](https://github.com/foyer-rs/foyer/blob/dd46245c45071d1036331e4e2c48e15386017b96/foyer-storage/src/engine/block/recover.rs#L164-L198).
+An isolated checkout at that exact revision reproduces the failure. Temporarily
+removing only the decreasing-sequence cutoff makes the same test pass; restoring
+the source restores the same missing-key failure. The checkout was restored.
+This was a causal diagnostic, **not the adopted fix**: the cutoff also distinguishes
+old region tails. The maintained correction below preserves that distinction.
+
+At inspection, [v0.22.6 remains the latest release](https://github.com/foyer-rs/foyer/releases/tag/v0.22.6).
+The newer [recovery optimization](https://github.com/foyer-rs/foyer/commit/4e5ca058d3552d963cdc47289094bdd118ea4584)
+addresses [large-index costs](https://github.com/foyer-rs/foyer/issues/1295), but retains
+the decreasing-sequence cutoff; it does not resolve this incompatibility.
+The released result is retained independently of the maintained fork's subsequent
+qualification. Filesystem integration and performance acceptance remain separate.
+
+The operator subsequently authorized a maintained fork and other engine trials
+without another decision checkpoint. Development and PR delivery are confined to
+the operator's repositories; external upstream submissions require a separate
+explicit decision. Remain on the maintained fork until equivalent upstream fixes
+are independently verified. The first correction
+will separate physical region incarnation from logical entry sequence: checksum-
+protected blob indexes carry a shared random incarnation for each new region.
+Recovery/reclamation must reject a previous incarnation's tail while allowing old
+logical sequences from valid reinsertions. Preserve legacy decoding and make old
+readers reject the new index format safely. This narrow format correction is
+necessary because the released picker/filter APIs cannot fix recovery's sequence
+assumption; it is not a replacement storage engine. Keep legacy/reuse/corruption
+tests and the unmodified released RED as independent controls.
+
+Select public fork revision `d60dd0462c1de1e0853590791371208b659c90bf`
+for the isolated adapter, maintained in [fork PR 1](https://github.com/borislitv/foyer/pull/1).
+The released crate remains unsuitable. Corrections separate physical region
+incarnation from logical sequence, join shutdown ownership, validate recovered
+record geometry, bound CLOCK index slots and stream recovery. A circular
+tombstone log now persists the maximum sequence whose invalidation history was
+actually overwritten; otherwise completed deletions could resurrect after wrap.
+Unwrapped logs retain old completed records. Unsafe history returns an error,
+without automatically clearing inventory. Older readers must not open upgraded logs.
+
+Guarded callers use `Store::{try_enqueue, try_delete, load, wait_guarded}`.
+Byte/item credits precede index mutation and follow actual I/O; admission failure
+means not accepted, not a completed deletion. Serialized record size is capped
+before read allocation, and the adapter must permit only `Compression::None`.
+HybridCache's automatic writer/eviction paths use legacy void APIs and are **not**
+compatible with guarded mode. Caller backing, bounded codecs, fixed pools and
+index funding remain application responsibilities. No new journal or startup
+dirty-marker inventory reset is used. Process-interruption fixtures preserve
+unrelated completed records; this is not a power-loss durability guarantee.
+
+The exact fork passes 130 affected native tests, three explicitly configured
+doctests, default-feature package checks and all-target Clippy. Tests include
+real-file collision/corruption, queue exhaustion, interrupted child processes,
+tombstone wrap, lifecycle and 30 small geometry fixtures. The audit exception
+permits only the exact public repository, revision and six workspace packages.
+
+Resource qualification of the same bounded CLOCK representation recovered
+8,388,608 tiny records: 1,837.48 MiB requested live memory and up to 1,984.96 MiB
+observed RSS after touches. This supersedes the earlier unbounded-index estimate;
+the order tree must be funded too. A sparse 1-TiB log-enabled open kept scratch
+below 2 MiB but incurred about 3.75 GiB of file-cache residency. These are
+index/geometry experiments, not a populated 1-TiB payload benchmark or a whole-RSS
+bound. Retain raw source hashes, CPU/cgroup accounting and sampling limitations
+outside tracked source. Integration must disclose the resulting L1 reduction and
+test ownership/fallback under its actual configuration before accepting the feature.
+
+For the independent CLI work, reuse maintained public
+[regex 1.13.1](https://github.com/rust-lang/regex) (MIT OR Apache-2.0) with bounded pattern
+and compiled-program sizes, and [bytesize 2.7.0](https://github.com/bytesize-rs/bytesize)
+(Apache-2.0) for human-readable capacity parsing. Cargo.lock pins their selected
+registry releases; do not introduce another regex engine or custom unit parser.
+
+For backend namespace separation, reuse maintained public RustCrypto
+[sha2 0.11.1](https://docs.rs/sha2/0.11.1/sha2/) (MIT OR Apache-2.0), already in the
+SDK dependency graph. Its incremental SHA-256 API hashes length-delimited access
+and encryption context without persisting raw credentials. A digest does not
+prove an opaque credential provider is static: only explicitly known stable or
+anonymous contexts can authorize cross-process reuse. Do not infer a principal
+from profile names or a single non-expiring credential resolution.
+
+## Native Range fixture and buffered device qualification — 2026-11-11
+
+Reuse the project's existing [SeaweedFS 4.51](https://github.com/seaweedfs/seaweedfs/releases/tag/4.51)
+`weed mini` fixture (Apache-2.0), with sealed read-only and separate disposable
+read/write service instances, for measured S3 workloads. Do not implement a new
+S3 server or patch request semantics. Public SDK contracts check exact Range/EOF,
+If-Match, HEAD, listing pagination, metadata, COPY and multipart operations.
+The explicit local executable is verified; tests do not silently download it.
+
+Moto 5.1.17's full-object-before-Range path made 64 small reads of a 128-MiB object
+read 8 GiB through process syscalls for 8 MiB of response payload. The qualified
+SeaweedFS run read 16.54 MiB. Both had zero media `read_bytes` in this cached probe;
+this is provider logical-I/O evidence, not cold-device throughput. Moto 5.2.5
+retains that implementation shape, so an upgrade alone is not the correction.
+Keep Moto for existing functional fault injection. SeaweedFS's larger absolute
+provider RSS remains separately visible; lower transient Range cost is not a
+whole-fixture memory win.
+
+The maintained Foyer `FileDeviceBuilder::with_direct(true)` API was also measured
+in an isolated variant. Eight ext4 pairs plus eight buffered A/A controls reduced
+cgroup peak memory but increased hot-read CPU and latency substantially; the
+tmpfs control did not establish direct-I/O semantics. Retain buffered runtime I/O
+rather than adopting that variant globally. This is a negative result for the
+tested backing/API, not proof that all kernel-cache optimization is impossible.
+Keep raw aligned-I/O, filesystem and resource receipts outside tracked source.
+
+## Metadata byte admission — 2026-11-10
+
+The operator chose independent opt-in `--metadata-limit`; payload `--memory-limit`
+retains its existing meaning. Reuse the existing Tokio owned-semaphore `Budget`
+for lifetime charges, and retain Moka 0.12.16 for replaceable listing pages.
+Foyer's weighted memory cache also cannot own canonical inode identity, kernel
+lookup/open pins or an allocation moved out of a cache entry. Replacing L1 with
+another weighted cache would not solve those ownership requirements.
+
+Small application owners carry charges across inode state, returned directory
+names/xattrs, listing snapshots, writer snapshots and namespace-operation plans.
+Reserve variable-length encoding/copy work before construction or remote mutation;
+settlement releases credit rather than assuming late admission cannot fail.
+Namespace pressure examines at most 128 candidates per locked batch and yields
+between batches, preserving canonical pins and surfacing final exhaustion as
+`ENOMEM`. The existing entry count remains an additional bound. Disabled byte
+admission preserves prior defaults and avoids accounting-only HEAD requests.
+
+This is application metadata admission, not allocator accounting or a total-RSS
+limit. SDK/parser allocations, allocator rounding/container slack, runtime and
+kernel memory remain separate measured costs. No production limit is selected.
+
+The subsequent compaction uses standard-library immutable sorted boxed pairs,
+slice binary search and `Arc` ownership with the existing admission wrapper.
+No global interner, custom hash table or new cache dependency is needed. Clean
+attributes share one canonical allocation with their committed baseline; COW
+writers retain distinct versions only when required. Shared keys similarly
+preserve namespace/snapshot lifetime. Transport metadata and HTTP properties stay
+at the backend boundary rather than in every cached inode. Preserve the existing
+owned flush gate, conditional reads and private-receipt recovery contract.
 
 ## Selected mechanisms
 

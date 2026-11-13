@@ -337,7 +337,7 @@ async fn local_pages_seek_past_subtrees_without_skipping_lexical_neighbours() {
             break;
         }
         assert!(page.len() <= 2);
-        after = page.last().unwrap().name.clone();
+        after = page.last().unwrap().name.as_str().to_owned();
         names.extend(page.into_iter().map(|entry| entry.name));
     }
     assert_eq!(names, ["a", "a!", "a.", "a0", "aa", "β", "😀"]);
@@ -399,6 +399,180 @@ async fn expired_wide_directory_yields_before_finishing_its_local_scan() {
             .is_pending()
     );
     assert!(listing.await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn optional_preload_cannot_finish_a_full_namespace_scan_in_one_poll() {
+    use geesefs_rs::{config::ListType, inode::Inode};
+    use std::{
+        future::{Future, poll_fn},
+        task::Poll,
+    };
+
+    let store = MemoryStore::new();
+    store.seed("target", b"independent target bytes");
+    let mut config = MemoryStore::config(32);
+    config.list_type = Some(ListType::Extended);
+    config.entry_limit = 388;
+    let fs = Filesystem::new(config.clone(), store).unwrap();
+    // Model a traversed directory whose real lookup references have not yet
+    // been forgotten. Only the final inode is an eligible cache victim.
+    kernel_owned_prefix(&fs, 386, false);
+    fs.namespace
+        .lock()
+        .unwrap()
+        .install("victim", |ino| {
+            Inode::new(ino, "victim".into(), false, None, &config)
+        })
+        .unwrap();
+    let mut lookup = std::pin::pin!(fs.lookup(1, "target"));
+    assert!(
+        poll_fn(|cx| Poll::Ready(lookup.as_mut().poll(cx)))
+            .await
+            .is_pending(),
+        "optional preloading must not bypass yielding admission with a full synchronous scan"
+    );
+    // Other users of this runtime and the namespace must get a turn before the
+    // tail victim is reached; references are not invented or cleared to pass.
+    let text = geesefs_rs::metrics::render(&fs).unwrap();
+    assert!(text.contains("geesefs_namespace_entries 388"));
+    let target = lookup.await.unwrap();
+    assert_eq!(
+        fs.read(target.ino, 0, 24).await.unwrap().as_ref(),
+        b"independent target bytes"
+    );
+    assert!(fs.namespace.lock().unwrap().named("victim").is_none());
+    assert_eq!(fs.namespace.lock().unwrap().evictions, 1);
+}
+
+#[tokio::test]
+async fn consecutive_admissions_reuse_reclaim_progress_past_kernel_owned_prefix() {
+    use geesefs_rs::{config::ListType, inode::Inode};
+    use std::{
+        future::{Future, poll_fn},
+        task::Poll,
+    };
+
+    let store = MemoryStore::new();
+    store.seed("first", b"first bytes");
+    store.seed("second", b"second bytes");
+    let mut config = MemoryStore::config(32);
+    config.list_type = Some(ListType::V2);
+    config.entry_limit = 4100;
+    let fs = Filesystem::new(config.clone(), store).unwrap();
+    kernel_owned_prefix(&fs, 4096, false);
+    for index in 0..3 {
+        let key = format!("victim-{index}");
+        fs.namespace
+            .lock()
+            .unwrap()
+            .install(&key, |ino| {
+                Inode::new(ino, key.clone(), false, None, &config)
+            })
+            .unwrap();
+    }
+    let first = fs.lookup(1, "first").await.unwrap();
+    fs.reference(&first);
+    let mut second = std::pin::pin!(fs.lookup(1, "second"));
+    let mut admitted = None;
+    // A prior admission already found this unowned tail. A few scheduler turns
+    // must suffice for the next victim, independently of the old pinned prefix.
+    for _ in 0..4 {
+        if let Poll::Ready(result) = poll_fn(|cx| Poll::Ready(second.as_mut().poll(cx))).await {
+            admitted = Some(result.unwrap());
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let admitted =
+        admitted.expect("each admission must not rescan the same long kernel-owned prefix");
+    assert_eq!(
+        fs.read(first.ino, 0, 11).await.unwrap().as_ref(),
+        b"first bytes"
+    );
+    assert_eq!(
+        fs.read(admitted.ino, 0, 12).await.unwrap().as_ref(),
+        b"second bytes"
+    );
+    let ns = fs.namespace.lock().unwrap();
+    assert_eq!(ns.nodes.len(), 4100);
+    assert_eq!(ns.evictions, 2);
+    assert!(ns.named("victim-0").is_none());
+    assert!(ns.named("victim-1").is_none());
+}
+
+#[tokio::test]
+async fn preload_rechecks_a_mutation_while_yielding_for_namespace_admission() {
+    use geesefs_rs::{config::ListType, inode::Inode};
+    use std::{
+        future::{Future, poll_fn},
+        task::Poll,
+    };
+
+    let store = MemoryStore::new();
+    store.seed("target", b"old");
+    store.seed("cached-0000/existing", b"directory child");
+    let mut config = MemoryStore::config(32);
+    config.list_type = Some(ListType::Extended);
+    config.entry_limit = 388;
+    let fs = Filesystem::new(config.clone(), store.clone()).unwrap();
+    let pinned = kernel_owned_prefix(&fs, 386, true);
+    fs.namespace
+        .lock()
+        .unwrap()
+        .install("victim", |ino| {
+            Inode::new(ino, "victim".into(), false, None, &config)
+        })
+        .unwrap();
+    let mut lookup = std::pin::pin!(fs.lookup(1, "target"));
+    assert!(
+        poll_fn(|cx| Poll::Ready(lookup.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    // A local mutation invalidates the old LIST snapshot while the unrelated
+    // target is replaced remotely. Publishing the old page would hide its HEAD.
+    store.seed("target", b"new target bytes");
+    let local = fs
+        .create(pinned[0], "local", libc::S_IFREG | 0o600, None, 0)
+        .await
+        .unwrap();
+    fs.write(local.ino, 0, b"local dirty bytes").await.unwrap();
+    fs.forget(pinned[380], 1);
+    let target = lookup.await.unwrap();
+    assert_eq!(target.attr().size, 16);
+    assert_eq!(
+        fs.read(target.ino, 0, 16).await.unwrap().as_ref(),
+        b"new target bytes"
+    );
+    assert_eq!(
+        fs.read(local.ino, 0, 17).await.unwrap().as_ref(),
+        b"local dirty bytes"
+    );
+    assert_eq!(fs.namespace.lock().unwrap().nodes.len(), 388);
+}
+
+fn kernel_owned_prefix(fs: &Filesystem, count: usize, first_directory: bool) -> Vec<u64> {
+    use geesefs_rs::inode::Inode;
+    let mut namespace = fs.namespace.lock().unwrap();
+    (0..count)
+        .map(|index| {
+            let key = format!("cached-{index:04}");
+            let node = namespace
+                .install(&key, |ino| {
+                    Inode::new(
+                        ino,
+                        key.clone(),
+                        first_directory && index == 0,
+                        None,
+                        &fs.config,
+                    )
+                })
+                .unwrap();
+            fs.reference(&node);
+            node.ino
+        })
+        .collect()
 }
 
 #[test]

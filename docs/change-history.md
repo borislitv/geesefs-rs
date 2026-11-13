@@ -5,6 +5,331 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-13: prepare the authorized 0.1.12 release
+
+Package the existing persistent-cache and metadata corrections as 0.1.12 without
+changing dependency revisions or runtime policy. The operator authorized related
+PR merges, the release and the existing withdrawn-reader update. Go comparisons
+are no longer current gates. Continue real-file L2 overflow and complete traversal
+with approximately 2% independent hash sampling, then report total/peak reader
+RSS and separately scoped allocator/cgroup/file/kernel observations. Preserve
+inventory, cumulative workload guards, historical failures and unresolved native
+progress gaps. Target execution results remain separate from release packaging.
+
+## 2026-11-13: preserve live xattrs and release avoidable metadata backing
+
+A verified fsync replaced live xattrs with the remote wire projection, losing
+uppercase names and non-UTF-8 bytes. Keep live metadata independently of the
+normalized remote baseline. Six public filesystem regressions first fail on the
+previous source and then preserve the same inode's values, durable bytes and
+subsequent writes. The existing wire codec and reopen normalization are unchanged.
+
+Move untouched inodes' writer-only fields into lazily admitted backing and share
+one compact budget handle across metadata charges. Admit backing before mutation
+or remote side effects. An independently reproduced rename/LIST race additionally
+requires protecting moving identities from clean metadata replacement and funding
+writer backing before publishing retry intent.
+
+Use Moka's supported per-entry expiry from the page's original fetched time and
+drive maintenance before listing admission. Already-expired pages are not cached;
+an active response retains its own ownership. Removing only cache expiry makes
+the positive-TTL regression retain two backings instead of one. See the
+[verification scope](testing.md#metadata-backing-and-live-xattrs--2026-11-13).
+These corrections do not establish a whole-reader memory bound or resolve the
+strict native flat-directory progress gate.
+
+## 2026-11-13: retry interrupted extended LIST transport within its existing budget
+
+Target traversal retained failures where extended LIST request errors exhausted
+only one attempt, alongside independent LIST/HEAD deadline failures. Real loopback
+TCP regressions reproduce two missing retry cases: closure before headers and a
+successful response ending before its declared Content-Length. Both are assertion-RED
+on the previous source. Even complete XML from an incomplete HTTP message must be
+discarded, not published as a successful page.
+
+Classify supported reqwest/hyper error sources and retry the same signed page within
+the existing attempt count, backoff and aggregate deadlines. Hyper represents a
+truncated Content-Length body as an UnexpectedEof I/O source; gzip decoder EOF must
+remain terminal when the HTTP message itself completed. Five public-backend tests
+cover recovery, exact page/token preservation, configured exhaustion, deadline
+cancellation and permanent decoding failures. Full default/all-feature suites each
+pass 535 active tests. See [verification](testing.md#interrupted-extended-list-transport--2026-11-13).
+This does not resolve every target timeout or the strict flat-directory capacity
+gate, and does not establish completed physical L2 reuse or acceptance.
+
+## 2026-11-13: correct native directory fixtures for flat metadata reuse
+
+Three preserved native failures assumed the older listing path: the request count
+omitted the initial flat probe, a child-LIST failure was no longer reached when a
+complete flat page established the directory, and the marker check demanded a HEAD
+despite authoritative flat metadata. Correct those fixtures without changing the
+runtime. Force real pagination before the injected failure, check EIO and zero
+escaped references, and verify marker metadata through both flat and common-prefix
+paths. The name/size/ownership contracts remain intact. Relevant temporary faults
+each fail the corresponding corrected oracle and are reverted.
+
+The native suite now has 18 passes and the same strict flat ENOMEM failure. Its
+8388608-byte requirement is unchanged; target traversal and physical recycling
+remain open. See [verification](testing.md#directory-listing-fixture-contracts--2026-11-13).
+
+## 2026-11-12: tie directory-open lifetime to the admitted owner
+
+Native teardown intermittently retained directory opens after unmount. A real
+fuser-protocol regression deterministically opens 32 directories, omits individual
+RELEASEDIR requests, then observes 32 opens after DESTROY instead of zero. Each
+directory handle now pins its inode and releases its open count when the actual
+cursor owner drops. Shutdown drains the registry after admitted requests finish;
+normal release no longer decrements before an in-flight cursor relinquishes it.
+The protocol regression and native handle controls pass with one/three receivers.
+
+Stable CI additionally reports `needless_bool` on the preload validation helper;
+use the equivalent positive predicate rather than suppressing the lint. This
+correction leaves the strict flat traversal and three baseline PLUS gaps open.
+
+## 2026-11-12: yield optional preload and reuse finite reclamation progress
+
+A full namespace exposed two independent progress defects: speculative preload
+finished a complete synchronous scan under the namespace mutex, and consecutive
+admissions repeatedly scanned the same long kernel-owned prefix. Public lookup
+regressions first fail on the original source. Preload now uses bounded yielding
+admission without retaining the namespace mutex, then revalidates the publication
+epoch and binding. A mutation during that yield must preserve local dirty bytes
+and obtain the unrelated target's current metadata rather than publish the old LIST.
+
+Keep a shared last-successful-victim hint, not a shared in-progress scan. Each
+admission retains its own initial high-water mark and wraps once, so a released
+prefix remains reachable and interleaved all-pinned scans still terminate. Count
+pressure alone retains cached listing backings; invalidate them only on actual
+byte-charge pressure. Existing metadata-reuse, no-HEAD and writer controls remain.
+
+This fixes the isolated stalls, not the strict flat-directory capacity gate.
+Adaptive READDIRPLUS and a larger notification quantum both failed that oracle
+and were reverted. The latest opt-in suite additionally exposes a directory-open
+count retained after unmount; preserve its failure rather than retry it away.
+See [verification](testing.md#yielding-preload-and-reclaim-continuation--2026-11-12).
+Full target traversal, physical L2 reuse and acceptance remain outstanding.
+
+## 2026-11-12: preserve active directory owners and bounded traversal semantics
+
+A small native inode bound exposes successful but truncated `du`: an active
+remainder retained inode numbers without owning the pending inodes. Pin only the
+active remainder, including cache hits; keep TTL pages numeric. Kernel-owned
+entries survive TTL expiry, so retire clean unused dentries through supported,
+detached bounded notifications and keep lookup counts until actual `FORGET`.
+Exhausted cached remainders advance the backend cursor without publishing EOF.
+An independent open-file fixture catches the false-EOF fault as successful
+523264-byte traversal instead of the required 1572864 bytes.
+
+A separate native fixture reproduces EMFILE from capping idle directory handles
+at four times request concurrency. Share the existing entry-bounded owned handle
+semaphore with files, preserving byte charges and actual cursor lifetimes.
+No runtime budget, TTL, metadata or durability requirement is weakened.
+
+The nested walk and within-budget pressure cursor controls pass. The strict
+over-capacity flat traversal remains a failing progress gate; speculative pending
+owner/batch changes did not fix it and were reverted. Keep its exact-size assertion
+and the three independently reproduced native baseline failures visible in
+[verification](testing.md#directory-ownership-and-progress--2026-11-12).
+This is a local correctness correction, not full target `du`, L2 recycling,
+memory/performance acceptance or traffic readmission.
+
+## 2026-11-12: expose data-region fullness and broaden mirror selection
+
+Configured file capacity, index counts and cumulative I/O did not show how much
+of the L2 data-region pool remained reusable. Connect the pinned engine's existing
+four state gauges and actual partition geometry to the Prometheus endpoint through
+its supported metrics/picker APIs. Report used/free data-region capacity separately
+from file allocation, indexed records and useful payload bytes. Empty preallocated,
+populated, recovered and actively recycling real-file fixtures verify the boundary;
+scraping performs no cache I/O. No engine format, compression or budget changes.
+
+The prior deb/rpm-only operating example excludes ISO images and other mirror
+payloads. Add a checked-in, CLI-tested case-insensitive policy for images, archives
+and packages, retaining metadata/sidecar exclusions. The generic regex remains
+explicit and matches mount-relative paths. See [operation and selection](disk-cache-operations.md).
+Apply an operating-policy change as a separately recorded restart phase; local
+tests and these observations do not complete the ongoing full-capacity/du trial.
+
+## 2026-11-12: backpressure at saturated FUSE request admission
+
+Real buffered-read and sendfile regressions reproduce EIO from immediate
+`admission_full` EAGAIN while a previous READ has replied but still owns gated
+read-ahead. Wait on the existing semaphore in fixed fuser receiver threads before
+spawning; keep pending WRITE bytes funded and actual jobs responsible for their
+permits. One absolute deadline includes waiting, with an explicit expiry check
+before starting a job. No runtime limit or durability contract is relaxed.
+
+Native byte/ownership controls and protocol tests cover total-deadline expiry,
+already-expired writes, fsync failure/recovery and draining shutdown. Deliberate
+early permit release, deadline renewal and expiry-boundary faults fail their
+assertions. The broader native directory suite retains three baseline-reproduced
+READDIRPLUS failures on the development kernel. Full scopes and reproduction
+commands are in [testing](testing.md#fuse-admission-backpressure--2026-11-12).
+This correction neither rewrites the earlier HDD measurements nor establishes
+sustained target acceptance or traffic readmission.
+
+## 2026-11-11: record the withdrawn-reader HDD functional trial
+
+The operator accepts single-user downloaded-copy semantics without an extra KMS
+authorization GET and occasional disk-cache slowdowns. A frozen `91bdc20` binary
+allocates a 2-TiB HDD file, completes 127.997 GiB of direct-filesystem population,
+and recovers 87,981 records on the same inventory after an ordinary restart.
+Independent peer rsync/metadata and HTTP controls pass before and after restart;
+range probes demonstrate actual recovered L2 delivery.
+
+Preserve failed setup attempts and correct their causes: rejected live nginx
+zone-key changes, a banned single replay generator, inappropriate full downloads
+of historically aborted responses, and an immediate-Ready assertion that ignored
+asynchronous recovery. No runtime budget/deadline or cache inventory was changed
+to obtain these results.
+
+The completed hour still contains seven truncated responses and eleven socket
+timeouts, including five truncations through the changed common mount. Immediate
+FUSE admission rejection is a concrete investigation target, not an exemption
+because its source predates this PR. Keep reader RSS, allocator, cgroup and the
+large consumer file-cache footprint separate in the
+[target checkpoint](target-disk-cache-functional.md). Production acceptance
+remains open; temporary test exceptions are removed and admission stays withdrawn.
+
+## 2026-11-11: correct two independently falsified admission/progress defects
+
+Five independent WOOF roles and a separate falsifier reviewed the full PR at
+`8d91571dffb22ff2560b7cba21817ce2caa050d9`. Of 21 deduplicated candidates,
+two P2 defects survived: a namespace cursor inherited from an earlier admission
+could skip a newly released prefix inode and return false ENOMEM; repeated disk
+timeouts could defer the first source GET of one producer range.
+
+Make reclamation continuation local to each admission, start at the beginning,
+and cap each batch plus the initial inode high-water mark. Stop remaining disk
+attempts for the current range after timeout/saturation, without expiring healthy
+lookups after source waits or releasing actual-worker funding early. Public
+filesystem regressions fail on the original code. Independent post-fix review
+also caught lost synchronous install progress after EAGAIN: retain its finite
+local scan through completion, including speculative preload, while keeping
+async publication bounded. Public tail-victim/exhaustion/released-prefix and
+preload tests distinguish this path. Ten isolated faults are rejected.
+Direct-tree default/all-features suites pass 518 tests each, with
+24 opt-in entries. This does not attribute historical matrix failures to either
+defect or close qualification. Target/recovery acceptance and KMS cached-copy
+revocation semantics were explicit questions at this review checkpoint; the later
+single-user decision above resolves only the latter scoped contract. Unrelated
+optional recommendations and pre-existing traversal costs remain separate.
+
+## 2026-11-11: overlap bounded source gaps and transfer decoded payload ownership
+
+Gap discovery previously waited for each source miss run before inspecting later
+disk hits. Use one capacity-one scalar descriptor channel and one source consumer
+per existing range task; publish verified hits before waiting on a full queue.
+Deduct its additional ownership from the existing window budget. Move the
+validated decoded payload Box into its exact existing reservation instead of
+copying it, retaining identity/CRC/generation and actual-worker lifetime checks.
+
+Source-matched local qualification at `8d91571` completes 456 attempts with
+449 byte/state passes and seven timeout-related zero-source failures. A separate
+96/96 Rust-relative comparison shows scoped eviction throughput improvement;
+CPU/memory and absolute L2/RAM regressions remain in the
+[frozen checkpoint](performance-disk-cache-followup.md#combined-pipeline-checkpoint).
+Neither measurement describes the later WOOF repairs or production acceptance.
+
+## 2026-11-11: retain validated disk coverage in L1
+
+A fixed warm-random workload repeatedly demoted 212 fragments of already resident
+full disk records. Preserve the validated immutable record's actual backing and
+offset when publishing into L1, without changing reply coverage, allocation or
+charges. Partial records and EOF retain their real length; reclaimed entries can
+still be refilled. Public filesystem regressions and independent fault controls
+check unnecessary writes, offsets, invented coverage and refill after index removal.
+
+Eight paired mounts plus eight A/A controls remove all 212 redundant admissions
+and show a scoped warm-random throughput/CPU improvement. RSS controls are biased;
+other workloads and historical timeouts remain separately qualified in the
+[follow-up report](performance-disk-cache-followup.md#validated-backing-correction).
+
+## 2026-11-11: preserve funded warm-L2 reads under contention
+
+Four recovered readers could bypass valid disk records when read/spill slots or
+namespace/inode try-locks contended. Required windows now wait on caller-funded,
+key-free FIFO admission; read and spill owners use their independently funded
+limits. Bounded blocking eligibility acquires namespace and inode guards
+sequentially and revalidates names after the inode wait. Actual work retains
+funding after timeout/cancellation. Each block lookup keeps its own deadline;
+slow source gaps do not prematurely expire later warm lookups.
+
+Proven-new media defers engine/file creation until eligible capacity pressure,
+while existing inventory still recovers eagerly. Funding/lock ownership transfers
+without release/reacquire. A separate maximum-record regression corrects the
+raw-versus-page-rounded engine cap without relaxing decoded identity/payload
+bounds. Reuse identical full/fragment keys instead of allocating them twice.
+
+Deterministic contention, real parent rename and slow-prefix regressions fail
+under independently reintroduced faults. Native large warm reads and capacity
+reuse pass representative gates; repeated-mount performance acceptance is separate.
+
+## 2026-11-11: qualify Range fixtures and fixed-work comparisons
+
+Moto materialized the entire object before Range slicing, distorting large-read
+preparation. Reuse the existing supported SeaweedFS fixture for measured S3 work;
+retain Moto for functional fault injection. Verify byte ranges, conditional
+requests, metadata and writer operations, and account provider costs separately.
+
+Independent harness review exposed success after a final source-receipt error,
+per-arm timed repetition and I/O counters extending into an untimed eviction
+probe. Fail closed while retaining results; enforce identical declared operation
+plans; measure probe I/O separately. Fixed-capacity preparation checks every byte
+and actual region reuse. Original failed runs remain preserved independently of
+the corrected protocol and subsequent results.
+
+## 2026-11-10: demote eligible byte-pressure victims before loans
+
+A real-file regression reading 48 MiB with a 32-MiB payload budget retained
+10 MiB of idle flush loans but admitted zero L2 records: loan-first pressure
+handling made every later victim ineligible for demotion. Prefer an eligible
+nonloaned capacity victim before borrowing, rechecking identity outside the
+cache lock and the selected candidate again under it. The same fixture now
+persists 266 records and reads the first block after restart without a source GET.
+No budget, queue or required-request wait was added. Disabled/excluded behavior
+and genuine Prepared-to-Ready loan revocation remain separately tested.
+
+This changes selected-data residency policy, not the total admission limit:
+Ready selected victims may no longer use the idle flush lane. Native/paired
+qualification remains necessary; bounded optional drops are still permitted.
+
+## 2026-11-10: compact canonical metadata and shared keys
+
+Controlled allocation probes confirmed two retained attribute containers per
+clean inode and independently allocated namespace/state keys. Replace these with
+shared immutable sorted attributes, a compact committed remote record and one
+charged key backing. Writers use pre-admitted COW versions; snapshots/listing
+records share owners without releasing admission early. Keep full transport
+metadata and HTTP properties only in backend operations.
+
+Removing LIST decode/encode/decode also preserves binary xattr bytes that the
+roundtrip could substitute with UTF-8 replacement characters. Review regressions
+ensure canonical projection after a successful PUT and a longer PATCH ETag use
+prepaid operation credit, not fresh postcommit admission. Native directory-lock
+checks also exposed inherited pre-exec descriptors retaining a failed preparation
+lock; an owned safe unlock guard now covers that validation error path.
+
+Matched default-jemalloc allocation experiments show lower clean metadata costs;
+final exact-source mounted/paired performance verification remains separate. Keep
+all adverse CPU samples and distinguish allocated memory, admission and RSS.
+
+## 2026-11-10: bounded metadata admission and persistent payload tier
+
+Add opt-in metadata byte admission independent of the existing payload limit.
+Charges follow returned names/xattrs, listing/inode state, writer snapshots and
+rename plans. Independent regressions exposed premature charge release, encoding
+growth and move intent published before a mutating request; preserve old names
+on pre-remote rejection/cancellation and retain intent after attempted operations.
+
+Qualify the maintained Foyer fork and integrate capacity-only L1 demotion,
+validated L2 reads/refill, bounded funding and owned recovery/shutdown. Correct
+the demonstrated stale-size admission panic by checking size and generation
+before splitting the new window. Real-file and native ext4 ENOSPC/EACCES tests
+preserve completed inventory without reset. Full mounted/performance acceptance
+remains open. Separate allocation evidence confirms duplicate clean metadata and
+key owners still need compaction; a byte limit alone does not remove their cost.
+
 ## 2026-11-09: release 0.1.11 preparation
 
 Advance the package and lockfile together for bounded subtree prefetch. Package

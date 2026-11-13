@@ -5,14 +5,22 @@ Overall status is **UNACCEPTED**. Completed mechanisms belong in
 measurements retain their own source and statistical scope. This page lists
 actionable gaps rather than repeating their execution history.
 
-## 1. Sustained read-only acceptance
+## 1. Sustained read-only functionality and memory
 
-Use Go 0.43.9 as the primary reference and the
-[paired protocol](performance-methodology.md): at least eight independent mount
-pairs, actual same-binary/configuration A/A controls, predeclared practical
-non-inferiority margins and independent bytes/generations. Compare under equal
-resources and the accepted negative-cache policy: 64 misses per directory with
-one-minute stat TTL. Immediate external-create visibility beyond Go is not a gate.
+The [2026-11-13 operator scope](project-brief.md#current-operator-scope--2026-11-13)
+authorizes the next release and the existing withdrawn-reader update. Finish its
+same-inventory L2 overflow test and repeat a complete `du`, using real files and
+independent current-source/FUSE hashes for approximately 2% of read events.
+Retain the existing cumulative input/deadline/resource guards. Record total and
+peak reader RSS, allocator and cgroup/file/kernel memory through both workloads
+and after they finish. Traversal failures and incomplete physical-reuse evidence
+remain failures or gaps, not passes.
+
+Go comparisons and new Go/A-A campaigns are no longer current gates. Preserve
+the [paired protocol](performance-methodology.md) and its original measurements
+as historical evidence. Keep the accepted negative-cache contract: 64 misses per
+directory with one-minute stat TTL; immediate external-create visibility is not
+an added requirement.
 
 The [controlled listing result](performance-listing-diagnosis.md) explains the
 default-Rust loss through repeated absent-name probes. The
@@ -34,6 +42,42 @@ alongside successful-request timings and distinguish post-header read failures.
 Include later `pread()` EIO and independently reproduced native backend read
 failure. Compare vhost/method/URI and generations before attributing 404 changes;
 current native/served HEAD parity is not historical full-payload acceptance.
+
+The [HDD functional checkpoint](target-disk-cache-functional.md) adds a completed
+hourly replay with five common-mount body truncations, despite successful explicit
+byte/recovery controls. Native buffered-read/sendfile regressions now reproduce
+immediate `spawn_traced` rejection as EIO and verify bounded receiver-thread
+backpressure with unchanged work credits and a shared deadline. Qualify that
+correction under authorized sustained target traffic; local fixtures do not close
+the recorded serving failures. Investigate the three READDIRPLUS assertions that
+also fail on the pristine baseline under the current development kernel; see
+[the verification scope](testing.md#fuse-admission-backpressure--2026-11-12).
+Preserve failures from other mounts/proxies separately, without changing runtime
+limits or claiming whole-system acceptance.
+
+Finish the separately authorized full configured L2 capacity/recycling trial with
+concurrent complete `du -sh`, retaining traversal/read errors and daemon/client/
+cgroup/kernel memory independently. Preallocation and cumulative writes alone do
+not establish a full live cache or complete physical-pool turnover. Deploy the
+[region observations and broader mirror policy](disk-cache-operations.md) only in
+a separately recorded phase after the frozen workload; preserve inventory and
+verify recovery/independent bytes. Streaming zstd is an inspection topic, not an
+enabled codec or accepted memory/performance improvement.
+
+Resolve the strict `native_flat_directory_retires_kernel_owners_before_the_next_backend_page`
+progress gate before claiming complete traversal at the configured count bound.
+Active-page ownership, exhausted-remainder cursor progress and independent handle
+admission have isolated regression controls, but detached invalidation does not
+guarantee that real kernel `FORGET` keeps pace. Preserve successful-partial-output,
+ENOMEM, backend failure and EMFILE receipts separately. Do not manufacture progress
+with fake FORGET, discarded metadata, higher cache limits or accepted partial `du`.
+
+The later namespace-stall correction makes speculative preload yield and avoids
+repeated pinned-prefix scans while retaining finite admission-local continuation.
+Qualify the delivered source on the withdrawn target before attributing the stalled
+trial to those defects alone. Directory-open teardown now has a deterministic
+protocol regression and an owner-lifetime correction; retain all three older PLUS assertions separately. Local
+lookup regression success does not close the flat traversal or L2 reuse gates.
 
 ## 2. Target access and large-namespace memory
 
@@ -63,6 +107,17 @@ Collect sustained series at the new limits; the preceding binaries had no counte
 so a retrospective unchanged-budget reuse comparison is unavailable.
 Measure observer overhead separately and keep cgroup pressure and user-visible
 errors/tails alongside cache reuse. This feature does not supply a heap profile.
+
+The [metadata-backing correction](testing.md#metadata-backing-and-live-xattrs--2026-11-13)
+removes always-inline writer state and expires page-cache owners without weakening
+active ownership. Qualify its effect on a long-lived native namespace separately
+from the synthetic fresh-process diagnostic. Count-limited identities, all three
+namespace indexes, kernel references and remaining fixed inode fields still need
+an actual memory envelope; smaller layouts do not make whole-reader RSS bounded.
+For subsequent compression work, compare searchable immutable prefix/FST segments
+with bounded mutable overlays and decoded caches before adding zstd. Measure
+random-lookup CPU/p99, pinned old segments and compaction peaks, not only serialized
+compression ratios. Keep full reader/writer and actual FORGET contracts intact.
 
 ## 3. Compatibility and writer behavior
 
@@ -100,5 +155,7 @@ allocation/rate objections. Do not reinstate those trials without new evidence.
 
 [FUSE io_uring](fuse-io-uring-assessment.md) waits for a fitting released upstream
 API, target-kernel/confinement support and a material measured transport share.
-Passthrough, writeback and disk-backed caching remain deferred. A merge may retain
-the experimental checkpoint; it does not accept production replacement.
+Passthrough and writeback remain deferred. The original disk-cache deferral was
+superseded by separately authorized persistent-tier development and the withdrawn
+HDD trial; its results do not close acceptance. A merge may retain the experimental
+checkpoint; it does not accept production replacement.

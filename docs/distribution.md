@@ -1,8 +1,10 @@
 # Dependency notices for a binary distribution
 
-Filesystem and performance acceptance remain open. A successful notice scan does
-not authorize a release or establish compatibility. The current notice policy
-targets `x86_64-unknown-linux-gnu`; review and regenerate for another target.
+The operator authorized the next release and existing withdrawn-reader update on
+2026-11-13; see the [current scope](project-brief.md#current-operator-scope--2026-11-13).
+A successful notice scan does not establish filesystem compatibility or close
+unresolved functional gaps. The current notice policy targets
+`x86_64-unknown-linux-gnu`; review and regenerate for another target.
 
 Use public `cargo-about` 0.9.3 and the checked-in `about.toml` / `about.hbs`.
 Generation uses the locked dependency graph, a conservative all-feature superset,

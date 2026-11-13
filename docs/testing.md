@@ -5,6 +5,423 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Metadata backing and live xattrs — 2026-11-13
+
+Six `fsync_xattrs` cases preserve uppercase/binary/ASCII values through same-inode
+fsync, a second no-op fsync and another partial write, with metadata admission both
+enabled and disabled. Four lossy cases are assertion-RED on the previous source;
+two ASCII controls already pass. Wire metadata is checked separately from live
+bytes rather than using the normalized projection as the expected live result.
+
+Three `directory_page_expiry` cases cover zero TTL, positive real-clock expiry on
+a different cache key, and ownership retained by an active response under count
+pressure. The positive-TTL test permits the pinned Moka timer-wheel granularity.
+Removing only builder expiry, while retaining maintenance and skipped expired
+publication, fails the backing assertion (`before=992, after=1176`); restoring the
+exact source returns all three tests to green. Raw setup failures and full source
+fingerprints remain in ignored evidence.
+
+`namespace_representation` verifies clean refresh followed by sparse writes,
+failed durability and retry, rename, independent fresh-reader bytes and retained
+snapshots. `rename_backing_refresh` synchronizes a real public-store LIST boundary,
+concurrent authoritative listing and byte pressure. Before correction, a move
+rejected before COPY/DELETE strands a child's subsequent fsync with EAGAIN; after
+correction that child's new bytes are durable. No private helper is the oracle.
+
+On isolated Linux with official Rust/Cargo 1.96.0, default and all-feature
+all-target suites each pass **546 tests / 0 failures / 31 opt-in ignores**.
+Both denied-warning Clippy configurations and fmt pass. Native FUSE and full
+target/S3 acceptance are separate; the strict flat-directory gate remains open.
+The sparse-writer control rejects an omitted remote-size clamp: shrink/grow returns
+`UV12YZ\0` instead of `UV12\0\0\0`; restoring the exact source returns it to green.
+Static analysis covers the four changed runtime files: new expiry callbacks have
+CC1 and writer-admission helpers CC1/5/7. Coverage/CRAP remain unavailable. Dryer
+retains one pre-existing identical-constructor pair; mutation discovery is not a
+whole-file mutation score. Existing high-complexity rename/flush code remains.
+
+```bash
+timeout 180s cargo test --offline --locked --test fsync_xattrs --test directory_page_expiry --test namespace_representation --test rename_backing_refresh
+timeout 1800s cargo test --offline --locked --all-targets -j 8
+timeout 1800s cargo test --offline --locked --all-features --all-targets -j 8
+timeout 1800s cargo clippy --offline --locked --all-targets -j 8 -- -D warnings
+timeout 1800s cargo clippy --offline --locked --all-features --all-targets -j 8 -- -D warnings
+```
+
+The explicitly ignored `clean_refresh_and_writer_residency_diagnostic` reports
+allocator, process and container scopes for a synthetic flat namespace. Run each
+budget mode in a fresh process. Its seeded fake backend remains accounted for;
+phase increments and total RSS must not be conflated. Use exactly the same fixture,
+support files, compiler and allocator for historical and candidate executables.
+This Rust-relative diagnostic does not supply independent mounts or Go acceptance.
+
+Against runtime source `f0391ccaa14beaaa68fd685e8624293de3fe9853`, identical current
+fixtures and default jemalloc, eight A/A and eight A/B fresh-process pairs per
+budget mode cover 100000 empty files, one clean refresh per inode and 10% sparse
+writers. All 64 measured processes retain the full namespace. Official Rust 1.96
+uses the unoptimized test profile, identical 8-CPU/16-GiB/swap0 containers and no
+forced collection/cache drop. The following are medians, not serving measurements:
+
+| Metric | Metadata charging disabled: baseline → candidate | Enabled: baseline → candidate |
+| --- | ---: | ---: |
+| Clean added jemalloc allocation, MiB | 95.465 → 78.698 | 95.470 → 78.694 |
+| Clean process RSS, MiB | 146.533 → 129.062 | 146.838 → 129.182 |
+| Observed process peak through writer checkpoint, MiB | 146.982 → 130.361 | 147.219 → 130.480 |
+| Work-interval process user/system CPU, seconds | 4.930/0.300 → 4.655/0.260 | 6.235/0.335 → 5.940/0.295 |
+| Work-interval cgroup CPU, seconds | 5.213 → 4.915 | 6.542 → 6.252 |
+| Checkpoint cgroup current/observed peak, MiB | 132.812/132.812 → 116.045/116.045 | 132.738/132.738 → 116.074/116.074 |
+| Checkpoint cgroup anon/file/kernel, MiB | 131.428/0/1.014 → 113.625/0/0.977 | 131.586/0/1.012 → 114.881/0/0.980 |
+
+Added allocation excludes the seeded fake backend; RSS includes it. Paired clean
+heap ratios are approximately 0.824, and RSS ratios 0.880; pair-bootstrap 95% RSS
+intervals are [0.8792,0.8813] disabled and [0.8789,0.8802] enabled. Same-executable
+A/A memory noise is below 0.3% at this scale. CPU/wall controls are noisier, so no
+general speed or Go-relative win is accepted. Cgroup throttling is zero; these
+container observations exclude Docker-daemon/host/serving-reader resources.
+Long-lived native ownership, representative names, payload caches and serving
+p50/p95/p99 are unmeasured. Raw samples, hashes and adverse attempts remain private.
+
+```bash
+GEESEFS_REPRESENTATION_ENTRIES=100000 GEESEFS_REPRESENTATION_BUDGET=disabled timeout 360s cargo test --offline --locked --test namespace_representation clean_refresh_and_writer_residency_diagnostic -- --ignored --exact --nocapture --test-threads=1
+```
+
+## Interrupted extended LIST transport — 2026-11-13
+
+Five `backend_options` regressions use the public S3 backend and real, bounded
+loopback HTTP/TCP connections. Closure before headers and incomplete successful
+HTTP bodies fail honestly on the earlier source, then recover through the configured
+retry. A parseable stale XML page inside a truncated HTTP body must be discarded;
+only the independently specified recovered key and seven-byte size are returned.
+Both requests retain the exact signed page, mounted prefix, delimiter and token.
+Zero/two configured retries produce exactly one/three attempts on repeated failure.
+
+Complete invalid XML and complete HTTP responses containing truncated gzip remain
+terminal. Adding unconditional I/O UnexpectedEof retries fails the gzip fixture with
+three attempts instead of one; the fault is reverted. Transport backoff cannot
+extend the original 200-ms aggregate budget. A mutation extending only the inner
+LIST deadline survives because the enclosing metadata deadline enforces the same
+bound; this redundant-guard survivor is retained, not claimed as a kill. Eight
+selected attempt-limit/boolean mutations are killed by the extension controls;
+this is not whole-file coverage or a complete mutation score.
+
+Default and all-feature all-target suites each pass **535 tests**, with 30 opt-in
+ignores. All-feature denied-warning Clippy, fmt, diff checks and the public-source
+audit (388 packages, zero errors) pass. Crapper reports classifier CC8 and existing
+extended-list function CC29; coverage/CRAP are unavailable. Dryer finds no candidates
+at threshold0.8 within the changed source/test files. No target traversal/recycling
+or strict flat-directory progress pass follows from these local checks.
+
+```bash
+timeout 160s cargo +1.99.1 test --locked --offline --test backend_options extension_
+timeout 380s cargo +1.99.1 test --locked --offline --all-targets
+timeout 380s cargo +1.99.1 test --locked --offline --all-targets --all-features
+timeout 160s cargo +1.99.1 clippy --locked --offline --all-targets --all-features -- -D warnings
+```
+
+## Directory listing fixture contracts — 2026-11-13
+
+Three earlier native PLUS failures were stale fixture assumptions, not three
+additional runtime defects. Keep their original results below as historical
+source-scoped observations. The corrected fixtures retain full name/attribute and
+lookup-reference assertions:
+
+- An 8192-name directory requires one incomplete flat probe, nine ordinary
+  <=1000-name pages and EOF. Assert that root request sequence, not ten total
+  requests that omit the initial flat probe. Per-entry lookup counts and no-HEAD
+  checks remain unchanged.
+- A complete flat page establishes an implicit directory without its child LIST.
+  Use five-name backend pages to reach the injected child-LIST error after earlier
+  regular entries have been buffered. Require EIO, the actual failed dependency
+  request and zero escaped lookup references.
+- Check marker mode/uid/gid through both complete flat metadata reuse (no HEAD)
+  and a paginated common prefix (one marker HEAD). Do not require a redundant HEAD
+  when authoritative metadata is already present.
+
+Each corrected oracle rejects a relevant temporary runtime fault: eager lookup
+reference transfer, discarded marker metadata, and disabled directory-page reuse.
+All faults were reverted. The four focused PLUS controls pass with one default
+receiver and three all-feature receivers. The complete default native directory
+suite is **18 passed / 1 failed**; strict 8192-name/2048-inode flat traversal still
+fails ENOMEM and retains the exact 8388608-byte requirement. This is a fixture
+correction, not a runtime progress fix or target acceptance. Denied-warning
+all-feature all-target Clippy and fmt pass; no new coverage/CRAP score is claimed.
+
+```bash
+timeout 120s cargo +1.99.1 test --locked --offline --test fuse_directory plus_ -- --ignored --test-threads=1
+GEESEFS_TEST_FUSE_THREADS=3 timeout 120s cargo +1.99.1 test --locked --offline --all-features --test fuse_directory plus_ -- --ignored --test-threads=1
+timeout 120s cargo +1.99.1 test --locked --offline --test fuse_directory -- --ignored --test-threads=1
+```
+
+## Directory-open teardown — 2026-11-12
+
+`destroy_releases_directory_handles_without_releasedir` uses fuser's actual
+parser and reply owners: 32 OPENDIR requests followed by DESTROY, with no invented
+individual close requests. The original adapter fails with 32 opens instead of
+zero. Attaching the decrement to the actual cursor owner and draining admitted
+directory handles restores zero and preserves independent file bytes. Native
+handle-budget/EMFILE controls pass with one and three receiver threads.
+
+Default and all-feature all-target suites each pass **530 tests**, with 30 explicit
+opt-in ignores. Denied-warning all-feature Clippy and fmt pass. The full opt-in
+directory suite returns to **15 passed / 4 failed**: strict flat ENOMEM and the
+three baseline PLUS assertions remain. Publishing partial admitted backend pages,
+occupancy-based early pressure and a finite multi-batch notification pass also
+failed the strict oracle and were reverted; none is claimed as a traversal fix.
+
+## Yielding preload and reclaim continuation — 2026-11-12
+
+Three new `namespace_progress` regressions exercise public lookup/read behavior:
+optional preload yields before completing a pinned-prefix scan; a second admission
+reuses successful-victim progress; mutation during a yield rejects stale LIST
+publication while retaining independent local dirty bytes. The first two are
+assertion-RED on the prior source. Removing the post-yield epoch check makes the
+third return the old three-byte size instead of the independently specified sixteen
+bytes. Restored source passes these checks and the existing released-prefix,
+interleaved exhaustion, no-HEAD and cached-metadata-backing controls.
+
+Four selected scan-wrap mutants produce three kills and one survivor: changing the
+wrapped cursor from zero to one skips only the protected root, which reclamation
+already excludes. This is not a whole-file mutation score. Complexity and duplicate
+reports retain their actual file/function scope; coverage and CRAP are unavailable.
+The final default all-target suite passes 529 active tests with 30 opt-in ignores;
+the all-feature suite also passes before the final publication-helper extraction.
+Final focused checks and all-feature denied-warning Clippy pass after extraction.
+
+The opt-in directory run remains **14 passed / 5 failed**: the strict flat gate,
+the three previously recorded baseline assertions, and a nonzero directory-open
+count after unmount. The flat oracle still requires exactly 8388608 bytes; ENOMEM
+and partial output are failures. Adaptive READDIRPLUS and page-sized retirement
+experiments failed and were reverted. No target traversal/recycling success follows
+from the local namespace corrections.
+
+```bash
+timeout 180s cargo +1.99.1 test --locked --offline --test namespace_progress --test namespace_install --test metadata_limits --test metadata_compaction --test lookup_preload --test namespace_review_regressions --test directory_pages
+timeout 360s cargo +1.99.1 test --locked --offline --all-targets
+timeout 360s cargo +1.99.1 test --locked --offline --all-targets --all-features
+timeout 160s cargo +1.99.1 clippy --locked --offline --all-targets --all-features -- -D warnings
+timeout 180s cargo +1.99.1 test --locked --offline --test fuse_directory -- --ignored --test-threads=1
+```
+
+## Directory ownership and progress — 2026-11-12
+
+`tests/directory_pages.rs` retains a pending remainder and then a second cached
+remainder across real count pressure. Neither owner can be evicted until its last
+pin is released. `tests/metrics.rs` checks cached versus kernel-owned identities,
+repeated references, partial/last/duplicate/unknown FORGET and reacquisition.
+Ten selected counter-transition mutants are killed; discovery is not a whole-file
+mutation score. The new helper CC values are at most nine; coverage/CRAP are N/A.
+Dryer retains three existing score-1.00 namespace-bookkeeping pairs.
+
+The native nested fixture requires exact 524800-byte `du` at both 2048 and 128
+inode bounds, actual small-bound eviction and unchanged open-anchor bytes. A
+separate 1536-file fixture holds 1024 real files open under a 2048-inode bound,
+forcing nonempty pressure prefixes without capacity exhaustion. Both metadata
+charging modes require exact 1572864 bytes and preserved open bytes. Injecting
+empty-remainder-as-EOF yields exit0/523264 bytes and fails the independent oracle;
+restored source passes with one and three receivers.
+
+The handle fixture first fails EMFILE with two request slots and 32 idle open
+directories. Shared entry-bounded file/directory admission permits all 32, rejects
+an extra directory or file with EMFILE, still delivers the existing directory
+contents, and releases open ownership after unmount. This does not retrospectively
+attribute every target EMFILE to the server; preserve client/resource evidence.
+
+**Known progress limitation:** the strict 8192-file/2048-inode flat fixture still
+fails ENOMEM. Its expected full size is 8388608 bytes; explicit ENOMEM is not a
+pass. Invalidation is not a synchronous capacity-release handshake. Both attempted
+pending-PLUS headroom and continuous finite notification batches remained RED and
+were reverted. The three baseline-reproduced native failures documented below
+remain separate; the whole opt-in native suite is not green.
+
+Source-frozen default and all-feature suites each pass 526 active tests with 30
+explicit opt-in ignores across 61 targets. The opt-in directory suite has 15 passes
+and four failures with one/three default-allocator receivers and three
+system-allocator receivers: the strict flat gate plus the three baseline gaps.
+Both all-target denied-warning Clippy configurations, fmt, 16 project Python
+tests, 159 benchmark tests (two native opt-in skips) and the 388-package
+public-source audit pass. These scopes do not establish target traversal,
+completed physical L2 recycling or sustained Go-relative acceptance.
+
+```bash
+timeout 180s cargo +1.99.1 test --locked --test directory_pages --test metrics
+timeout 90s cargo +1.99.1 test --locked --test fuse_directory native_pressure_prefixes_advance_exhausted_pages_without_false_eof -- --ignored --exact --nocapture
+GEESEFS_TEST_FUSE_THREADS=3 timeout 90s cargo +1.99.1 test --locked --test fuse_directory live_directory_handles_use_the_handle_budget_not_request_concurrency -- --ignored --exact --nocapture
+timeout 180s cargo +1.99.1 test --locked --test fuse_directory -- --ignored --test-threads=1
+```
+
+## L2 region observations and mirror selection — 2026-11-12
+
+The existing real-filesystem L2 metrics fixture first fails because the region
+capacity gauge is missing. It then verifies an empty preallocated 16-MiB file has
+only fifteen 1-MiB data regions, one populated writer region consumes its entire
+reservation, and recovery restores occupancy independently of reset I/O counters.
+An empty drain fence can reserve another writer region without writing payload;
+the test distinguishes that reservation from the recovered evictable region.
+Prepared/disabled snapshots omit unavailable region gauges, and repeated scrapes
+do not perform storage/S3 I/O or change ownership.
+
+Real fixed-pool pressure exercises repeated recycling. A gated real-file reclaimer
+shows one in-progress region, then clean reusable capacity after actual completion.
+Removing decrements fails the fifteen-region conservation assertion; dropping the
+reclaiming gauge fails the in-progress assertion. Both fault tests clean up actual
+owners before asserting. Four selected occupancy-arithmetic mutants are reported
+killed; 62 discovered sites are not a whole-file mutation score. The new bridge and
+region exporter have CC at most three; coverage/CRAP remain unmeasured. After
+delegating required no-op trait methods to mixtrics, Dryer finds no candidates at
+score >=0.8 in the two scoped files.
+
+The checked-in mirror regex is parsed through the real CLI. The initial deb/rpm
+policy fails the ISO example; the expanded policy accepts disk-image/archive and
+package examples while rejecting metadata, sidecars, partial names and a matching
+directory with a nonmatching child. This is filename selection, not a size filter.
+
+```bash
+timeout 180s cargo +1.99.1 test --locked --test disk_cache --test disk_cache_metrics --test disk_cache_lazy --test disk_cache_config
+timeout 180s cargo +1.99.1 test --locked --all-features --test disk_cache --test disk_cache_metrics --test disk_cache_lazy --test disk_cache_config
+```
+
+No measured target improvement or complete-object residency follows from these
+fixtures. Distinct-object counts and useful live payload byte totals remain
+unavailable. The ongoing target workload retains its source/configuration until
+its own recorded completion/restart phase.
+
+## FUSE admission backpressure — 2026-11-12
+
+`tests/fuse_admission.rs` mounts disposable real FUSE fixtures. With one request
+slot, an early read reply leaves a gated read-ahead owner active; a second native
+buffered read or safe rustix sendfile requests independently specified L1 bytes.
+Both fail with EIO on the pre-fix adapter and pass with receiver-thread
+backpressure, including one and three fuser receivers. The fixture disables only
+kernel speculative readahead; application read-ahead and its ownership remain on.
+
+Protocol tests use fuser's actual parser/reply owners to check queued lookup
+success, a shared admission/execution deadline on an explicitly driven paused
+current-thread runtime, expired WRITE input cleanup without mutation, O_SYNC
+failure followed by successful fsync recovery, and shutdown queued behind saturated
+admission. DESTROY acknowledgement precedes the filesystem drain hook, so the
+fixture separately joins actual shutdown and rejects extra replies. Existing
+post-reply/deadline/logging checks remain; warning fixtures use real namespace
+EAGAIN conflicts rather than obsolete overload rejection.
+
+The pre-existing early-reply test raced a real 100-ms deadline during a parallel
+full-suite run: its live-owner observation occurred after valid cancellation.
+Keep the deadline and assertions, synchronize on the actual gated tail, then
+advance the paused clock to expiry. This is deterministic cancellation evidence,
+not a latency measurement or an increased timeout.
+
+Three source-addressed fault controls prove sensitivity: changing expiry `>=`
+to `>` admits a WRITE at its deadline; renewing the execution budget after waiting
+violates the total deadline; dropping the permit before job completion violates
+both native ownership assertions. All fail the intended assertions, then the
+correct source is restored. Mutator's selected boundary result is corroborated by
+the explicit assertion log; its 187 discovered sites are not 187 executed tests.
+
+Final source-frozen default and all-feature suites each pass **522 tests**, with
+26 explicit opt-in ignores across 61 targets. Native admission passes separately
+with one/three receivers and with system-allocator features. All-target Clippy
+with denied warnings passes in both configurations, as do fmt, the 16 project
+Python tests, 159 benchmark tests (two native opt-in skips) and the 388-package
+public-source audit. Crapper reports CC5/6/7 for `spawn_traced`/`admit`/`run_job`;
+coverage and CRAP remain N/A. Dryer finds no score >=0.8 candidates in the two
+changed runtime files. The native limitations below remain separate failures.
+
+```bash
+timeout 180s cargo +1.99.1 test --locked --test fuse_admission -- --ignored --test-threads=1
+GEESEFS_TEST_FUSE_THREADS=3 timeout 180s cargo +1.99.1 test --locked --test fuse_admission -- --ignored --test-threads=1
+timeout 180s cargo +1.99.1 test --locked --test fuse_deadline_review --test fuse_lifecycle --test fuse_errors
+timeout 180s cargo +1.99.1 test --locked --test fuse_directory -- --ignored --test-threads=1
+```
+
+**Known native limitation:** on kernel `7.3.1-070301-generic`, the broader directory
+suite has 12 passes and three failures with both one and three receivers. A pristine
+`420f30330a8b69d23241805722cce7cc26c3be72` worktree independently reproduces the
+same three assertions with three receivers:
+
+- `failed_plus_buffer_does_not_transfer_unsent_lookup_references`: unexpected
+  successful directory iteration despite the injected metadata failure;
+- `plus_common_prefixes_preserve_directory_marker_permissions_and_ownership`:
+  zero observed lookup references where one is expected;
+- `plus_pages_deliver_attributes_and_lookup_ownership_without_overlapping_lists`:
+  11 root LIST calls instead of ten.
+
+These checks remain unchanged and failing; this is not a fully passing native
+compatibility suite. No new target deployment or sustained Go/A-A campaign is part
+of this correction. The [HDD checkpoint](target-disk-cache-functional.md) retains
+its historical failures independently of the local admission proof.
+
+## Metadata compaction and persistent L2 — 2026-11-11
+
+Default and system-allocator configurations pass 518 active tests, with 24
+explicit opt-in native/diagnostic entries, plus denied-warning Clippy. Meaningful
+regressions cover canonical/key owner lifetime, COW baseline/conflict handling,
+postcommit metadata credit, stale-size admission, byte-pressure demotion, genuine
+loan revocation and inherited directory-lock release. The allocation matrix uses
+default jemalloc separately; an all-feature run is not that allocator evidence.
+Further real-engine tests cover lazy new-media creation, maximum rounded record
+admission, funded FIFO reads, actual cancelled-worker ownership, namespace/inode
+contention, a parent rename during the wait and a slow missing prefix before warm
+lookups. Independent fault controls fail the intended assertions before restoring
+the reviewed source; successful setup alone is not failure sensitivity.
+Validated disk-backing tests additionally reject redundant fragment writes,
+incorrect retained offsets, invented partial coverage and a blanket disk-origin
+demotion skip. The refill control proves live-index removal and persisted
+readmission; it does not claim physical target-region recycling.
+The combined pipeline overlaps bounded source gaps with healthy disk discovery
+and transfers a decoded payload into its existing reservation without another
+payload copy. Post-WOOF regressions cover an admission-local bounded namespace
+scan after FORGET, finite exhaustion with interleaved admissions, and a recovered
+32-block range whose first disk read times out. Source delivery completes while
+that actual worker retains its slot/output/credit; healthy later lookups still
+receive their own deadline after slow source backpressure. The engine gate exists
+only in test builds. Public synchronous Namespace installation and speculative
+preload finish their own finite scan; async publication remains bounded after
+yielding pre-admission. New regressions first fail for the reproduced defects;
+ten targeted injected faults are rejected before restoring the correct source.
+
+```bash
+timeout 1800s cargo +1.99.1 test --locked --all-targets --no-fail-fast
+timeout 1800s cargo +1.99.1 test --locked --all-targets --all-features --no-fail-fast
+timeout 1800s cargo +1.99.1 clippy --locked --all-targets --all-features -- -D warnings
+timeout 60s cargo +1.99.1 fmt --all -- --check
+timeout 180s python3 -m unittest discover -s bench -p 'test_*.py'
+```
+
+Put the documented Python 3.12 fixture environment on PATH: Rust tests invoke
+Python subprocesses too. The benchmark suite has 161 tests: two require an
+explicit locally verified `GEESEFS_WEED_BINARY` and otherwise skip. The native
+enabled run passes all 161 without skips. The project Python suite has 16 tests.
+Keep the native provider opt-in out of the Rust process environment: its embedded
+Python gate has a separate finite deadline. Run the verified native-enabled Python
+suite standalone. Use an owned disk-backed TMPDIR for real-engine tests rather
+than relying on space in shared tmpfs. The public-source audit checks 388 resolved
+packages, including only the exact approved Foyer fork/revision/package set.
+
+The opt-in disk recovery tests document their isolated ext4 block/inode ENOSPC
+and permission-error command. The mounted harness `bench/disk_cache.py` requires
+frozen binaries/manifest, a delegated cgroup, nginx/rsync and an explicit deadline.
+Measured workloads require `--fixture-weed` for the qualified SeaweedFS 4.51
+fixture; Moto remains functional/fault-only. Declare fixed cycles/bytes/operations
+identically across baseline/candidate/A-A mounts. Capacity preparation is outside
+the measured interval; the later eviction witness probe has separate I/O counters.
+Final source/hash errors invalidate success and exit nonzero while preserving rows.
+Unavailable prerequisites fail rather than count as a successful skip. The
+small-object protocol and 16 corrected large-read/eviction/writer representatives
+pass, but the [earlier full 456-case qualification](performance-disk-cache.md)
+failed. Later source-matched matrices are preserved in the
+[follow-up report](performance-disk-cache-followup.md#combined-pipeline-checkpoint):
+449/456 absolute L2/RAM byte/state passes and 96/96 Rust-relative passes. The
+post-WOOF repairs have correctness verification, not a new paired qualification.
+[Metadata allocation results](performance-metadata-compaction.md) are
+not substituted for that missing performance acceptance.
+
+Final direct-tree quality checks run `crapper --no-coverage` and
+`dryer --threshold 0.8` on the four changed runtime files. Matching source
+coverage is unavailable, so CRAP is N/A; complexity includes `load_disk_range`
+25, `reclaim_batch` 16 and `admit_metadata` 12. Dryer reports three score-1.00
+pairs in the existing namespace operation-marker bookkeeping, not zero
+duplication. `mutator --scan` is discovery only; the ten executed fault
+controls above are separate, source-addressed mutation evidence. Tool success
+does not establish compatibility or performance acceptance.
+
 ## Bounded subtree listing — 2026-11-09 (unreleased)
 
 `tests/subtree_listing.rs` checks a complete small traversal and marker ownership

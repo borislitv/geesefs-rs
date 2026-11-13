@@ -101,9 +101,14 @@ struct Allocation {
     _reservation: Reservation,
     _owner: Option<Reservation>,
     loaned: bool,
+    disk_origin: bool,
 }
 
 impl Reservation {
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.size += other.size;
+        self._permit.merge(other._permit);
+    }
     pub(crate) fn size(&self) -> usize {
         self.size
     }
@@ -147,6 +152,15 @@ impl Reservation {
         }
         Ok(Block::owned(bytes.into(), self))
     }
+
+    /// Transfer an already allocated payload into its exact caller admission.
+    /// The previous owner must retain its work funding until this handoff.
+    pub(crate) fn adopt(self, data: Box<[u8]>) -> Result<Block> {
+        if data.len() != self.size {
+            return Err(Error::Config("reservation length mismatch".into()));
+        }
+        Ok(Block::owned(data, self))
+    }
 }
 
 impl Block {
@@ -158,6 +172,7 @@ impl Block {
                 _reservation: reservation,
                 _owner: None,
                 loaned: false,
+                disk_origin: false,
             }),
             range,
         }
@@ -186,6 +201,32 @@ impl Block {
 
     pub(crate) fn is_loaned(&self) -> bool {
         self.allocation.loaned
+    }
+
+    pub(crate) fn with_disk_origin(mut self) -> Self {
+        Arc::get_mut(&mut self.allocation)
+            .expect("new disk output is exclusively owned")
+            .disk_origin = true;
+        self
+    }
+
+    pub(crate) fn is_disk_origin(&self) -> bool {
+        self.allocation.disk_origin
+    }
+
+    /// Preserve the actual validated disk record's coverage in the cache, not
+    /// just the delivered window. The complete immutable backing and its charge
+    /// already belong to this view; source/assembled outputs cannot be widened.
+    /// Returns the visible window's offset within the retained cache block.
+    pub(crate) fn into_cache_backing(mut self) -> (Self, usize) {
+        let prefix = if self.is_disk_origin() {
+            let prefix = self.range.start;
+            self.range = 0..self.allocation.data.len();
+            prefix
+        } else {
+            0
+        };
+        (self, prefix)
     }
 
     /// Transfer a complete, exclusively cache-owned backing; never add capacity.

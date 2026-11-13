@@ -195,12 +195,46 @@ fn serve(
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = configuration()?;
+    let prepared = config
+        .disk_cache_config()?
+        .map(|disk| {
+            geesefs_rs::disk_cache::PreparedDiskCache::prepare(&disk.directory, disk.max_bytes)
+        })
+        .transpose()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     let store = connect_store(&runtime, &config)?;
     let fs = Filesystem::new(config, store.clone())?;
-    serve(&runtime, fs, store)
+    // Recovery is optional serving work: requests fall back to the source until
+    // the ready adapter is attached. Keep the startup owner for bounded teardown.
+    let attachment = prepared.map(|prepared| {
+        let fs = fs.clone();
+        runtime.spawn(async move {
+            if let Err(error) = fs.attach_disk_cache(prepared).await {
+                eprintln!("disk cache unavailable; using source reads: {error}");
+            }
+        })
+    });
+    let result = serve(&runtime, fs.clone(), store);
+    // Session construction and early serving errors may precede FUSE destroy.
+    // Explicitly close optional storage before tearing down its runtime too.
+    let shutdown = runtime.block_on(fs.shutdown());
+    if let Some(attachment) = attachment {
+        let outcome = runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(120) + fs.config.request_timeout,
+                attachment,
+            )
+            .await
+        });
+        if !matches!(outcome, Ok(Ok(()))) {
+            eprintln!("disk cache startup cleanup exceeded its deadline or failed");
+        }
+    }
+    result?;
+    shutdown?;
+    Ok(())
 }
 
 fn main() -> std::process::ExitCode {

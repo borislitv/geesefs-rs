@@ -4,7 +4,18 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crate::{backend::s3::ObjectHead, budget::Block, config::Config};
+use crate::{
+    backend::{
+        metadata::{CachedMetadata, CachedRemote},
+        s3::ObjectHead,
+    },
+    budget::Block,
+    config::Config,
+};
+use crate::{
+    error::Result,
+    metadata_budget::{LINKS, MetadataBudget, MetadataCharge, head_bytes},
+};
 use fuser::{FileAttr, FileType, INodeNo};
 
 #[derive(Clone)]
@@ -15,20 +26,37 @@ pub struct Extent {
     pub version: u64,
 }
 
-pub struct State {
-    pub key: String,
+#[derive(Default)]
+pub struct WriterState {
     /// Backing object after a known copy, before a retryable rename is published.
-    pub data_key: Option<String>,
-    pub size: u64,
-    pub remote: Option<ObjectHead>,
-    pub visible_remote_size: u64,
+    pub data_key: Option<crate::metadata_budget::SharedKey>,
     pub extents: BTreeMap<u64, Extent>,
-    pub version: u64,
-    pub durable: u64,
-    pub(crate) pending_upload: Option<crate::write::PendingUpload>,
+    pub(crate) pending_upload: Option<std::sync::Arc<crate::write::PendingUpload>>,
     pub truncate_version: u64,
     pub cuts: BTreeMap<u64, u64>,
-    pub metadata: BTreeMap<String, Vec<u8>>,
+    pub rename_target: Option<String>,
+}
+
+// Borrowed reads never allocate, and no mutable reference to this value escapes.
+static EMPTY_WRITER: WriterState = WriterState {
+    data_key: None,
+    extents: BTreeMap::new(),
+    pending_upload: None,
+    truncate_version: 0,
+    cuts: BTreeMap::new(),
+    rename_target: None,
+};
+
+pub struct State {
+    pub(crate) metadata_charge: MetadataCharge,
+    pub key: crate::metadata_budget::SharedKey,
+    pub size: u64,
+    pub remote: Option<CachedRemote>,
+    pub visible_remote_size: u64,
+    pub version: u64,
+    pub durable: u64,
+    pub(crate) writer: Option<Box<WriterState>>,
+    pub metadata: CachedMetadata,
     pub mode: u32,
     pub uid: u32,
     pub gid: u32,
@@ -39,11 +67,133 @@ pub struct State {
     pub opens: u64,
     pub metadata_known: bool,
     pub fetched: std::time::Instant,
-    pub rename_target: Option<String>,
     pub negative_lookups: std::collections::BTreeMap<String, std::time::Instant>,
 }
 
+impl std::ops::Deref for State {
+    type Target = WriterState;
+    fn deref(&self) -> &WriterState {
+        self.writer.as_deref().unwrap_or(&EMPTY_WRITER)
+    }
+}
+
 impl State {
+    /// Admit the backing before exposing mutable writer fields. Preserve any
+    /// earlier prepaid mutation allowance rather than settling it away here.
+    pub(crate) fn writer_mut(&mut self) -> Result<&mut WriterState> {
+        self.writer_mut_with(0)
+    }
+
+    pub(crate) fn writer_mut_with(&mut self, growth: usize) -> Result<&mut WriterState> {
+        if growth == 0 && self.writer.is_some() {
+            return Ok(self.writer.as_deref_mut().unwrap());
+        }
+        if self.metadata_budget().enabled() {
+            let backing = if self.writer.is_none() {
+                std::mem::size_of::<WriterState>()
+            } else {
+                0
+            };
+            self.metadata_charge.resize(
+                self.metadata_charge
+                    .bytes()
+                    .max(self.metadata_bytes().saturating_add(growth))
+                    .saturating_add(backing),
+            )?;
+        }
+        if self.writer.is_none() {
+            self.writer = Some(Box::default());
+        }
+        Ok(self.writer.as_deref_mut().unwrap())
+    }
+
+    pub(crate) fn writer_mut_from(
+        &mut self,
+        credit: &mut MetadataCharge,
+    ) -> Result<&mut WriterState> {
+        if self.writer.is_none() && self.metadata_budget().enabled() {
+            self.metadata_charge.ensure_from(
+                self.metadata_charge
+                    .bytes()
+                    .max(self.metadata_bytes())
+                    .saturating_add(std::mem::size_of::<WriterState>()),
+                credit,
+            )?;
+        }
+        // The backing is now fully admitted, including existing prepaid growth.
+        // Avoid charging it a second time through writer_mut().
+        if self.writer.is_none() {
+            self.writer = Some(Box::default());
+        }
+        Ok(self.writer.as_deref_mut().unwrap())
+    }
+    pub(crate) fn cache_remote_from(
+        &mut self,
+        head: ObjectHead,
+        credit: &mut MetadataCharge,
+    ) -> Result<CachedRemote> {
+        let growth = self
+            .metadata_budget()
+            .estimate(|| Inode::metadata_estimate(&self.key, Some(&head)));
+        self.admit_metadata_from(credit, growth)?;
+        CachedRemote::decode_admitted(head, &self.metadata, &mut self.metadata_charge)
+    }
+    pub(crate) fn admit_metadata_from(
+        &mut self,
+        credit: &mut MetadataCharge,
+        growth: usize,
+    ) -> Result<()> {
+        if !self.metadata_budget().enabled() {
+            return Ok(());
+        }
+        self.metadata_charge
+            .ensure_from(self.metadata_bytes().saturating_add(growth), credit)
+    }
+    pub(crate) fn metadata_budget(&self) -> &MetadataBudget {
+        self.metadata_charge.budget()
+    }
+
+    pub(crate) fn metadata_bytes(&self) -> usize {
+        std::mem::size_of::<Inode>()
+            + 4 * LINKS
+            + self
+                .writer
+                .as_ref()
+                .map_or(0, |_| std::mem::size_of::<WriterState>())
+            + self.rename_target.as_ref().map_or(0, String::capacity)
+            + self
+                .negative_lookups
+                .keys()
+                .map(|key| {
+                    key.capacity() + std::mem::size_of::<(String, std::time::Instant)>() + LINKS
+                })
+                .sum::<usize>()
+            + self.extents.len() * (std::mem::size_of::<(u64, Extent)>() + LINKS)
+            + self.cuts.len() * (std::mem::size_of::<(u64, u64)>() + LINKS)
+    }
+
+    /// Reserve a conservative growth allowance before mutating authoritative state.
+    pub(crate) fn admit_metadata(&mut self, growth: usize) -> Result<()> {
+        if self.metadata_budget().usage().limit.is_none() {
+            return Ok(());
+        }
+        self.metadata_charge
+            .resize(self.metadata_bytes().saturating_add(growth))
+    }
+
+    pub(crate) fn settle_metadata(&mut self) {
+        if self.metadata_budget().usage().limit.is_none() {
+            return;
+        }
+        let bytes = self.metadata_bytes();
+        // Callers admitted all growth before mutation; settlement only releases.
+        debug_assert!(
+            self.metadata_budget().usage().limit.is_none() || bytes <= self.metadata_charge.bytes()
+        );
+        self.metadata_charge
+            .resize(bytes)
+            .expect("admitted metadata mutation");
+    }
     pub(crate) fn can_replace_metadata(&self, observed: std::time::Instant) -> bool {
         !self.deleted
             && self.version == self.durable
@@ -54,13 +204,25 @@ impl State {
 
     /// Replace clean remote metadata without changing the live inode's owners,
     /// local generation counters or separately validated negative lookups.
-    pub(crate) fn replace_metadata(&mut self, mut fresh: Self) {
+    pub(crate) fn replace_metadata(&mut self, mut fresh: Self) -> Result<()> {
+        let negatives = self.metadata_budget().estimate(|| {
+            self.negative_lookups
+                .keys()
+                .map(|key| {
+                    key.capacity() + std::mem::size_of::<(String, std::time::Instant)>() + LINKS
+                })
+                .sum()
+        });
+        fresh.admit_metadata(negatives)?;
         fresh.lookups = self.lookups;
         fresh.opens = self.opens;
+        fresh.key = self.key.clone();
         fresh.version = self.version;
         fresh.durable = self.durable;
         fresh.negative_lookups = std::mem::take(&mut self.negative_lookups);
+        fresh.settle_metadata();
         *self = fresh;
+        Ok(())
     }
 }
 
@@ -98,15 +260,86 @@ impl Inode {
         remote: Option<ObjectHead>,
         config: &Config,
     ) -> Self {
+        Self::try_new(
+            ino,
+            key,
+            directory,
+            remote,
+            config,
+            &MetadataBudget::default(),
+        )
+        .expect("disabled metadata admission")
+    }
+
+    pub(crate) fn try_new(
+        ino: u64,
+        key: String,
+        directory: bool,
+        remote: Option<ObjectHead>,
+        config: &Config,
+        budget: &MetadataBudget,
+    ) -> Result<Self> {
+        let charge = budget.charge_with(|| Self::metadata_estimate(&key, remote.as_ref()))?;
+        Self::new_admitted(ino, key, directory, remote, config, charge)
+    }
+
+    pub(crate) fn metadata_estimate(key: &str, remote: Option<&ObjectHead>) -> usize {
+        // Decode only after admitting an upper bound for decoded strings/tree nodes.
+        let decoded = remote.map_or(0, |head| {
+            head.metadata
+                .iter()
+                .map(|(key, value)| {
+                    2 * (3 * key.len()).max(8).next_power_of_two()
+                        + 2 * value.len().max(8).next_power_of_two()
+                        + std::mem::size_of::<(String, Vec<u8>)>()
+                        + LINKS
+                })
+                .sum::<usize>()
+        });
+        std::mem::size_of::<Inode>()
+            + 256
+            + 4 * LINKS
+            + 3 * key.len()
+            + remote.map_or(0, head_bytes)
+            + decoded
+    }
+
+    pub(crate) fn new_admitted(
+        ino: u64,
+        key: String,
+        directory: bool,
+        remote: Option<ObjectHead>,
+        config: &Config,
+        mut charge: MetadataCharge,
+    ) -> Result<Self> {
+        let Some(head) = remote else {
+            let key = crate::metadata_budget::SharedKey::from_admitted(key, &mut charge)?;
+            return Self::cached_admitted(ino, key, directory, None, None, config, charge);
+        };
+        let last_modified = head.last_modified;
+        let metadata = crate::backend::metadata::decode_metadata(
+            head.metadata.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+        );
+        let metadata = CachedMetadata::from_admitted(metadata, &mut charge)?;
+        let remote = Some(CachedRemote::from_admitted(head, metadata, &mut charge)?);
+        let key = crate::metadata_budget::SharedKey::from_admitted(key, &mut charge)?;
+        Self::cached_admitted(ino, key, directory, remote, last_modified, config, charge)
+    }
+
+    pub(crate) fn cached_admitted(
+        ino: u64,
+        key: crate::metadata_budget::SharedKey,
+        directory: bool,
+        remote: Option<CachedRemote>,
+        last_modified: Option<SystemTime>,
+        config: &Config,
+        mut charge: MetadataCharge,
+    ) -> Result<Self> {
         let size = remote.as_ref().map_or(0, |r| r.size);
-        let metadata = remote
-            .as_ref()
-            .map(|r| {
-                crate::backend::metadata::decode_metadata(
-                    r.metadata.iter().map(|(k, v)| (k.as_str(), v.as_str())),
-                )
-            })
-            .unwrap_or_default();
+        let metadata = match &remote {
+            Some(remote) => remote.metadata.clone(),
+            None => CachedMetadata::from_admitted(BTreeMap::new(), &mut charge)?,
+        };
         let mut mode = if directory {
             libc::S_IFDIR | u32::from(config.dir_mode)
         } else {
@@ -115,7 +348,7 @@ impl Inode {
         let specials = config.specials_enabled();
         if let Some(parsed) = metadata
             .get(&config.mode_attr)
-            .and_then(|b| parse_integer(b))
+            .and_then(parse_integer)
             .and_then(|v| u32::try_from(v).ok())
         {
             if config.enable_perms {
@@ -131,7 +364,7 @@ impl Inode {
         let uid = if config.enable_perms {
             metadata
                 .get(&config.uid_attr)
-                .and_then(|b| parse_integer(b))
+                .and_then(parse_integer)
                 .and_then(|v| u32::try_from(v).ok())
         } else {
             None
@@ -141,7 +374,7 @@ impl Inode {
         let gid = if config.enable_perms {
             metadata
                 .get(&config.gid_attr)
-                .and_then(|b| parse_integer(b))
+                .and_then(parse_integer)
                 .and_then(|v| u32::try_from(v).ok())
         } else {
             None
@@ -151,33 +384,30 @@ impl Inode {
         let mtime = if config.enable_mtime {
             metadata
                 .get(&config.mtime_attr)
-                .and_then(|b| parse_integer(b))
+                .and_then(parse_integer)
                 .and_then(|v| UNIX_EPOCH.checked_add(std::time::Duration::from_secs(v)))
         } else {
             None
         }
-        .or_else(|| remote.as_ref().and_then(|r| r.last_modified))
+        .or(last_modified)
         .unwrap_or_else(SystemTime::now);
         let rdev = metadata
             .get(&config.rdev_attr)
-            .and_then(|b| parse_integer(b))
+            .and_then(parse_integer)
             .and_then(|v| u32::try_from(v).ok())
             .unwrap_or(0);
-        Self {
+        let result = Self {
             ino,
             directory_epoch: AtomicU64::new(0),
             state: Mutex::new(State {
+                metadata_charge: charge,
                 key,
-                data_key: None,
                 size,
                 remote,
                 visible_remote_size: size,
-                extents: BTreeMap::new(),
                 version: 0,
                 durable: 0,
-                pending_upload: None,
-                truncate_version: 0,
-                cuts: BTreeMap::new(),
+                writer: None,
                 metadata,
                 mode,
                 uid,
@@ -189,14 +419,15 @@ impl Inode {
                 opens: 0,
                 metadata_known: true,
                 fetched: std::time::Instant::now(),
-                rename_target: None,
                 negative_lookups: std::collections::BTreeMap::new(),
             }),
             flush: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             preload: tokio::sync::Mutex::new(()),
             pattern: Mutex::new(crate::read::Pattern::default()),
             read_fills: Mutex::new(BTreeMap::new()),
-        }
+        };
+        result.state.lock().unwrap().settle_metadata();
+        Ok(result)
     }
 
     pub fn attr(&self) -> FileAttr {

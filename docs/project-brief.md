@@ -5,9 +5,10 @@
 Implement a Rust replacement for GeeseFS in the separate repository
 `borislitv/geesefs-rs`. BMAD was initially required; the user subsequently made
 its use optional. Keep concise history/reasons in source; retain detailed
-verification evidence in ignored result directories. The primary
-constraint is better memory behavior and faster operation than the Go reference,
-with preserved required behavior. Always look for suitable ready-made Rust
+verification evidence in ignored result directories. The initial primary
+constraint was better memory behavior and faster operation than the Go reference,
+with preserved required behavior. The current operator scope below supersedes
+the Go-relative measurement gates. Always look for suitable ready-made Rust
 crates before implementing a component; in particular, reuse an existing FUSE
 implementation.
 
@@ -16,6 +17,26 @@ acceptance comparisons by the operator on 2026-11-02. Its upstream PR239 was
 closed without merge; native metadata/conditional-response checks also expose
 unequal behavior. Preserve its raw measurements. This does not imply that Go
 cannot be optimized or that Rust automatically improves memory or speed.
+
+## Current operator scope — 2026-11-13
+
+The operator authorized merging the related implementation PRs, publishing the
+next release and updating the existing withdrawn trial reader. Continue its
+functional L2 overflow test and repeat the complete `du` on the same inventory,
+retaining the original cumulative input ceiling, deadline and resource settings.
+Use real files from the existing access-log-derived manifest. Independently check
+current-source/FUSE full hashes for approximately 2% of read events; distinguish
+the remaining complete byte/EOF checks from cryptographic integrity checks.
+
+Go comparisons and new Go/A-A campaigns are no longer requested acceptance gates.
+Retain historical comparisons and failures with their original scope rather than
+promoting them to passes. Report the new reader's total and peak RSS, allocator
+and cgroup/file/kernel memory before, during and after traversal and payload
+tests. Reclaim starts or cumulative traffic alone do not prove completed physical
+region reuse. This scoped release/update authorization does not authorize broader
+rollout, traffic readmission or source-data writes; unresolved compatibility and
+functional failures remain explicit. Earlier statistical gates below are retained
+as the historical measurement contract, not prerequisites for this current task.
 
 ## Target and reference
 
@@ -94,6 +115,16 @@ is accepted; do not require immediate external-create visibility beyond Go's
 behavior. Use the existing explicit Rust negative-cache configuration in read-only
 comparisons. More granular cache TTL controls are future work, not a prerequisite.
 
+Operator disk-cache clarification, 2026-11-11: the scoped deployment has one
+trusted user and accepts ordinary downloaded-copy semantics. Do not add a source
+GET solely to reauthorize KMS access on each L2 hit. Normal namespace, permission
+and object-generation validation remain required; this decision does not promise
+retroactive revocation of already downloaded bytes or multi-tenant isolation.
+Occasional disk-cache slowdowns are accepted. The authorized HDD trial checks
+functionality, persistence and resource use, not superiority over RAM for every
+access pattern. Retain adverse measurements and keep the broader Go-relative
+acceptance decision separate.
+
 ## Working boundaries
 
 Use dedicated disposable fixtures for writes and failure injection. Existing
@@ -111,6 +142,13 @@ These exceptions do not authorize broader rollout or production
 failure injection, and do not close acceptance. The user confirmed
 the public repository: source and reproducible fixtures are public; credentials,
 deployment identities and private operational evidence are not project artifacts.
+
+On 2026-11-11 the operator separately authorized a withdrawn-reader HDD trial with
+a 2-TiB configured payload file, another reader's hourly HTTP log and independent
+rsync/HTTP controls. Existing payload/entry limits remain fixed. Keep raw failures
+and resource observations private, distinguish allocation from populated capacity,
+and verify restart on the existing inventory. Traffic admission must remain
+withdrawn until a separate operator decision, including after cleanup or failure.
 
 Use public upstream code and public crates only. Do not export internal Arcadia
 libraries, translated internal code or internal-only dependencies without
@@ -155,5 +193,8 @@ larger-cache benefit is implied by the implementation.
 [measurement pages](performance.md) preserve exact-source tables and limitations;
 [next work](next-work.md) lists actionable gaps. Short controls, missing/noisy
 observations and a partial native-S3 run do not establish sustained acceptance.
-FUSE io_uring remains an upstream watch; passthrough and disk-backed cache are
-deferred. No single profile proves that all optimization opportunities are exhausted.
+FUSE io_uring remains an upstream watch and passthrough remains deferred. The
+original disk-cache deferral was superseded by the separately authorized
+[persistent-tier work](disk-cache-design.md) and scoped HDD trial above; neither
+closes production acceptance. No single profile proves that all optimization
+opportunities are exhausted.

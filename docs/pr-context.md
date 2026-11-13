@@ -5,6 +5,18 @@ targeting `main`, without auto-merge. Overall status is **UNACCEPTED**. The
 authoritative requirements are [project brief](project-brief.md) and
 [AGENTS.md](../AGENTS.md); detailed execution journals stay in ignored evidence.
 
+## Metadata checkpoint — 2026-11-13
+
+The current metadata correction preserves same-inode xattrs after fsync, admits
+writer backing lazily, and expires directory-page cache owners through Moka's
+supported API. Full official-Rust 1.96 default/all-feature suites each pass 546
+tests. A matched synthetic 100000-name A/A+A/B diagnostic reduces added allocation
+about 17.6% and process RSS about 12%; it does not measure a long-lived served reader
+or establish Go-relative speed. See [exact scopes and remaining gates](testing.md#metadata-backing-and-live-xattrs--2026-11-13).
+The serving-trial and native/FORGET acceptance gaps remain open; no reader update
+or traffic-readmission decision follows from this source checkpoint. Earlier
+dated checkpoints below retain their original verification scope.
+
 ## Current contract
 
 - Linux/S3 readers and writers, with read-only nginx/rsync/golist serving as the

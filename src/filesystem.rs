@@ -22,8 +22,8 @@ use crate::{
 };
 use fuser::{FileAttr, FileType};
 use futures_util::{
-    StreamExt,
-    future::{Either, ready},
+    FutureExt, StreamExt,
+    future::{BoxFuture, Either, Shared, ready},
     stream::FuturesUnordered,
 };
 use tokio::sync::{Notify, RwLock, Semaphore};
@@ -31,35 +31,77 @@ use tokio::sync::{Notify, RwLock, Semaphore};
 pub struct Filesystem {
     pub config: Arc<Config>,
     pub store: Arc<dyn Store>,
-    pub namespace: Mutex<Namespace>,
+    pub namespace: Arc<Mutex<Namespace>>,
     inodes: Arc<crate::namespace::InodeIndex>,
+    kernel_lookup_entries: std::sync::atomic::AtomicU64,
     pub ingress: Budget,
+    metadata: crate::metadata_budget::MetadataBudget,
     data: Budget,
     cache: crate::cache::ReadCache,
+    disk: Arc<Mutex<DiskTier>>,
+    disk_funding_bytes: usize,
+    disk_read_bytes: std::sync::atomic::AtomicU64,
+    disk_decisions: Arc<[std::sync::atomic::AtomicU64; 16]>,
     cache_published: Notify,
     flush_lane: Budget,
     flush_activity: Arc<RwLock<()>>,
     flushers: Arc<Semaphore>,
     upload_admission: write::UploadAdmission,
     metadata_slots: Arc<Semaphore>,
-    directory_pages: moka::sync::Cache<(u64, u64, String, usize), Arc<DirectoryPage>>,
+    directory_pages: moka::sync::Cache<DirectoryPageKey, Arc<DirectoryPage>>,
     subtree_pages: moka::sync::Cache<(u64, String), Arc<SubtreePage>>,
-    preloaded_directories: moka::sync::Cache<u64, std::time::Instant>,
+    preloaded_directories:
+        moka::sync::Cache<u64, Arc<(std::time::Instant, crate::metadata_budget::MetadataCharge)>>,
     closing: AtomicBool,
     read_metrics: crate::metrics::ReadMetrics,
     pub(crate) diagnostics: crate::metrics::Diagnostics,
 }
 
 struct DirectoryPage {
+    metadata_charge: crate::metadata_budget::MetadataCharge,
     fetched: std::time::Instant,
     entries: Vec<DirEntry>,
+}
+
+type DirectoryPageKey = (u64, u64, String, usize);
+
+struct DirectoryPageExpiry {
+    ttl: Duration,
+}
+
+impl moka::Expiry<DirectoryPageKey, Arc<DirectoryPage>> for DirectoryPageExpiry {
+    fn expire_after_create(
+        &self,
+        _key: &DirectoryPageKey,
+        page: &Arc<DirectoryPage>,
+        created_at: Instant,
+    ) -> Option<Duration> {
+        // Freshness starts at LIST/snapshot time, not cache insertion time.
+        Some(
+            self.ttl
+                .saturating_sub(created_at.saturating_duration_since(page.fetched)),
+        )
+    }
+
+    fn expire_after_update(
+        &self,
+        key: &DirectoryPageKey,
+        page: &Arc<DirectoryPage>,
+        updated_at: Instant,
+        _duration_until_expiry: Option<Duration>,
+    ) -> Option<Duration> {
+        // A replacement has its own fetched time; reads retain the deadline
+        // through Expiry's default expire_after_read implementation.
+        self.expire_after_create(key, page, updated_at)
+    }
 }
 
 // One bounded flat response, shared by the complete directories it covers.
 // The namespace epoch invalidates speculative ranges on local name changes.
 struct SubtreePage {
+    _metadata_charge: crate::metadata_budget::MetadataCharge,
     fetched: Instant,
-    page: crate::backend::extended_list::ListPage,
+    objects: Vec<(crate::metadata_budget::SharedKey, DirectoryMetadata)>,
 }
 
 impl DirectoryPage {
@@ -70,25 +112,78 @@ impl DirectoryPage {
         &self.entries[start..]
     }
 
-    fn remainder(&self, after: &str) -> DirectoryRemainder {
-        DirectoryRemainder {
-            entries: self.remaining(after).to_vec(),
+    fn remainder(&self, after: &str) -> Result<DirectoryRemainder> {
+        Ok(DirectoryRemainder {
+            entries: self
+                .remaining(after)
+                .iter()
+                .map(|entry| entry.try_clone(self.metadata_charge.budget()))
+                .collect::<Result<_>>()?,
             next_after: self
                 .entries
                 .last()
-                .map(|entry| entry.name.as_str().max(after).to_owned()),
-        }
+                .map(|entry| {
+                    let name = entry.name.as_str().max(after);
+                    let charge = self.metadata_charge.budget().charge(name.len())?;
+                    Ok(crate::metadata_budget::MetadataString::new(
+                        name.to_owned(),
+                        charge,
+                    ))
+                })
+                .transpose()?,
+            inodes: Vec::new(),
+        })
     }
 }
 
 struct DirectoryMetadata {
+    _metadata_charge: crate::metadata_budget::MetadataCharge,
     directory: bool,
-    head: Option<ObjectHead>,
+    head: Option<crate::backend::metadata::CachedRemote>,
+    last_modified: Option<SystemTime>,
+    key: Option<crate::metadata_budget::SharedKey>,
     known: bool,
     fetched: std::time::Instant,
 }
 
+impl DirectoryMetadata {
+    fn try_clone(
+        &self,
+        budget: &crate::metadata_budget::MetadataBudget,
+        key_len: usize,
+    ) -> Result<Self> {
+        Ok(Self {
+            _metadata_charge: budget.charge(std::mem::size_of::<Self>() + key_len)?,
+            directory: self.directory,
+            head: self.head.clone(),
+            last_modified: self.last_modified,
+            key: self.key.clone(),
+            known: self.known,
+            fetched: self.fetched,
+        })
+    }
+}
+
 type DirectorySelection = BTreeMap<String, DirectoryMetadata>;
+
+fn share_listed_owners(
+    ns: &Namespace,
+    key: &mut crate::metadata_budget::SharedKey,
+    entry: &mut DirectoryMetadata,
+) {
+    if let Some(node) = ns.named(key) {
+        let state = node.state.lock().unwrap();
+        *key = state.key.clone();
+        entry.key = Some(key.clone());
+        if let (Some(cached), Some(listed)) = (&state.remote, &entry.head)
+            && cached.size == listed.size
+            && cached.etag == listed.etag
+            && cached.metadata == listed.metadata
+        {
+            entry.head = Some(cached.clone());
+        }
+    }
+}
 
 struct DirectorySnapshot {
     node: Arc<Inode>,
@@ -101,6 +196,55 @@ fn direct_directory_name(name: &str) -> bool {
     !name.is_empty() && !name.contains('/')
 }
 
+fn same_copy_metadata(expected: &ObjectHead, actual: &ObjectHead) -> bool {
+    let left = &expected.properties;
+    let right = &actual.properties;
+    expected.size == actual.size
+        && expected.metadata == actual.metadata
+        && left.expires == right.expires
+        && [
+            &left.content_type,
+            &left.content_encoding,
+            &left.content_disposition,
+            &left.content_language,
+            &left.cache_control,
+            &left.website_redirect_location,
+        ] == [
+            &right.content_type,
+            &right.content_encoding,
+            &right.content_disposition,
+            &right.content_language,
+            &right.cache_control,
+            &right.website_redirect_location,
+        ]
+}
+
+fn compact_copy_head(head: &mut ObjectHead) {
+    // A response's spare parser capacity is not part of the copied generation.
+    // Normalize it inside the pre-admitted COPY working set before retention.
+    let mut metadata = std::collections::HashMap::with_capacity(head.metadata.len());
+    for (mut key, mut value) in head.metadata.drain() {
+        key.shrink_to_fit();
+        value.shrink_to_fit();
+        metadata.insert(key, value);
+    }
+    head.metadata = metadata;
+    head.etag.shrink_to_fit();
+    for value in [
+        &mut head.properties.content_type,
+        &mut head.properties.content_encoding,
+        &mut head.properties.content_disposition,
+        &mut head.properties.content_language,
+        &mut head.properties.cache_control,
+        &mut head.properties.website_redirect_location,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        value.shrink_to_fit();
+    }
+}
+
 fn trim_directory_selection(selected: &mut DirectorySelection, limit: usize) {
     if selected.len() > limit {
         selected.pop_last();
@@ -108,49 +252,87 @@ fn trim_directory_selection(selected: &mut DirectorySelection, limit: usize) {
 }
 
 fn listed_object(
-    object: crate::backend::extended_list::ListedObject,
+    mut object: crate::backend::extended_list::ListedObject,
     fetched: std::time::Instant,
-) -> (String, DirectoryMetadata) {
+    budget: &crate::metadata_budget::MetadataBudget,
+) -> Result<(crate::metadata_budget::SharedKey, DirectoryMetadata)> {
+    let mut charge = budget.charge_with(|| {
+        std::mem::size_of::<DirectoryMetadata>()
+            + 2 * object.key.capacity()
+            + std::mem::size_of::<ObjectHead>()
+            + 256
+            + object.etag.as_ref().map_or(0, String::capacity)
+            + object
+                .metadata
+                .as_ref()
+                .map_or(0, crate::metadata_budget::encoding_bytes)
+    })?;
     let known =
         object.metadata.is_some() && object.etag.as_ref().is_some_and(|etag| !etag.is_empty());
-    let metadata = object
-        .metadata
-        .and_then(|metadata| crate::backend::metadata::encode_metadata(&metadata).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
+    let metadata = crate::backend::metadata::CachedMetadata::from_admitted(
+        object.metadata.unwrap_or_default(),
+        &mut charge,
+    )?;
     let head = ObjectHead {
         size: object.size,
         etag: object.etag.unwrap_or_default(),
-        metadata,
         last_modified: object
             .last_modified
             .and_then(|date| SystemTime::try_from(date).ok()),
         ..Default::default()
     };
     let directory = object.key.ends_with('/');
-    (
-        object.key,
+    object.key.truncate(object.key.trim_end_matches('/').len());
+    let head = crate::backend::metadata::CachedRemote::from_admitted(head, metadata, &mut charge)?;
+    let key_len = object.key.len();
+    let key = crate::metadata_budget::SharedKey::from_admitted(object.key, &mut charge)?;
+    charge.resize(budget.estimate(|| {
+        std::mem::size_of::<DirectoryMetadata>() + key_len + crate::metadata_budget::LINKS
+    }))?;
+    Ok((
+        key.clone(),
         DirectoryMetadata {
+            _metadata_charge: charge,
             directory,
             head: Some(head),
+            key: Some(key),
+            last_modified: object
+                .last_modified
+                .and_then(|date| SystemTime::try_from(date).ok()),
             known,
             fetched,
         },
-    )
+    ))
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct DirEntry {
     pub ino: u64,
-    pub name: String,
+    pub name: crate::metadata_budget::MetadataString,
     pub kind: FileType,
+}
+
+impl DirEntry {
+    fn try_clone(&self, budget: &crate::metadata_budget::MetadataBudget) -> Result<Self> {
+        let charge = budget.charge(4 * std::mem::size_of::<Self>() + self.name.len())?;
+        Ok(Self {
+            ino: self.ino,
+            name: crate::metadata_budget::MetadataString::new(
+                self.name.as_str().to_owned(),
+                charge,
+            ),
+            kind: self.kind,
+        })
+    }
 }
 
 pub struct DirectoryRemainder {
     pub entries: Vec<DirEntry>,
     /// An exhausted page still advances; only a backend EOF has no next name.
-    pub next_after: Option<String>,
+    pub next_after: Option<crate::metadata_budget::MetadataString>,
+    // Only the active remainder owns its pending inodes. Cached pages keep
+    // numeric identities, so consuming a frame never pins a TTL's whole tree.
+    inodes: Vec<Arc<Inode>>,
 }
 
 /// An open file retains its inode until the last admitted user releases it.
@@ -205,6 +387,10 @@ impl Drop for OpenFile {
 pub struct EffectiveBudgets {
     pub payload_limit_bytes: usize,
     pub data_shared_bytes: usize,
+    pub disk_cache_funding_bytes: usize,
+    /// Upper bound including revocable idle flush loans. With Ready L2,
+    /// selected victims demote before loans, so selected residency may exclude
+    /// that lane even though this shared policy upper bound is unchanged.
     pub read_cache_policy_bytes: usize,
     pub read_cache_loaned_bytes: usize,
     pub ingress_bytes: usize,
@@ -232,6 +418,27 @@ pub struct EffectiveBudgets {
     pub max_queued_upload_jobs: usize,
     pub max_metadata_resolution_jobs: usize,
     pub metadata_resolution_jobs_in_use: usize,
+}
+
+type DiskStartup = Shared<BoxFuture<'static, std::result::Result<(), Arc<str>>>>;
+
+struct DiskTier {
+    namespace: Option<[u8; 32]>,
+    bypass: Option<crate::backend::cache_scope::CacheBypass>,
+    status: Option<crate::disk_cache::DiskCacheStatus>,
+    cache: Option<crate::disk_cache::DiskCache>,
+    attaching: bool,
+    deferred: Option<crate::disk_cache::FundedPreparedDiskCache>,
+    startup: Option<DiskStartup>,
+    closing: bool,
+}
+
+impl Drop for DiskTier {
+    fn drop(&mut self) {
+        if let Some(deferred) = self.deferred.take() {
+            deferred.close();
+        }
+    }
 }
 
 pub fn not_found(error: &Error) -> bool {
@@ -264,6 +471,7 @@ impl Filesystem {
         let cache = self.cache.try_stats();
         crate::metrics::Snapshot {
             namespace,
+            kernel_lookup_entries: self.kernel_lookup_entries.load(Ordering::Relaxed),
             cache,
             entry_limit: self.config.entry_limit,
             lanes: [
@@ -276,15 +484,34 @@ impl Filesystem {
     }
 
     pub fn effective_budgets(&self) -> EffectiveBudgets {
-        let window = self
+        let mut window = self
             .data
             .limit()
+            .saturating_sub(self.disk_funding_bytes)
             .saturating_sub(MAX_IO)
             .min(u32::MAX as usize - MAX_IO);
+        if self.disk_funding_bytes > 0 {
+            // Source/disk output plus caller-funded queue bookkeeping, including
+            // alignment at both ends. Reserve the fixed gap-pipeline pool from
+            // this same data ceiling, not by increasing payload or L2 funding.
+            let block = read::READ_BLOCK_BYTES;
+            let wait = crate::disk_cache::READ_WAIT_BYTES;
+            let without_pipeline =
+                window.saturating_sub(2 * (block + wait)) / (2 * block + wait) * block;
+            window = window
+                .saturating_sub(
+                    self.disk_gap_pipeline_bytes(without_pipeline.saturating_add(2 * block)),
+                )
+                .saturating_sub(2 * (block + wait))
+                / (2 * block + wait)
+                * block;
+        }
         EffectiveBudgets {
             payload_limit_bytes: self.ingress.limit() + self.data.limit() + self.flush_lane.limit(),
             data_shared_bytes: self.data.limit(),
-            read_cache_policy_bytes: self.data.limit() + self.flush_lane.limit(),
+            disk_cache_funding_bytes: self.disk_funding_bytes,
+            read_cache_policy_bytes: self.data.limit() + self.flush_lane.limit()
+                - self.disk_funding_bytes,
             read_cache_loaned_bytes: self.cache.loaned_bytes(),
             ingress_bytes: self.ingress.limit(),
             flush_bytes: self.flush_lane.limit(),
@@ -296,7 +523,13 @@ impl Filesystem {
             requested_large_window_bytes: self.config.read_ahead_large * 1024,
             max_effective_window_bytes: window,
             max_overlay_window_bytes: window / 2,
-            read_parallel_chunk_bytes: (self.config.read_ahead_parallel * 1024).min(window),
+            read_parallel_chunk_bytes: (self.config.read_ahead_parallel * 1024)
+                .max(if self.disk_funding_bytes > 0 {
+                    read::READ_BLOCK_BYTES
+                } else {
+                    1
+                })
+                .min(window),
             upload_chunk_bytes: crate::upload_body::CHUNK_SIZE,
             max_read_tasks_per_window: self.config.max_requests,
             max_request_tasks: self.config.max_requests,
@@ -313,6 +546,588 @@ impl Filesystem {
             metadata_resolution_jobs_in_use: self.config.max_requests
                 - self.metadata_slots.available_permits(),
         }
+    }
+
+    fn disk_gap_pipeline_bytes(&self, coverage: usize) -> usize {
+        // L2 chunks end on block boundaries and are at least one block apart.
+        // A small window cannot instantiate every configured request slot.
+        self.config
+            .max_requests
+            .min(coverage.div_ceil(read::READ_BLOCK_BYTES))
+            * read::GAP_PIPELINE_BYTES
+    }
+
+    pub fn metadata_usage(&self) -> crate::metadata_budget::MetadataUsage {
+        self.metadata.usage()
+    }
+
+    pub fn disk_cache_stats(&self) -> Option<crate::disk_cache::Stats> {
+        self.disk
+            .lock()
+            .unwrap()
+            .cache
+            .as_ref()
+            .map(|cache| cache.stats())
+    }
+
+    /// Validated L2 bytes delivered into the read pipeline, including read-ahead.
+    pub fn disk_cache_read_bytes(&self) -> u64 {
+        self.disk_read_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Configured deduction from L1, including during recovery/bypass. Actual
+    /// ownership is also visible in the shared data lane's used-byte counter.
+    pub fn disk_cache_funding(&self) -> Option<crate::disk_cache::Funding> {
+        if self.disk_funding_bytes == 0 {
+            return None;
+        }
+        crate::disk_cache::Funding::derive(self.config.disk_cache_max_size?, self.data.limit()).ok()
+    }
+
+    pub fn disk_cache_state(&self) -> Option<crate::disk_cache::State> {
+        let disk = self.disk.lock().unwrap();
+        self.config.disk_cache_dir.as_ref()?;
+        Some(disk.status.as_ref().map_or(
+            if disk.bypass.is_some() {
+                crate::disk_cache::State::Bypass
+            } else {
+                crate::disk_cache::State::Prepared
+            },
+            |status| status.state(),
+        ))
+    }
+
+    pub fn disk_cache_bypass_reason(&self) -> Option<crate::backend::cache_scope::CacheBypass> {
+        self.disk.lock().unwrap().bypass
+    }
+
+    /// Explicit startup step: prepare/lock the directory before backend startup,
+    /// then attach only after the backend has established its persistent scope.
+    /// Recovery is owned independently of caller cancellation; requests fall back
+    /// while it runs, and a concurrent shutdown closes rather than installs it.
+    pub async fn attach_disk_cache(
+        self: &Arc<Self>,
+        prepared: crate::disk_cache::PreparedDiskCache,
+    ) -> Result<()> {
+        let startup = {
+            let mut disk = self.disk.lock().unwrap();
+            if self.config.disk_cache_dir.is_none() || disk.attaching || self.is_closing() {
+                return Err(Error::Config(
+                    "invalid or repeated disk cache attachment".into(),
+                ));
+            }
+            disk.attaching = true;
+            if let Some(reason) = disk.bypass {
+                eprintln!("disk cache bypass: {reason:?}");
+                return Ok(());
+            }
+            let funding = prepared.funding(self.data.limit())?;
+            if funding.required_bytes != self.disk_funding_bytes
+                || Some(funding.capacity as u64) != self.config.disk_cache_max_size
+            {
+                return Err(Error::Config(
+                    "disk cache preparation does not match configuration".into(),
+                ));
+            }
+            disk.status = Some(prepared.status());
+            let funded = prepared.fund(&self.data)?;
+            if !funded.has_inventory() {
+                disk.deferred = Some(funded);
+                return Ok(());
+            }
+            self.start_disk_cache(&mut disk, funded)
+        };
+        startup
+            .await
+            .map_err(|error| Error::Config(error.to_string()))
+    }
+
+    fn start_disk_cache(
+        &self,
+        disk: &mut DiskTier,
+        funded: crate::disk_cache::FundedPreparedDiskCache,
+    ) -> DiskStartup {
+        let owner = self.disk.clone();
+        let deadline = self.config.request_timeout;
+        // Spawn now, not when a waiter polls the shared completion. No victim,
+        // loan or payload backing is retained by this single startup owner.
+        let task = tokio::spawn(async move {
+            let cache = crate::disk_cache::DiskCache::open_funded(funded)
+                .await
+                .map_err(|error| Arc::<str>::from(error.to_string()))?;
+            let closing = {
+                let mut disk = owner.lock().unwrap();
+                if disk.closing {
+                    true
+                } else {
+                    disk.cache = Some(cache.clone());
+                    false
+                }
+            };
+            if closing {
+                cache
+                    .close(deadline)
+                    .await
+                    .map_err(|error| Arc::<str>::from(error.to_string()))?;
+            }
+            Ok(())
+        });
+        let startup = async move {
+            task.await
+                .map_err(|error| Arc::<str>::from(error.to_string()))?
+        }
+        .boxed()
+        .shared();
+        disk.startup = Some(startup.clone());
+        startup
+    }
+
+    fn start_disk_for_capacity(&self, node: &Inode, generation: u64) {
+        let deferred = self.disk.lock().unwrap().deferred.is_some();
+        if !deferred || !self.disk_eligible(node, generation) {
+            return;
+        }
+        let mut disk = self.disk.lock().unwrap();
+        if !disk.closing
+            && let Some(funded) = disk.deferred.take()
+        {
+            drop(self.start_disk_cache(&mut disk, funded));
+        }
+    }
+
+    pub async fn drain_disk_cache(&self, deadline: Duration) -> Result<()> {
+        let startup = self.disk.lock().unwrap().startup.clone();
+        tokio::time::timeout(deadline, async {
+            if let Some(startup) = startup {
+                startup
+                    .await
+                    .map_err(|error| Error::Config(error.to_string()))?;
+            }
+            let cache = self.disk.lock().unwrap().cache.clone();
+            if let Some(cache) = cache {
+                cache.drain(deadline).await?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| Error::Timeout("L2 drain"))?
+    }
+
+    fn disk_read(&self, node: &Inode, generation: u64) -> Option<read::DiskRead> {
+        let (cache, namespace) = {
+            let disk = self.disk.lock().unwrap();
+            (disk.cache.clone()?, disk.namespace?)
+        };
+        self.disk_eligible(node, generation)
+            .then_some(read::DiskRead { cache, namespace })
+    }
+
+    fn disk_eligible(&self, node: &Inode, generation: u64) -> bool {
+        self.check_disk_eligible(node, generation).is_ok()
+    }
+
+    pub fn disk_read_decisions(&self) -> [u64; 16] {
+        std::array::from_fn(|index| self.disk_decisions[index].load(Ordering::Relaxed))
+    }
+
+    fn record_disk_decision(&self, reason: read::DiskDecision) {
+        self.disk_decisions[reason as usize].fetch_add(1, Ordering::Relaxed);
+        if let Some(trace) = metrics::context() {
+            trace.debug(
+                "l2_read_eligibility",
+                || serde_json::json!({"reason": reason.label()}),
+            );
+        }
+    }
+
+    async fn disk_read_window(
+        &self,
+        node: Arc<Inode>,
+        generation: u64,
+        snapshot: Arc<write::Snapshot>,
+        charge: &mut crate::budget::Reservation,
+        deadline: tokio::time::Instant,
+    ) -> Option<read::DiskRead> {
+        if self.is_closing() {
+            self.record_disk_decision(read::DiskDecision::Closing);
+            return None;
+        }
+        let (cache, namespace) = {
+            let disk = self.disk.lock().unwrap();
+            let Some(cache) = disk.cache.clone() else {
+                self.record_disk_decision(read::DiskDecision::Unavailable);
+                return None;
+            };
+            let Some(namespace) = disk.namespace else {
+                self.record_disk_decision(read::DiskDecision::NamespaceIdentity);
+                return None;
+            };
+            (cache, namespace)
+        };
+        // Borrow one existing per-block bookkeeping credit for qualification.
+        // Only four funded read-work owners can enter the blocking executor;
+        // the remaining windows wait key-free on the existing FIFO semaphore.
+        let slot = match cache
+            .read_admission(
+                charge.split(crate::disk_cache::READ_WAIT_BYTES),
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+            )
+            .await
+        {
+            Ok(slot) => slot,
+            Err(reason) => {
+                self.record_disk_decision(read::DiskDecision::Admission);
+                read::debug_disk_fallback(&cache, reason);
+                return None;
+            }
+        };
+        let ns = self.namespace.clone();
+        let config = self.config.clone();
+        let counts = self.disk_decisions.clone();
+        let trace = metrics::context();
+        let qualified = slot
+            .qualify(move || {
+                let record = |reason: read::DiskDecision| {
+                    counts[reason as usize].fetch_add(1, Ordering::Relaxed);
+                    if let Some(trace) = &trace {
+                        trace.debug(
+                            "l2_read_eligibility",
+                            || serde_json::json!({"reason": reason.label()}),
+                        );
+                    }
+                };
+                // No namespace guard is held while waiting for an inode, and no
+                // guard escapes into disk/source I/O. The canonical snapshot remains
+                // charged to its original metadata owner; no identity Vec is made.
+                let check_namespace = || {
+                    let ns = match ns.try_lock() {
+                        Ok(ns) => ns,
+                        Err(std::sync::TryLockError::WouldBlock) => {
+                            record(read::DiskDecision::NamespaceContended);
+                            ns.lock().map_err(|_| read::DiskDecision::LockPoisoned)?
+                        }
+                        Err(_) => return Err(read::DiskDecision::LockPoisoned),
+                    };
+                    Self::check_disk_namespace(&ns, &snapshot.key)
+                };
+                check_namespace()?;
+                let state = match node.state.try_lock() {
+                    Ok(state) => state,
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        record(read::DiskDecision::InodeContended);
+                        node.state
+                            .lock()
+                            .map_err(|_| read::DiskDecision::LockPoisoned)?
+                    }
+                    Err(_) => return Err(read::DiskDecision::LockPoisoned),
+                };
+                Self::check_disk_state(&config, &state, generation)?;
+                if state.key != snapshot.key || state.size != snapshot.size {
+                    return Err(read::DiskDecision::Generation);
+                }
+                drop(state);
+                // A parent MoveLease can begin while the child inode is held.
+                // Revalidate names after that wait, without nesting the locks.
+                check_namespace()
+            })
+            .await;
+        match qualified {
+            Ok((slot, decision)) => {
+                charge.merge(slot.release_credit());
+                self.record_disk_decision(match decision {
+                    Ok(()) => read::DiskDecision::Eligible,
+                    Err(reason) => reason,
+                });
+                decision.ok().map(|()| read::DiskRead { cache, namespace })
+            }
+            Err(reason) => {
+                // Actual blocked work retains its credit. Source output was
+                // independently admitted and does not reclaim that live owner.
+                self.record_disk_decision(read::DiskDecision::Admission);
+                read::debug_disk_fallback(&cache, reason);
+                None
+            }
+        }
+    }
+
+    fn check_disk_eligible(
+        &self,
+        node: &Inode,
+        generation: u64,
+    ) -> std::result::Result<(), read::DiskDecision> {
+        if self.is_closing() {
+            return Err(read::DiskDecision::Closing);
+        }
+        // Optional work never waits for namespace/inode ownership. In particular
+        // capacity eviction cannot hold up a FIFO reader or a writer's loan.
+        let ns = self
+            .namespace
+            .try_lock()
+            .map_err(|_| read::DiskDecision::NamespaceContended)?;
+        let state = node
+            .state
+            .try_lock()
+            .map_err(|_| read::DiskDecision::InodeContended)?;
+        Self::check_disk_state(&self.config, &state, generation)?;
+        Self::check_disk_namespace(&ns, &state.key)
+    }
+
+    fn check_disk_state(
+        config: &Config,
+        state: &State,
+        generation: u64,
+    ) -> std::result::Result<(), read::DiskDecision> {
+        if state.deleted {
+            return Err(read::DiskDecision::Deleted);
+        }
+        if state.version != state.durable
+            || !state.extents.is_empty()
+            || state.visible_remote_size < state.size
+        {
+            return Err(read::DiskDecision::Dirty);
+        }
+        if state.pending_upload.is_some()
+            || state.rename_target.is_some()
+            || state.data_key.is_some()
+        {
+            return Err(read::DiskDecision::Pending);
+        }
+        if file_type(state.mode) != FileType::RegularFile {
+            return Err(read::DiskDecision::NotRegular);
+        }
+        if state
+            .remote
+            .as_ref()
+            .is_none_or(|head| head.size != state.size || head.etag.is_empty())
+        {
+            return Err(read::DiskDecision::RemoteIdentity);
+        }
+        if read::generation(state.version, state.remote.as_ref()) != generation {
+            return Err(read::DiskDecision::Generation);
+        }
+        if !config
+            .disk_cache_regex
+            .as_ref()
+            .is_some_and(|regex| regex.matches(&format!("/{}", state.key)))
+        {
+            return Err(read::DiskDecision::Excluded);
+        }
+        Ok(())
+    }
+
+    fn check_disk_namespace(
+        ns: &Namespace,
+        key: &str,
+    ) -> std::result::Result<(), read::DiskDecision> {
+        if key
+            .match_indices('/')
+            .map(|(end, _)| end)
+            .chain(std::iter::once(key.len()))
+            .any(|end| {
+                let prefix = &key[..end];
+                ns.moving.contains(prefix)
+                    || ns.pending_moves.contains_key(prefix)
+                    || ns.pending_deletes.contains_key(prefix)
+                    || ns.tombstones.contains_key(prefix)
+            })
+        {
+            return Err(read::DiskDecision::Pending);
+        }
+        Ok(())
+    }
+
+    fn demote_capacity(&self, victim: crate::cache::CapacityVictim) {
+        if victim.block.is_loaned() {
+            return;
+        }
+        let Ok(node) = self.node(victim.inode) else {
+            return;
+        };
+        self.start_disk_for_capacity(&node, victim.generation);
+        let Some(disk) = self.disk_read(&node, victim.generation) else {
+            return;
+        };
+        let mut relative = 0;
+        while relative < victim.block.as_slice().len() {
+            let at = victim.offset + relative as u64;
+            let key = {
+                let Ok(state) = node.state.try_lock() else {
+                    return;
+                };
+                if state.deleted
+                    || state.version != state.durable
+                    || state.rename_target.is_some()
+                    || read::generation(state.version, state.remote.as_ref()) != victim.generation
+                {
+                    return;
+                }
+                let Some(head) = &state.remote else {
+                    return;
+                };
+                let amount = (read::block_end(at, state.size).saturating_sub(at) as usize)
+                    .min(victim.block.as_slice().len() - relative);
+                crate::disk_cache::DiskKey::new(
+                    &disk.namespace,
+                    state.key.as_bytes(),
+                    head.etag.as_bytes(),
+                    state.size,
+                    at,
+                    amount,
+                )
+                .ok()
+            };
+            let Some(key) = key else {
+                return;
+            };
+            let end = relative + key.covered_len();
+            // No cache/inode/namespace lock and no await while copying. Adapter
+            // owns only its admitted visible copy, never this full L1 backing.
+            disk.cache
+                .try_demote(key, victim.block.slice(relative..end));
+            relative = end;
+        }
+    }
+
+    fn evict_cache(&self) -> bool {
+        let Some(victim) = self.cache.capacity_victim() else {
+            return false;
+        };
+        self.demote_capacity(victim);
+        true
+    }
+
+    fn touch_disk_hit(&self, node: &Inode, generation: u64, offset: u64, length: usize) {
+        let Some(disk) = self.disk_read(node, generation) else {
+            return;
+        };
+        let mut next = offset;
+        while next < offset.saturating_add(length as u64) {
+            let Some((start, len)) = self.cache.span_at(node.ino, generation, next) else {
+                break;
+            };
+            let block_start = next / read::READ_BLOCK_BYTES as u64 * read::READ_BLOCK_BYTES as u64;
+            let at = block_start.max(start);
+            let (full, fragment) = {
+                let Ok(state) = node.state.try_lock() else {
+                    return;
+                };
+                let Some(head) = &state.remote else {
+                    return;
+                };
+                if read::generation(state.version, state.remote.as_ref()) != generation {
+                    return;
+                }
+                let end = read::block_end(at, state.size).min(start.saturating_add(len as u64));
+                let fragment = crate::disk_cache::DiskKey::new(
+                    &disk.namespace,
+                    state.key.as_bytes(),
+                    head.etag.as_bytes(),
+                    state.size,
+                    at,
+                    (end - at) as usize,
+                )
+                .ok();
+                let full_end = read::block_end(block_start, state.size);
+                let full = (at != block_start || end != full_end)
+                    .then(|| {
+                        crate::disk_cache::DiskKey::new(
+                            &disk.namespace,
+                            state.key.as_bytes(),
+                            head.etag.as_bytes(),
+                            state.size,
+                            block_start,
+                            (full_end - block_start) as usize,
+                        )
+                        .ok()
+                    })
+                    .flatten();
+                (full, fragment)
+            };
+            let Some(key) = fragment else {
+                return;
+            };
+            next = key.offset() + key.covered_len() as u64;
+            if !full
+                .as_ref()
+                .is_some_and(|full| disk.cache.touch_validated(full))
+            {
+                disk.cache.touch_validated(&key);
+            }
+        }
+    }
+    pub(crate) fn charge_metadata(
+        &self,
+        bytes: usize,
+    ) -> Result<crate::metadata_budget::MetadataCharge> {
+        self.metadata.charge(bytes)
+    }
+    pub(crate) fn metadata_enabled(&self) -> bool {
+        self.metadata.enabled()
+    }
+
+    async fn admit_metadata(
+        &self,
+        bytes: usize,
+        new_inode: bool,
+    ) -> Result<crate::metadata_budget::MetadataCharge> {
+        let mut cleared = false;
+        let mut reclaim_scan = crate::namespace::ReclaimScan::default();
+        let deadline = Instant::now() + self.config.request_timeout;
+        loop {
+            if Instant::now() >= deadline {
+                return Err(Error::Timeout("metadata admission"));
+            }
+            let byte_pressure = match self.try_charge_metadata(bytes, new_inode) {
+                Ok(Some(charge)) => return Ok(charge),
+                Ok(None) => false,
+                Err(_) => true,
+            };
+            // Count-only reclamation must retain cached listing backings. Drop
+            // them only when their byte charges actually prevent admission.
+            if !cleared && byte_pressure {
+                self.directory_pages.invalidate_all();
+                self.subtree_pages.invalidate_all();
+                self.preloaded_directories.invalidate_all();
+                self.directory_pages.run_pending_tasks();
+                self.subtree_pages.run_pending_tasks();
+                self.preloaded_directories.run_pending_tasks();
+                cleared = true;
+                continue;
+            }
+            let reclaimed = self.reclaim_metadata(&mut reclaim_scan, new_inode);
+            match reclaimed {
+                crate::namespace::Reclaim::Exhausted => return Err(Error::Fs(libc::ENOMEM)),
+                crate::namespace::Reclaim::More | crate::namespace::Reclaim::Removed => {
+                    tokio::task::yield_now().await
+                }
+            }
+        }
+    }
+
+    fn try_charge_metadata(
+        &self,
+        bytes: usize,
+        new_inode: bool,
+    ) -> Result<Option<crate::metadata_budget::MetadataCharge>> {
+        let charge = self.metadata.charge(bytes)?;
+        if new_inode && self.lock_namespace().count_full() {
+            return Ok(None);
+        }
+        Ok(Some(charge))
+    }
+
+    fn reclaim_metadata(
+        &self,
+        scan: &mut crate::namespace::ReclaimScan,
+        new_inode: bool,
+    ) -> crate::namespace::Reclaim {
+        let mut ns = self.lock_namespace();
+        let reclaimed = ns.reclaim_batch(scan);
+        if matches!(reclaimed, crate::namespace::Reclaim::Exhausted) && new_inode && ns.count_full()
+        {
+            ns.capacity_failures += 1;
+        }
+        reclaimed
     }
     // A failed/cancelled directory move may already have drained source keys.
     // Keep mutators from resurrecting them until that bounded move is retried.
@@ -333,8 +1148,26 @@ impl Filesystem {
             ingress_bytes,
             flush_bytes,
         } = config.payload_budgets()?;
+        let disk_config = config.disk_cache_config()?;
+        let scope = if disk_config.is_some() {
+            Some(store.persistent_cache_scope()?)
+        } else {
+            None
+        };
+        let disk_namespace = scope.and_then(|scope| scope.namespace());
+        let bypass = match scope {
+            Some(crate::backend::cache_scope::CacheScope::Bypass(reason)) => Some(reason),
+            _ => None,
+        };
+        let disk_funding_bytes = if disk_namespace.is_some() {
+            crate::disk_cache::Funding::derive(disk_config.as_ref().unwrap().max_bytes, data_bytes)?
+                .required_bytes
+        } else {
+            0
+        };
         let config = Arc::new(config);
-        let root = Inode::new(1, "".into(), true, None, &config);
+        let metadata = crate::metadata_budget::MetadataBudget::new(config.metadata_limit)?;
+        let root = Inode::try_new(1, "".into(), true, None, &config, &metadata)?;
         root.state.lock().unwrap().lookups = 1;
         let namespace = Namespace::new(root, config.entry_limit as usize);
         let diagnostics = store
@@ -348,11 +1181,28 @@ impl Filesystem {
             });
         Ok(Arc::new(Self {
             inodes: namespace.inodes.clone(),
-            namespace: Mutex::new(namespace),
+            kernel_lookup_entries: std::sync::atomic::AtomicU64::new(1),
+            namespace: Arc::new(Mutex::new(namespace)),
             ingress: Budget::new(ingress_bytes)?,
+            metadata,
             data: Budget::new(data_bytes)?,
+            disk: Arc::new(Mutex::new(DiskTier {
+                namespace: disk_namespace,
+                bypass,
+                status: None,
+                cache: None,
+                attaching: false,
+                deferred: None,
+                startup: None,
+                closing: false,
+            })),
+            disk_funding_bytes,
+            disk_read_bytes: std::sync::atomic::AtomicU64::new(0),
+            disk_decisions: Arc::new(std::array::from_fn(|_| {
+                std::sync::atomic::AtomicU64::new(0)
+            })),
             cache: crate::cache::ReadCache::with_entry_limit(
-                (data_bytes + flush_bytes) as u64,
+                (data_bytes + flush_bytes - disk_funding_bytes) as u64,
                 config.entry_limit as usize,
             ),
             cache_published: Notify::new(),
@@ -364,10 +1214,13 @@ impl Filesystem {
             directory_pages: moka::sync::Cache::builder()
                 .max_capacity(config.entry_limit)
                 .weigher(|_, page: &Arc<DirectoryPage>| page.entries.len().max(1) as u32)
+                .expire_after(DirectoryPageExpiry {
+                    ttl: config.stat_cache_ttl,
+                })
                 .build(),
             subtree_pages: moka::sync::Cache::builder()
                 .max_capacity(config.entry_limit)
-                .weigher(|_, page: &Arc<SubtreePage>| page.page.objects.len().max(1) as u32)
+                .weigher(|_, page: &Arc<SubtreePage>| page.objects.len().max(1) as u32)
                 .time_to_live(config.stat_cache_ttl.max(Duration::from_nanos(1)))
                 .build(),
             preloaded_directories: moka::sync::Cache::new(config.entry_limit),
@@ -514,6 +1367,16 @@ impl Filesystem {
             }
             Err(error) => return Err(error),
         };
+        let charge = self
+            .admit_metadata(
+                if self.metadata.enabled() {
+                    Inode::metadata_estimate(&key, head.as_ref())
+                } else {
+                    0
+                },
+                observed.is_none(),
+            )
+            .await?;
         let mut ns = self.lock_namespace();
         {
             let parent = ns.get(parent)?;
@@ -526,10 +1389,11 @@ impl Filesystem {
             return Err(self.again("lookup_binding_busy"));
         }
         if let Some(node) = ns.named(&key) {
-            let mut fresh = Inode::new(node.ino, key.clone(), directory, head, &self.config)
-                .state
-                .into_inner()
-                .unwrap();
+            let mut fresh =
+                Inode::new_admitted(node.ino, key.clone(), directory, head, &self.config, charge)?
+                    .state
+                    .into_inner()
+                    .unwrap();
             fresh.fetched = started;
             let mut state = node.state.lock().unwrap();
             if observed.as_ref()
@@ -542,7 +1406,7 @@ impl Filesystem {
                 return Err(self.again("lookup_generation_changed"));
             }
             if state.can_replace_metadata(started) {
-                state.replace_metadata(fresh);
+                state.replace_metadata(fresh)?;
             }
             drop(state);
             return Ok(node);
@@ -550,93 +1414,157 @@ impl Filesystem {
         if observed.is_some() {
             return Err(self.again("lookup_binding_removed"));
         }
-        ns.install(&key, |ino| {
-            let node = Inode::new(ino, key.clone(), directory, head, &self.config);
+        ns.try_install(&key, |ino| {
+            let node =
+                Inode::new_admitted(ino, key.clone(), directory, head, &self.config, charge)?;
             node.state.lock().unwrap().fetched = started;
-            node
+            Ok(node)
         })
     }
 
     async fn preload_directory(&self, parent: u64) -> Result<()> {
         let node = self.node(parent)?;
         let _gate = node.preload.lock().await;
-        let (prefix, epoch) = {
-            let ns = self.lock_namespace();
-            if self
-                .preloaded_directories
-                .get(&parent)
-                .is_some_and(|fetched| fetched.elapsed() < self.config.stat_cache_ttl)
-            {
-                return Ok(());
-            }
-            let state = node.state.lock().unwrap();
-            if state.deleted || ns.is_moving(&state.key) || ns.is_deleting(&state.key) {
-                return Err(self.again("preload_binding_busy"));
-            }
-            let prefix = if state.key.is_empty() {
-                String::new()
-            } else {
-                format!("{}/", state.key)
-            };
-            (prefix, ns.epoch)
+        let Some((prefix, epoch)) = self.preload_snapshot(&node)? else {
+            return Ok(());
         };
         let fetched = std::time::Instant::now();
         let page = self.store.list(&prefix, Some("/"), None).await;
-        let mut ns = self.lock_namespace();
-        if ns.epoch != epoch {
-            return Err(self.again("preload_epoch_changed"));
+        {
+            let mut ns = self.lock_namespace();
+            if ns.epoch != epoch {
+                return Err(self.again("preload_epoch_changed"));
+            }
+            // This records an attempt, not an authoritative negative listing.
+            if let Ok(charge) = self
+                .metadata
+                .charge(std::mem::size_of::<(u64, Instant)>() + crate::metadata_budget::LINKS)
+            {
+                self.preloaded_directories
+                    .insert(parent, Arc::new((fetched, charge)));
+            }
+            ns.hidden("");
         }
-        // This records an attempt, not an authoritative negative listing.
-        self.preloaded_directories.insert(parent, fetched);
-        self.preloaded_directories.run_pending_tasks();
-        ns.hidden("");
         for object in page?
             .objects
             .into_iter()
             .take(crate::backend::extended_list::MAX_PAGE_ENTRIES)
         {
-            let Some(name) = object.key.strip_prefix(&prefix) else {
-                return Err(Error::InvalidResponse("preload prefix escape".into()));
-            };
-            if name.is_empty()
-                || name.contains('/')
-                || ns.tombstones.contains_key(&object.key)
-                || ns.is_moving(&object.key)
-                || ns.is_deleting(&object.key)
-                || ns.named(&object.key).is_some()
-            {
-                continue;
-            }
-            child(prefix.trim_end_matches('/'), name)?;
-            let (Some(metadata), Some(etag)) =
-                (object.metadata, object.etag.filter(|etag| !etag.is_empty()))
-            else {
-                continue;
-            };
-            let head = ObjectHead {
-                size: object.size,
-                etag,
-                metadata: crate::backend::metadata::encode_metadata(&metadata)?
-                    .into_iter()
-                    .collect(),
-                last_modified: object
-                    .last_modified
-                    .and_then(|date| SystemTime::try_from(date).ok()),
-                ..Default::default()
-            };
-            ns.install(&object.key, |ino| {
-                let node = Inode::new(ino, object.key.clone(), false, Some(head), &self.config);
-                node.state.lock().unwrap().fetched = fetched;
-                node
-            })?;
+            self.preload_object(object, &prefix, epoch, fetched).await?;
         }
         Ok(())
+    }
+
+    fn preload_snapshot(&self, node: &Inode) -> Result<Option<(String, u64)>> {
+        let ns = self.lock_namespace();
+        if self
+            .preloaded_directories
+            .get(&node.ino)
+            .is_some_and(|fetched| fetched.0.elapsed() < self.config.stat_cache_ttl)
+        {
+            return Ok(None);
+        }
+        let state = node.state.lock().unwrap();
+        if state.deleted || ns.is_moving(&state.key) || ns.is_deleting(&state.key) {
+            return Err(self.again("preload_binding_busy"));
+        }
+        let prefix = if state.key.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", state.key)
+        };
+        Ok(Some((prefix, ns.epoch)))
+    }
+
+    fn preload_missing(&self, ns: &Namespace, key: &str, epoch: u64) -> Result<bool> {
+        if ns.epoch != epoch {
+            return Err(self.again("preload_epoch_changed"));
+        }
+        Ok(!ns.tombstones.contains_key(key)
+            && !ns.is_moving(key)
+            && !ns.is_deleting(key)
+            && ns.named(key).is_none())
+    }
+
+    async fn preload_object(
+        &self,
+        object: crate::backend::extended_list::ListedObject,
+        prefix: &str,
+        epoch: u64,
+        fetched: Instant,
+    ) -> Result<()> {
+        if !Self::preload_regular_object(&object, prefix)? {
+            return Ok(());
+        }
+        if !self.preload_missing(&self.lock_namespace(), &object.key, epoch)? {
+            return Ok(());
+        }
+        let (key, entry) = listed_object(object, fetched, &self.metadata)?;
+        // Speculation uses the same yielding admission as authoritative lookups;
+        // never retain the namespace mutex across this cancellable scan.
+        let charge = self
+            .admit_metadata(
+                if self.metadata.enabled() {
+                    Inode::metadata_estimate(&key, None)
+                } else {
+                    0
+                },
+                true,
+            )
+            .await?;
+        self.install_preloaded(key, entry, fetched, epoch, charge)
+    }
+
+    fn install_preloaded(
+        &self,
+        key: crate::metadata_budget::SharedKey,
+        entry: DirectoryMetadata,
+        fetched: Instant,
+        epoch: u64,
+        charge: crate::metadata_budget::MetadataCharge,
+    ) -> Result<()> {
+        let mut ns = self.lock_namespace();
+        if !self.preload_missing(&ns, &key, epoch)? {
+            return Ok(());
+        }
+        ns.try_install(&key, |ino| {
+            let node = Inode::cached_admitted(
+                ino,
+                key.clone(),
+                false,
+                entry.head,
+                entry.last_modified,
+                &self.config,
+                charge,
+            )?;
+            node.state.lock().unwrap().fetched = fetched;
+            Ok(node)
+        })?;
+        Ok(())
+    }
+
+    fn preload_regular_object(
+        object: &crate::backend::extended_list::ListedObject,
+        prefix: &str,
+    ) -> Result<bool> {
+        let Some(name) = object.key.strip_prefix(prefix) else {
+            return Err(Error::InvalidResponse("preload prefix escape".into()));
+        };
+        if name.is_empty() || name.contains('/') {
+            return Ok(false);
+        }
+        child(prefix.trim_end_matches('/'), name)?;
+        Ok(object.metadata.is_some() && object.etag.as_ref().is_some_and(|etag| !etag.is_empty()))
     }
 
     pub fn forget(&self, ino: u64, count: u64) {
         if let Ok(node) = self.node(ino) {
             let mut s = node.state.lock().unwrap();
+            let was_referenced = s.lookups != 0;
             s.lookups = s.lookups.saturating_sub(count);
+            if was_referenced && s.lookups == 0 {
+                self.kernel_lookup_entries.fetch_sub(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -655,7 +1583,7 @@ impl Filesystem {
     ) -> Result<impl Future<Output = Result<Arc<Inode>>> + Send + '_> {
         let started = std::time::Instant::now();
         let node = self.node(ino)?;
-        let (key, directory, remote, version, epoch, list_only) = {
+        let (key, directory, remote, version, epoch, list_only, snapshot_charge) = {
             let ns = self.lock_namespace();
             let s = node.state.lock().unwrap();
             if s.deleted {
@@ -678,18 +1606,23 @@ impl Filesystem {
             if directory && ns.has_dirty_descendants(&s.key) {
                 return Ok(Either::Left(ready(Ok(node.clone()))));
             }
+            let snapshot_charge = self
+                .metadata
+                .charge(s.key.len() + s.remote.as_ref().map_or(0, |head| head.etag.len()))?;
             (
                 s.key.clone(),
                 directory,
-                s.remote.clone(),
+                s.remote.as_ref().map(|head| head.etag.clone()),
                 s.version,
                 ns.epoch,
                 directory && self.config.no_dir_object,
+                snapshot_charge,
             )
         };
         let permit = self.metadata_permit().await?;
         Ok(Either::Right(async move {
             let _permit = permit;
+            let _snapshot_charge = snapshot_charge;
             // An implicit directory may acquire a marker with authoritative metadata.
             // Skip its HEAD only when directory objects are explicitly disabled.
             let fetched = if list_only {
@@ -707,7 +1640,7 @@ impl Filesystem {
                     .head(&if directory {
                         format!("{key}/")
                     } else {
-                        key.clone()
+                        key.to_string()
                     })
                     .await
                 {
@@ -728,6 +1661,21 @@ impl Filesystem {
                     Err(e) => Err(e),
                 }
             };
+            let charge = if let Ok(head) = &fetched {
+                Some(
+                    self.admit_metadata(
+                        if self.metadata.enabled() {
+                            Inode::metadata_estimate(&key, head.as_ref())
+                        } else {
+                            0
+                        },
+                        false,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
             let mut ns = self.lock_namespace();
             let mut s = node.state.lock().unwrap();
             if s.deleted
@@ -739,7 +1687,7 @@ impl Filesystem {
                 return Err(self.again("refresh_binding_changed"));
             }
             if s.version != version
-                || s.remote.as_ref().map(|h| &h.etag) != remote.as_ref().map(|h| &h.etag)
+                || s.remote.as_ref().map(|h| &h.etag) != remote.as_ref()
                 || !s.can_replace_metadata(started)
                 || directory && ns.has_dirty_descendants(&key)
             {
@@ -750,12 +1698,19 @@ impl Filesystem {
             }
             match fetched {
                 Ok(head) => {
-                    let mut fresh = Inode::new(ino, key, directory, head, &self.config)
-                        .state
-                        .into_inner()
-                        .unwrap();
+                    let mut fresh = Inode::new_admitted(
+                        ino,
+                        key.to_string(),
+                        directory,
+                        head,
+                        &self.config,
+                        charge.expect("successful refresh admission"),
+                    )?
+                    .state
+                    .into_inner()
+                    .unwrap();
                     fresh.fetched = started;
-                    s.replace_metadata(fresh);
+                    s.replace_metadata(fresh)?;
                 }
                 Err(error) if not_found(&error) => {
                     s.deleted = true;
@@ -818,13 +1773,34 @@ impl Filesystem {
             {
                 state.negative_lookups.remove(&oldest);
             }
-            state.negative_lookups.insert(name.into(), started);
+            state.settle_metadata();
+            let growth = name.len()
+                + std::mem::size_of::<(String, std::time::Instant)>()
+                + crate::metadata_budget::LINKS;
+            // Negative caching is optional: lack of cache space must not turn
+            // an authoritative ENOENT into an admission failure.
+            if state.admit_metadata(growth).is_ok() {
+                state.negative_lookups.insert(name.into(), started);
+                state.settle_metadata();
+            }
         }
         Ok(Error::Fs(libc::ENOENT))
     }
 
+    pub(crate) fn namespace_pressure(&self) -> bool {
+        let limit = self.config.entry_limit;
+        let headroom = (limit / 2).min(
+            (self.config.max_requests * crate::backend::extended_list::MAX_PAGE_ENTRIES * 2) as u64,
+        );
+        self.kernel_lookup_entries.load(Ordering::Relaxed) >= limit - headroom
+    }
+
     pub fn reference(&self, node: &Inode) {
-        node.state.lock().unwrap().lookups += 1;
+        let mut state = node.state.lock().unwrap();
+        if state.lookups == 0 {
+            self.kernel_lookup_entries.fetch_add(1, Ordering::Relaxed);
+        }
+        state.lookups += 1;
     }
 
     pub fn parent_ino(&self, ino: u64) -> u64 {
@@ -882,6 +1858,19 @@ impl Filesystem {
         target: Option<&[u8]>,
         rdev: u32,
     ) -> Result<Arc<Inode>> {
+        self.create_inner(parent, name, mode, target, rdev, None)
+            .await
+    }
+
+    async fn create_inner(
+        &self,
+        parent: u64,
+        name: &str,
+        mode: u32,
+        target: Option<&[u8]>,
+        rdev: u32,
+        identity: Option<(u32, u32)>,
+    ) -> Result<Arc<Inode>> {
         self.check_write()?;
         let key = self.child_key(parent, name)?;
         match self.lookup(parent, name).await {
@@ -890,6 +1879,37 @@ impl Filesystem {
             Err(error) => return Err(error),
         }
         let directory = mode & libc::S_IFMT == libc::S_IFDIR;
+        let charge = self
+            .admit_metadata(Inode::metadata_estimate(&key, None), true)
+            .await?;
+        let mut candidate =
+            Inode::new_admitted(0, key.clone(), directory, None, &self.config, charge)?;
+        {
+            let mut state = candidate.state.lock().unwrap();
+            state.admit_metadata(target.map_or(0, |value| {
+                value.len()
+                    + self.config.symlink_attr.len()
+                    + std::mem::size_of::<(String, Vec<u8>)>()
+                    + crate::metadata_budget::LINKS
+            }))?;
+            state.mode = mode;
+            state.rdev = rdev;
+            state.version = 1;
+            if self.config.enable_perms
+                && let Some((uid, gid)) = identity
+            {
+                state.uid = uid;
+                state.gid = gid;
+                state.version += 1;
+            }
+            if let Some(target) = target {
+                state
+                    .metadata
+                    .try_insert(&self.config.symlink_attr, target)?;
+            }
+            state.settle_metadata();
+            self.prepare_metadata(&mut state)?;
+        }
         let mut ns = self.lock_namespace();
         {
             let p = ns.get(parent)?;
@@ -908,11 +1928,12 @@ impl Filesystem {
         if ns.named(&key).is_some() {
             return Err(Error::Fs(libc::EEXIST));
         }
-        ns.tombstones.remove(&key);
-        ns.changed(&key);
-        let node = ns.install(&key, |ino| {
-            Inode::new(ino, key.clone(), directory, None, &self.config)
+        let node = ns.try_install(&key, |ino| {
+            candidate.ino = ino;
+            Ok(candidate)
         })?;
+        ns.remove_tombstone(&key);
+        ns.changed(&key);
         ns.get(parent)?
             .state
             .lock()
@@ -920,16 +1941,7 @@ impl Filesystem {
             .negative_lookups
             .remove(name);
         {
-            let mut state = node.state.lock().unwrap();
-            state.mode = mode;
-            state.rdev = rdev;
-            state.version = 1;
-            if let Some(target) = target {
-                state
-                    .metadata
-                    .insert(self.config.symlink_attr.clone(), target.to_vec());
-            }
-            self.prepare_metadata(&mut state);
+            let state = node.state.lock().unwrap();
             ns.track_dirty(node.ino, &state);
         }
         Ok(node)
@@ -947,11 +1959,8 @@ impl Filesystem {
         rdev: u32,
         identity: (u32, u32),
     ) -> Result<Arc<Inode>> {
-        let node = self.create(parent, name, mode, target, rdev).await?;
-        if self.config.enable_perms {
-            self.setattr(node.ino, None, Some(identity.0), Some(identity.1), None)?;
-        }
-        Ok(node)
+        self.create_inner(parent, name, mode, target, rdev, Some(identity))
+            .await
     }
 
     /// Publish the requested result while retaining the caller-owned load future.
@@ -1069,7 +2078,18 @@ impl Filesystem {
         if self.cache.gap(ino, generation, range.clone()) != Some(range.clone()) {
             return Ok(());
         }
-        let Some(charge) = self.try_refill_admission(ino, generation, consumed, length) else {
+        let admission = length
+            + if self.disk_funding_bytes > 0 {
+                read::disk_window_admission(range.start, range.end, size)
+                    + self.disk_gap_pipeline_bytes(read::disk_coverage(
+                        range.start,
+                        range.end,
+                        size,
+                    ))
+            } else {
+                0
+            };
+        let Some(charge) = self.try_refill_admission(ino, generation, consumed, admission) else {
             return Ok(());
         };
         let snapshot = read::snapshot(&node)?;
@@ -1139,9 +2159,8 @@ impl Filesystem {
             if let Ok(charge) = self.data.try_reserve(length) {
                 return Some(charge);
             }
-            if !cache.evict_consumed_lru(ino, generation, consumed) {
-                return None;
-            }
+            let victim = cache.consumed_victim(ino, generation, consumed)?;
+            self.demote_capacity(victim);
         }
     }
 
@@ -1174,6 +2193,9 @@ impl Filesystem {
         let node = self.node(ino)?;
         let (size, clean, generation, version, etag, mut single_buffer) = {
             let state = node.state.lock().unwrap();
+            if state.deleted {
+                return Err(Error::Fs(libc::ENOENT));
+            }
             (
                 state.size,
                 state.version == state.durable,
@@ -1203,6 +2225,9 @@ impl Filesystem {
         // an earlier FIFO waiter may need bytes published after its eviction.
         // One-block hits share their allocation; fragment spans use this output.
         let reply = self.admit(length).await?;
+        if !read::current(&node, generation) {
+            return Err(self.again("read_generation_after_admission"));
+        }
         if length == 0 {
             return reply.copy(&[]).map(Some);
         }
@@ -1218,6 +2243,7 @@ impl Filesystem {
             })
         });
         if let Some(block) = cached {
+            self.touch_disk_hit(&node, generation, offset, length);
             self.read_metrics.hits.inc();
             self.read_metrics.hit_bytes.inc_by(length as u64);
             return Ok(Some(block));
@@ -1227,7 +2253,7 @@ impl Filesystem {
         // Miss admission reserves output and scratch atomically below.
         let budgets = self.effective_budgets();
         let mut start = if clean {
-            offset / (128 * 1024) * (128 * 1024)
+            offset / read::READ_BLOCK_BYTES as u64 * read::READ_BLOCK_BYTES as u64
         } else {
             offset
         };
@@ -1261,8 +2287,12 @@ impl Filesystem {
         let fill = loop {
             let admission = read::start_fill(&node, generation, start, start + prefetch as u64);
             let reply = self.admit(length).await?;
+            if !read::current(&node, generation) {
+                return Err(self.again("read_generation_after_fill_wait"));
+            }
             let cached = self.cache.read(ino, generation, offset, length, reply);
             if let Some(block) = cached {
+                self.touch_disk_hit(&node, generation, offset, length);
                 return Ok(Some(block));
             }
             match admission {
@@ -1297,7 +2327,20 @@ impl Filesystem {
         // allocation; otherwise competing readers could each pin half a lane.
         let (charge, snapshot) = loop {
             let charge = self
-                .admit((if single_buffer { 1 } else { 2 }) * prefetch + length)
+                .admit(
+                    (if single_buffer { 1 } else { 2 }) * prefetch
+                        + length
+                        + if single_buffer && self.disk_funding_bytes > 0 {
+                            read::disk_window_admission(start, start + prefetch as u64, size)
+                                + self.disk_gap_pipeline_bytes(read::disk_coverage(
+                                    start,
+                                    start + prefetch as u64,
+                                    size,
+                                ))
+                        } else {
+                            0
+                        },
+                )
                 .await?;
             // Capture payload owners only after admission. Pinning dirty extents
             // while waiting for their own permits would deadlock a pressured read.
@@ -1312,6 +2355,17 @@ impl Filesystem {
                     prefetch = (prefetch / chunk * chunk).max(relative + length);
                 }
                 continue;
+            }
+            // A clean L2 plan includes short-EOF disk coverage for the original
+            // size/generation. Admission can flush writers while it waits: drop
+            // obsolete admission and let the caller retry before any splits.
+            // Dirty-overlay replanning above and RAM-only reads stay unchanged.
+            if single_buffer
+                && self.disk_funding_bytes > 0
+                && (snapshot.size != size
+                    || read::generation(snapshot.version, snapshot.remote.as_ref()) != generation)
+            {
+                return Err(self.again("read_generation_after_window_admission"));
             }
             break (charge, Arc::new(snapshot));
         };
@@ -1351,6 +2405,39 @@ impl Filesystem {
             cache_key,
             fill,
         } = window;
+        let deadline = self.config.request_timeout.min(Duration::from_millis(250));
+        let disk = if let Some((_, generation)) = cache_key.filter(|_| {
+            single_buffer
+                && self.disk_funding_bytes > 0
+                && range.start < range.end.min(snapshot.size)
+        }) {
+            self.disk_read_window(
+                fill.node().clone(),
+                generation,
+                snapshot.clone(),
+                &mut charge,
+                tokio::time::Instant::now() + deadline,
+            )
+            .await
+        } else {
+            if self.disk_funding_bytes > 0 {
+                self.record_disk_decision(read::DiskDecision::Window);
+            }
+            None
+        };
+        let disk_reserved = single_buffer && self.disk_funding_bytes > 0;
+        // At most max_requests range tasks coexist. Their fixed metadata pool
+        // is admitted atomically with the window and shared, not re-reserved for
+        // each hole/task turnover. Clones keep it funded through task cancellation.
+        let pipeline_funding = disk_reserved.then(|| {
+            Arc::new(
+                charge.split(self.disk_gap_pipeline_bytes(read::disk_coverage(
+                    range.start,
+                    range.end,
+                    snapshot.size,
+                ))),
+            )
+        });
         let chunk = self.effective_budgets().read_parallel_chunk_bytes.max(1);
         let mut output = charge.split(length);
         // The snapshot may have shrunk while admission flushed another generation.
@@ -1376,27 +2463,66 @@ impl Filesystem {
         while next < end || !tasks.is_empty() || !chunks.is_empty() {
             while next < end && tasks.len() < self.config.max_requests {
                 let at = next;
-                let amount = (end - next).min(chunk as u64) as usize;
+                let mut amount = (end - next).min(chunk as u64) as usize;
+                if disk_reserved && next + (amount as u64) < end {
+                    let aligned_end = (next + amount as u64) / read::READ_BLOCK_BYTES as u64
+                        * read::READ_BLOCK_BYTES as u64;
+                    if aligned_end > next {
+                        amount = (aligned_end - next) as usize;
+                    }
+                }
                 next += amount as u64;
                 let mut owner = charge.split((if single_buffer { 1 } else { 2 }) * amount);
+                let disk_charge = (disk_reserved && disk.is_some())
+                    .then(|| charge.split(read::disk_window_admission(at, next, snapshot.size)));
+                let disk = disk.clone();
+                let node = fill.node().clone();
+                let generation = cache_key.map(|(_, generation)| generation);
                 let (store, snapshot) = (self.store.clone(), snapshot.clone());
                 let metrics = self.read_metrics.clone();
                 let diagnostics = self.diagnostics.clone();
                 let context = metrics::context();
                 let sender = sender.clone();
+                let pipeline_funding = pipeline_funding.clone();
                 tasks.spawn(metrics::scope(context, async move {
+                    let _pipeline_funding = pipeline_funding;
                     metrics.fill_jobs.inc();
                     let result = async {
                         let local = Budget::new(2 * amount)?;
-                        let output = crate::backend::RangeSink::new(sender, owner.split(amount))
-                            .with_diagnostics(diagnostics);
+                        let output =
+                            crate::backend::RangeSink::new(sender.clone(), owner.split(amount))
+                                .with_diagnostics(diagnostics);
                         if single_buffer {
+                            if let (Some(disk), Some(admission), Some(generation)) =
+                                (disk, disk_charge, generation)
+                            {
+                                return read::load_disk_range(
+                                    &store,
+                                    &snapshot,
+                                    at..at + amount as u64,
+                                    &local,
+                                    &output,
+                                    &sender,
+                                    read::DiskRange {
+                                        disk,
+                                        node,
+                                        generation,
+                                        admission,
+                                        deadline,
+                                    },
+                                )
+                                .await;
+                            }
                             store
                                 .read_range_chunks(
                                     &snapshot.key,
                                     at,
                                     amount,
-                                    snapshot.remote.as_ref().expect("clean remote snapshot"),
+                                    &snapshot
+                                        .remote
+                                        .as_ref()
+                                        .expect("clean remote snapshot")
+                                        .read_head(),
                                     &local,
                                     &output,
                                 )
@@ -1448,7 +2574,10 @@ impl Filesystem {
             let Some((at, block)) = completed else {
                 continue;
             };
-            if single_buffer {
+            if block.is_disk_origin() {
+                self.disk_read_bytes
+                    .fetch_add(block.as_slice().len() as u64, Ordering::Relaxed);
+            } else if single_buffer {
                 self.read_metrics
                     .remote_bytes
                     .inc_by(block.as_slice().len() as u64);
@@ -1479,11 +2608,20 @@ impl Filesystem {
             {
                 ready(Ok(result.take().expect("completed requested result")));
             }
-            if let Some((ino, generation)) = cache_key {
+            if let Some((ino, generation)) =
+                cache_key.filter(|(_, generation)| read::current(fill.node(), *generation))
+            {
                 // Publish into the cache followers inspect, including after
                 // pressure reclamation while the GET was in flight.
                 let cache = &self.cache;
-                cache.insert(ino, generation, at, block);
+                // Delivery remains sliced above. Retain a validated disk record
+                // under its original coverage so later eviction does not create
+                // a different fragment identity for an already resident record.
+                let (block, prefix) = block.into_cache_backing();
+                let at = at - prefix as u64;
+                cache.insert_with_eviction(ino, generation, at, block, |victim| {
+                    self.demote_capacity(victim)
+                });
                 if right > left {
                     cache.consumed(
                         ino,
@@ -1521,12 +2659,9 @@ impl Filesystem {
     async fn admit_pressured(&self, size: usize) -> Result<crate::budget::Reservation> {
         // Reclaim only as much old cache ownership as admission needs.
         // Pinned borrowers retain their permits; FIFO waiters stay ahead.
-        {
-            let cache = &self.cache;
-            while self.try_cache_loan(cache) || cache.evict_lru() {
-                if let Ok(reservation) = self.data.try_reserve(size) {
-                    return Ok(reservation);
-                }
+        while self.reclaim_read_cache() {
+            if let Ok(reservation) = self.data.try_reserve(size) {
+                return Ok(reservation);
             }
         }
         if let Ok(reservation) = self.data.try_reserve(size) {
@@ -1549,10 +2684,7 @@ impl Filesystem {
                     biased;
                     result = &mut reservation => return result,
                     _ = async {
-                        let reclaimed = {
-                            let cache = &self.cache;
-                            self.try_cache_loan(cache) || cache.evict_lru()
-                        };
+                        let reclaimed = self.reclaim_read_cache();
                         if !reclaimed {
                             published.await;
                         }
@@ -1564,12 +2696,29 @@ impl Filesystem {
         .map_err(|_| Error::Timeout("payload admission"))?
     }
 
-    fn try_cache_loan(&self, cache: &crate::cache::ReadCache) -> bool {
+    fn reclaim_read_cache(&self) -> bool {
+        // Loan-first reclamation permanently hides byte-pressure victims from
+        // L2: subsequent evictions remove loaned owners, which must not demote.
+        // Prefer an eligible capacity victim before transferring its charge.
+        if self.config.disk_cache_regex.is_some()
+            && let Some(key) = self.cache.loan_candidate()
+            && let Ok(node) = self.node(key.0)
+        {
+            self.start_disk_for_capacity(&node, key.1);
+            if let Some(disk) = self.disk_read(&node, key.1)
+                && disk.cache.status().state() == crate::disk_cache::State::Ready
+                && let Some(victim) = self.cache.unloaned_capacity_victim(key)
+            {
+                self.demote_capacity(victim);
+                return true;
+            }
+        }
         // Never wait for optional capacity or lend while an upload/body owns it.
-        let Ok(_activity) = self.flush_activity.try_write() else {
-            return false;
-        };
-        cache.loan_lru(&self.flush_lane)
+        let loaned = self
+            .flush_activity
+            .try_write()
+            .is_ok_and(|_activity| self.cache.loan_lru(&self.flush_lane));
+        loaned || self.evict_cache()
     }
 
     pub async fn write(&self, ino: u64, offset: u64, bytes: &[u8]) -> Result<usize> {
@@ -1618,8 +2767,8 @@ impl Filesystem {
         result
     }
 
-    fn prepare_metadata(&self, state: &mut State) {
-        write::prepare_metadata(&self.config, state);
+    fn prepare_metadata(&self, state: &mut State) -> Result<()> {
+        write::prepare_metadata(&self.config, state)
     }
 
     pub async fn fsync(&self, ino: u64) -> Result<()> {
@@ -1637,14 +2786,26 @@ impl Filesystem {
     }
 
     async fn flush_node_locked(&self, node: &Inode) -> Result<()> {
-        let result = self.commit_node_locked(node).await;
+        self.flush_node_locked_before(node, None).await
+    }
+
+    async fn flush_node_locked_before(
+        &self,
+        node: &Inode,
+        before: Option<&mut write::BeforeMutation<'_>>,
+    ) -> Result<()> {
+        let result = self.commit_node_locked(node, before).await;
         let mut ns = self.lock_namespace();
         let state = node.state.lock().unwrap();
         ns.track_dirty(node.ino, &state);
         result
     }
 
-    async fn commit_node_locked(&self, node: &Inode) -> Result<()> {
+    async fn commit_node_locked(
+        &self,
+        node: &Inode,
+        before: Option<&mut write::BeforeMutation<'_>>,
+    ) -> Result<()> {
         {
             let mut state = node.state.lock().unwrap();
             if state.deleted {
@@ -1672,13 +2833,14 @@ impl Filesystem {
             .flush_lane
             .with_activity(self.flush_activity.clone().read_owned().await);
         self.cache.reclaim_loans();
-        write::flush_locked(
+        write::flush_locked_before(
             &self.store,
             node,
             &lane,
             flusher,
             &self.config,
             &self.upload_admission,
+            before,
         )
         .await
     }
@@ -1720,39 +2882,55 @@ impl Filesystem {
         &self,
         ns: &mut Namespace,
         key: &str,
-        directory: bool,
-        head: Option<ObjectHead>,
-        known: bool,
-        fetched: std::time::Instant,
+        entry: &mut DirectoryMetadata,
+        mut charge: crate::metadata_budget::MetadataCharge,
     ) -> Result<Arc<Inode>> {
         let make = |ino| {
-            let node = Inode::new(ino, key.into(), directory, head, &self.config);
+            let key = match entry.key.take().filter(|owner| owner.as_str() == key) {
+                Some(owner) => owner,
+                None => {
+                    crate::metadata_budget::SharedKey::from_admitted(key.to_owned(), &mut charge)?
+                }
+            };
+            let node = Inode::cached_admitted(
+                ino,
+                key,
+                entry.directory,
+                entry.head.take(),
+                entry.last_modified,
+                &self.config,
+                charge,
+            )?;
             {
                 let mut state = node.state.lock().unwrap();
-                state.metadata_known = known;
-                state.fetched = fetched;
+                state.metadata_known = entry.known;
+                state.fetched = entry.fetched;
             }
-            node
+            Ok(node)
         };
         if let Some(node) = ns.named(key) {
-            let dirty_descendants = directory && ns.has_dirty_descendants(key);
+            let dirty_descendants = entry.directory && ns.has_dirty_descendants(key);
             let mut state = node.state.lock().unwrap();
-            if !dirty_descendants && state.can_replace_metadata(fetched) {
-                if known {
-                    state.replace_metadata(make(node.ino).state.into_inner().unwrap());
-                } else if directory
+            if !ns.is_moving(key)
+                && !ns.is_deleting(key)
+                && !dirty_descendants
+                && state.can_replace_metadata(entry.fetched)
+            {
+                if entry.known {
+                    state.replace_metadata(make(node.ino)?.state.into_inner().unwrap())?;
+                } else if entry.directory
                     && state.remote.is_none()
                     && file_type(state.mode) == FileType::Directory
                 {
                     // A common prefix validates an implicit directory's presence,
                     // not authoritative user metadata for a marker object.
-                    state.fetched = fetched;
+                    state.fetched = entry.fetched;
                 }
             }
             drop(state);
             return Ok(node);
         }
-        ns.install(key, make)
+        ns.try_install(key, make)
     }
 
     async fn directory_chunk_inner(
@@ -1763,6 +2941,9 @@ impl Filesystem {
         resolve_types: bool,
         resume_after: &str,
     ) -> Result<DirectoryRemainder> {
+        // Reclaim expired cache owners before admitting any listing metadata,
+        // including on a miss for a different directory/page key.
+        self.directory_pages.run_pending_tasks();
         let fetched = std::time::Instant::now();
         let mut snapshot = {
             let ns = self.lock_namespace();
@@ -1771,13 +2952,19 @@ impl Filesystem {
                 && let Some(page) =
                     self.cached_directory_page(&ns, &snapshot, after, limit, resume_after)
             {
-                return Ok(page.remainder(resume_after));
+                let mut remainder = page.remainder(resume_after)?;
+                remainder.inodes = page
+                    .remaining(resume_after)
+                    .iter()
+                    .map(|entry| ns.get(entry.ino))
+                    .collect::<Result<_>>()?;
+                return Ok(remainder);
             }
             snapshot
         };
         let mut selected = self
             .local_directory_entries(&snapshot.prefix, after, limit)
-            .await;
+            .await?;
         let slurped = if resolve_types && !self.config.stat_cache_ttl.is_zero() && limit > 0 {
             self.subtree_directory_entries(&snapshot.prefix, after, limit, &mut selected)
                 .await?
@@ -1795,9 +2982,12 @@ impl Filesystem {
         if resolve_types {
             self.resolve_directory_types(ino, &mut selected).await?;
         }
-        Ok(self
-            .publish_directory_page(snapshot, after, limit, selected, resolve_types)?
-            .remainder(resume_after))
+        let (page, inodes) = self
+            .publish_directory_page(snapshot, after, limit, selected, resolve_types)
+            .await?;
+        let mut remainder = page.remainder(resume_after)?;
+        remainder.inodes = inodes;
+        Ok(remainder)
     }
 
     fn directory_snapshot(
@@ -1865,23 +3055,36 @@ impl Filesystem {
         })
     }
 
-    fn fresh_local_directory_entry(&self, ns: &Namespace, name: &str) -> Option<DirectoryMetadata> {
+    fn fresh_local_directory_entry(
+        &self,
+        ns: &Namespace,
+        name: &str,
+    ) -> Result<Option<DirectoryMetadata>> {
         let node = ns.named(name).unwrap();
         let state = node.state.lock().unwrap();
         if state.deleted {
-            return None;
+            return Ok(None);
         }
         let fresh = state.version > state.durable
             || state.rename_target.is_some()
             || state.data_key.is_some()
             || state.fetched.elapsed() < self.config.stat_cache_ttl
             || file_type(state.mode) == FileType::Directory && ns.has_dirty_descendants(name);
-        fresh.then(|| DirectoryMetadata {
+        if !fresh {
+            return Ok(None);
+        }
+        let charge = self
+            .metadata
+            .charge_with(|| std::mem::size_of::<DirectoryMetadata>() + name.len())?;
+        Ok(Some(DirectoryMetadata {
+            _metadata_charge: charge,
             directory: file_type(state.mode) == FileType::Directory,
             head: state.remote.clone(),
+            key: Some(state.key.clone()),
+            last_modified: Some(state.mtime),
             known: state.metadata_known,
             fetched: state.fetched,
-        })
+        }))
     }
 
     async fn local_directory_entries(
@@ -1889,10 +3092,10 @@ impl Filesystem {
         prefix: &str,
         after: &str,
         limit: usize,
-    ) -> DirectorySelection {
+    ) -> Result<DirectorySelection> {
         let mut selected = DirectorySelection::new();
         if limit == 0 {
-            return selected;
+            return Ok(selected);
         }
         let mut cursor = Excluded(format!("{prefix}{after}"));
         loop {
@@ -1901,11 +3104,15 @@ impl Filesystem {
                 // Bound each critical section even when every cached child has
                 // expired. Descendants are skipped by ordered seek, not visited.
                 for _ in 0..128 {
-                    let Some((name, _)) = ns.names.range((cursor.clone(), Unbounded)).next() else {
-                        return selected;
+                    let Some((name, _)) = ns
+                        .names
+                        .range::<str, _>((cursor.as_ref().map(String::as_str), Unbounded))
+                        .next()
+                    else {
+                        return Ok(selected);
                     };
                     let Some(relative) = name.strip_prefix(prefix) else {
-                        return selected;
+                        return Ok(selected);
                     };
                     if let Some((directory, _)) = relative.split_once('/') {
                         // '/' is immediately before '0' in UTF-8 byte ordering.
@@ -1913,16 +3120,16 @@ impl Filesystem {
                         cursor = Included(format!("{prefix}{directory}0"));
                         continue;
                     }
-                    cursor = Excluded(name.clone());
+                    cursor = Excluded(name.to_string());
                     if ns
                         .tombstones
-                        .get(name)
+                        .get(name.as_str())
                         .is_none_or(|until| *until <= Instant::now())
-                        && let Some(entry) = self.fresh_local_directory_entry(&ns, name)
+                        && let Some(entry) = self.fresh_local_directory_entry(&ns, name)?
                     {
                         selected.insert(relative.into(), entry);
                         if selected.len() >= limit {
-                            return selected;
+                            return Ok(selected);
                         }
                     }
                 }
@@ -1943,8 +3150,8 @@ impl Filesystem {
         let cached = self.subtree_pages.get(&key).filter(|page| {
             page.fetched.elapsed() < self.config.stat_cache_ttl && {
                 let ns = self.lock_namespace();
-                page.page.objects.iter().all(|object| {
-                    let Some(relative) = object.key.strip_prefix(prefix) else {
+                page.objects.iter().all(|(key, _)| {
+                    let Some(relative) = key.strip_prefix(prefix) else {
                         return true;
                     };
                     let name = relative.split('/').next().unwrap_or("");
@@ -1985,6 +3192,29 @@ impl Filesystem {
                 .map(|object| object.key.as_str())
                 .max()
                 .unwrap_or("");
+            let charge = self.metadata.charge_with(|| {
+                let index_bytes = page
+                    .objects
+                    .iter()
+                    .map(|object| {
+                        object
+                            .key
+                            .match_indices('/')
+                            .map(|(slash, _)| {
+                                slash
+                                    + 1
+                                    + std::mem::size_of::<(u64, String)>()
+                                    + crate::metadata_budget::LINKS
+                            })
+                            .sum::<usize>()
+                    })
+                    .sum::<usize>()
+                    + prefix.len()
+                    + std::mem::size_of::<SubtreePage>();
+                page.objects.capacity()
+                    * std::mem::size_of::<(crate::metadata_budget::SharedKey, DirectoryMetadata)>()
+                    + index_bytes
+            })?;
             let mut directories = std::collections::BTreeSet::from([prefix.to_owned()]);
             'objects: for object in &page.objects {
                 for (slash, _) in object.key.match_indices('/') {
@@ -2000,7 +3230,23 @@ impl Filesystem {
                         || !directory.is_empty()
                             && format!("{}0", directory.trim_end_matches('/')).as_str() <= last)
             });
-            let page = Arc::new(SubtreePage { fetched, page });
+            let objects = page
+                .objects
+                .into_iter()
+                .map(|object| {
+                    let (mut key, mut entry) = listed_object(object, fetched, &self.metadata)?;
+                    share_listed_owners(&self.lock_namespace(), &mut key, &mut entry);
+                    entry._metadata_charge.resize(self.metadata.estimate(|| {
+                        std::mem::size_of::<DirectoryMetadata>() + crate::metadata_budget::LINKS
+                    }))?;
+                    Ok((key, entry))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let page = Arc::new(SubtreePage {
+                _metadata_charge: charge,
+                fetched,
+                objects,
+            });
             // Do not publish speculative siblings across a concurrent mutation.
             if self.lock_namespace().epoch == epoch {
                 for directory in &directories {
@@ -2015,8 +3261,8 @@ impl Filesystem {
             page
         };
         let mut remote = DirectorySelection::new();
-        for object in &page.page.objects {
-            let Some(relative) = object.key.strip_prefix(prefix) else {
+        for (key, cached) in &page.objects {
+            let Some(relative) = key.strip_prefix(prefix) else {
                 continue;
             };
             let (name, metadata) = if let Some((directory, _)) = relative.split_once('/') {
@@ -2024,19 +3270,24 @@ impl Filesystem {
                     continue;
                 }
                 let marker = format!("{prefix}{directory}/");
-                let metadata = if object.key == marker {
-                    listed_object(object.clone(), page.fetched).1
+                let metadata = if *key == marker {
+                    cached.try_clone(&self.metadata, key.len())?
                 } else {
                     DirectoryMetadata {
+                        _metadata_charge: self
+                            .metadata
+                            .charge(std::mem::size_of::<DirectoryMetadata>() + relative.len())?,
                         directory: true,
                         head: None,
+                        last_modified: None,
+                        key: None,
                         known: true,
                         fetched: page.fetched,
                     }
                 };
                 (directory, metadata)
             } else {
-                (relative, listed_object(object.clone(), page.fetched).1)
+                (relative, cached.try_clone(&self.metadata, key.len())?)
             };
             if direct_directory_name(name) && name > after {
                 remote.entry(name.to_owned()).or_insert(metadata);
@@ -2092,23 +3343,36 @@ impl Filesystem {
         selected: &mut DirectorySelection,
     ) -> Result<(String, Option<String>)> {
         let mut page_last = String::new();
-        for (name, entry) in page
+        for entry in page
             .objects
             .into_iter()
             .filter(|o| o.key != prefix)
-            .map(|object| listed_object(object, fetched))
-            .chain(page.common_prefixes.into_iter().map(|p| {
-                (
-                    p,
+            .map(|object| {
+                let (mut key, mut entry) = listed_object(object, fetched, &self.metadata)?;
+                share_listed_owners(&self.lock_namespace(), &mut key, &mut entry);
+                Ok((key, entry))
+            })
+            .chain(page.common_prefixes.into_iter().map(|mut p| {
+                let mut charge = self
+                    .metadata
+                    .charge(std::mem::size_of::<DirectoryMetadata>() + 2 * p.len() + 128)?;
+                p.truncate(p.trim_end_matches('/').len());
+                let p = crate::metadata_budget::SharedKey::from_admitted(p, &mut charge)?;
+                Ok((
+                    p.clone(),
                     DirectoryMetadata {
+                        _metadata_charge: charge,
                         directory: true,
                         head: None,
+                        last_modified: None,
+                        key: Some(p),
                         known: false,
                         fetched,
                     },
-                )
+                ))
             }))
         {
+            let (name, entry) = entry?;
             let Some(name) = name.strip_prefix(prefix) else {
                 return Err(Error::InvalidResponse("directory prefix escape".into()));
             };
@@ -2184,57 +3448,101 @@ impl Filesystem {
             .await
             .map_err(|_| Error::Timeout("directory metadata lookup"))??;
         let state = resolved.state.lock().unwrap();
+        let charge = self
+            .metadata
+            .charge_with(std::mem::size_of::<DirectoryMetadata>)?;
         *entry = DirectoryMetadata {
+            _metadata_charge: charge,
             directory: file_type(state.mode) == FileType::Directory,
             head: state.remote.clone(),
+            key: Some(state.key.clone()),
+            last_modified: Some(state.mtime),
             known: state.metadata_known,
             fetched: state.fetched,
         };
         Ok(())
     }
 
-    fn publish_directory_page(
+    async fn publish_directory_page(
         &self,
         snapshot: DirectorySnapshot,
         after: &str,
         limit: usize,
         selected: DirectorySelection,
         resolve_types: bool,
-    ) -> Result<Arc<DirectoryPage>> {
-        let mut ns = self.lock_namespace();
+    ) -> Result<(Arc<DirectoryPage>, Vec<Arc<Inode>>)> {
+        // LIST/type resolution may have outlived previously cached pages.
+        self.directory_pages.run_pending_tasks();
+        let page_charge = self.metadata.charge(
+            std::mem::size_of::<DirectoryPage>()
+                + std::mem::size_of::<(u64, u64, String, usize)>()
+                + after.len()
+                + crate::metadata_budget::LINKS,
+        )?;
         let ino = snapshot.node.ino;
+        let mut entries = Vec::with_capacity(selected.len());
+        // A pending wire page is not a reclamation victim. The existing
+        // conservative per-entry charge covers this bounded owner vector too.
+        let mut inodes = Vec::with_capacity(selected.len());
+        let deadline = Instant::now() + self.config.request_timeout;
+        for (name, mut entry) in selected {
+            let entry_charge = self
+                .metadata
+                .charge(4 * std::mem::size_of::<DirEntry>() + name.capacity())?;
+            let full = child(snapshot.prefix.trim_end_matches('/'), &name)?;
+            let node = loop {
+                if Instant::now() >= deadline {
+                    return Err(Error::Timeout("directory metadata admission"));
+                }
+                let new_inode = self.lock_namespace().named(&full).is_none();
+                let charge = self
+                    .admit_metadata(
+                        if self.metadata.enabled() {
+                            Inode::metadata_estimate(&full, None)
+                        } else {
+                            0
+                        },
+                        new_inode,
+                    )
+                    .await?;
+                let result = {
+                    let mut ns = self.lock_namespace();
+                    if snapshot.node.directory_epoch.load(Ordering::Relaxed) != snapshot.epoch
+                        || ns.names.get(snapshot.prefix.trim_end_matches('/')) != Some(&ino)
+                    {
+                        return Err(self.again("directory_generation_changed"));
+                    }
+                    self.listed_node(&mut ns, &full, &mut entry, charge)
+                };
+                match result {
+                    Err(Error::Fs(libc::EAGAIN)) => tokio::task::yield_now().await,
+                    other => break other?,
+                }
+            };
+            entries.push(DirEntry {
+                ino: node.ino,
+                name: crate::metadata_budget::MetadataString::new(name, entry_charge),
+                kind: node.attr().kind,
+            });
+            inodes.push(node);
+        }
+        let page = Arc::new(DirectoryPage {
+            metadata_charge: page_charge,
+            fetched: snapshot.fetched,
+            entries,
+        });
+        let ns = self.lock_namespace();
         if snapshot.node.directory_epoch.load(Ordering::Relaxed) != snapshot.epoch
             || ns.names.get(snapshot.prefix.trim_end_matches('/')) != Some(&ino)
         {
             return Err(self.again("directory_generation_changed"));
         }
-        let mut entries = Vec::with_capacity(selected.len());
-        for (name, entry) in selected {
-            let full = child(snapshot.prefix.trim_end_matches('/'), &name)?;
-            let node = self.listed_node(
-                &mut ns,
-                &full,
-                entry.directory,
-                entry.head,
-                entry.known,
-                entry.fetched,
-            )?;
-            entries.push(DirEntry {
-                ino: node.ino,
-                name,
-                kind: node.attr().kind,
-            });
-        }
-        let page = Arc::new(DirectoryPage {
-            fetched: snapshot.fetched,
-            entries,
-        });
-        if resolve_types {
+        if resolve_types && page.fetched.elapsed() < self.config.stat_cache_ttl {
             self.directory_pages
                 .insert((ino, snapshot.epoch, after.into(), limit), page.clone());
             self.directory_pages.run_pending_tasks();
         }
-        Ok(page)
+        Ok((page, inodes))
     }
 
     pub async fn unlink(&self, parent: u64, name: &str, directory: bool) -> Result<()> {
@@ -2292,7 +3600,7 @@ impl Filesystem {
             let state = node.state.lock().unwrap();
             if state.deleted
                 || state.key != key
-                || ns.names.get(&key) != Some(&node.ino)
+                || ns.names.get(key.as_str()) != Some(&node.ino)
                 || Self::pending_rename(&ns, &key, None)
             {
                 return Err(Error::Fs(libc::ENOENT));
@@ -2302,7 +3610,7 @@ impl Filesystem {
         {
             let ns = self.lock_namespace();
             let state = node.state.lock().unwrap();
-            if state.deleted || state.key != key || ns.names.get(&key) != Some(&node.ino) {
+            if state.deleted || state.key != key || ns.names.get(key.as_str()) != Some(&node.ino) {
                 return Err(Error::Fs(libc::ENOENT));
             }
             if let Some((parent, name)) = parent {
@@ -2326,8 +3634,7 @@ impl Filesystem {
         }
         {
             let mut ns = self.lock_namespace();
-            ns.tombstone(&key)?;
-            ns.pending_deletes.insert(key.clone(), node.ino);
+            ns.begin_pending_delete(&key, node.ino)?;
         }
         let remote_key = if directory {
             format!("{key}/")
@@ -2343,19 +3650,21 @@ impl Filesystem {
             if matches!(&error,Error::Backend{code,..} if matches!(code.as_str(),"AccessDenied"|"InvalidAccessKeyId"|"SignatureDoesNotMatch"|"InvalidArgument"|"InvalidRequest"))
             {
                 let mut ns = self.lock_namespace();
-                ns.pending_deletes.remove(&key);
-                ns.tombstones.remove(&key);
+                ns.remove_pending_delete(&key);
+                ns.remove_tombstone(&key);
                 ns.changed(&key);
             }
             return Err(error);
         }
         let mut ns = self.lock_namespace();
-        ns.pending_deletes.remove(&key);
-        ns.names.remove(&key);
+        ns.remove_pending_delete(&key);
+        ns.names.remove(key.as_str());
         ns.changed(&key);
         let mut state = node.state.lock().unwrap();
         state.deleted = true;
-        state.extents.clear();
+        if let Some(writer) = state.writer.as_deref_mut() {
+            writer.extents.clear();
+        }
         state.durable = state.version;
         ns.track_dirty(node.ino, &state);
         Ok(())
@@ -2376,7 +3685,7 @@ impl Filesystem {
             let ns = self.lock_namespace();
             if Self::pending_rename(&ns, &old, Some(source.ino))
                 || Self::pending_rename(&ns, &destination, Some(source.ino))
-                || [&old, &destination].into_iter().any(|key| {
+                || [old.as_str(), destination.as_str()].into_iter().any(|key| {
                     let prefix = format!("{key}/");
                     ns.pending_moves
                         .range(prefix.clone()..)
@@ -2387,7 +3696,7 @@ impl Filesystem {
                 return Err(Error::Fs(libc::EBUSY));
             }
         }
-        if destination == old {
+        if old == destination {
             return Ok(());
         }
         if destination.starts_with(&format!("{old}/")) {
@@ -2414,12 +3723,17 @@ impl Filesystem {
             Err(error) if not_found(&error) => None,
             Err(error) => return Err(error),
         };
-        let _moving = MoveLease::begin(&self.namespace, vec![old.clone(), destination.clone()])?;
+        let _moving =
+            MoveLease::begin(&self.namespace, vec![old.to_string(), destination.clone()])?;
+        let bindings = self.lock_namespace().bindings(&old, directory)?;
+        let _pin_charge = self
+            .metadata
+            .charge_with(|| (bindings.len() + 1) * (std::mem::size_of::<Arc<Inode>>() * 4 + 128))?;
         let mut pinned: Vec<_> = {
             let ns = self.lock_namespace();
-            ns.bindings(&old, directory)
-                .into_iter()
-                .map(|(_, ino)| ns.nodes[&ino].clone())
+            bindings
+                .iter()
+                .map(|(_, ino)| ns.nodes[ino].clone())
                 .collect()
         };
         if let Some(target) = &target {
@@ -2431,7 +3745,108 @@ impl Filesystem {
         for node in &pinned {
             gates.push(node.flush.clone().lock_owned().await);
         }
-        {
+        // Metadata can change externally without changing the content ETag, and
+        // an implicit cached directory can acquire a marker. Discover the COPY
+        // generation's actual metadata before committing a byte plan, not after
+        // creating a destination. The disabled path retains its old I/O shape.
+        let mut copy_heads = BTreeMap::new();
+        let source_was_dirty = {
+            let state = source.state.lock().unwrap();
+            state.version > state.durable
+        };
+        if self.metadata.enabled() {
+            for node in &pinned {
+                let (key, has_remote, dirty, _key_charge) = {
+                    let state = node.state.lock().unwrap();
+                    if state.key != old && !state.key.starts_with(&format!("{old}/")) {
+                        continue;
+                    }
+                    let backing = state.data_key.as_ref().unwrap_or(&state.key);
+                    let charge = self.metadata.charge(backing.len() + 1)?;
+                    let mut key = String::with_capacity(backing.len() + 1);
+                    key.push_str(backing);
+                    if file_type(state.mode) == FileType::Directory {
+                        key.push('/');
+                    }
+                    (
+                        key,
+                        state.remote.is_some(),
+                        state.version > state.durable,
+                        charge,
+                    )
+                };
+                if !has_remote && dirty {
+                    continue;
+                }
+                let head = match self.store.head(&key).await {
+                    Ok(head) => head,
+                    Err(error) if !has_remote && not_found(&error) => continue,
+                    Err(error) => return Err(error),
+                };
+                let charge = self.metadata.charge_with(|| {
+                    crate::metadata_budget::head_bytes(&head)
+                        + std::mem::size_of::<(u64, ObjectHead)>()
+                        + crate::metadata_budget::LINKS
+                })?;
+                copy_heads.insert(
+                    node.ino,
+                    crate::metadata_budget::MetadataOwner::new(head, charge),
+                );
+            }
+        }
+        // Reserve the complete bounded COPY/publication working set before any
+        // remote mutation. Credit transfers into canonical owners without a
+        // release/reacquire race; unused credit is released on every exit.
+        let mut move_credit = self.metadata.charge_with(|| {
+            pinned
+                .iter()
+                .map(|node| {
+                    let state = node.state.lock().unwrap();
+                    let observed_head = copy_heads
+                        .get(&node.ino)
+                        .map(|head| crate::metadata_budget::head_bytes(head));
+                    let mut head = 2 * observed_head.unwrap_or_else(|| {
+                        state.remote.as_ref().map_or(0, |remote| remote.bytes())
+                    }) + 1024;
+                    if state.version > state.durable {
+                        // A preceding flush can replace a small raw HEAD with
+                        // percent-encoded local attributes. Include that known
+                        // generation before allowing the flush or any COPY.
+                        head = head.max(
+                            state.metadata.encoding_bytes()
+                                + 16 * write::metadata_growth(&self.config)
+                                + std::mem::size_of::<ObjectHead>()
+                                + 1024,
+                        );
+                    }
+                    let new_len = destination.len() + state.key.len().saturating_sub(old.len());
+                    4 * head
+                        + 12 * new_len
+                        + 2 * state.metadata_bytes()
+                        + 4 * crate::metadata_budget::LINKS
+                        + if state.writer.is_none() {
+                            std::mem::size_of::<crate::inode::WriterState>()
+                        } else {
+                            0
+                        }
+                })
+                .sum()
+        })?;
+        let tombstone_credit = self.lock_namespace().reserve_tombstone(&old)?;
+        // Fund every cached participant's backing before COPY/DELETE or a dirty
+        // flush can commit. Later backing-key publication must not admit late.
+        for node in &pinned {
+            node.state
+                .lock()
+                .unwrap()
+                .writer_mut_from(&mut move_credit)?;
+        }
+        let mut published = false;
+        let mut publish_move = |move_credit: &mut crate::metadata_budget::MetadataCharge| {
+            if published {
+                return Ok(());
+            }
+            let mut ns = self.lock_namespace();
             let mut state = source.state.lock().unwrap();
             if state.deleted || state.key != old {
                 return Err(Error::Fs(libc::ENOENT));
@@ -2443,22 +3858,64 @@ impl Filesystem {
             {
                 return Err(Error::Fs(libc::EBUSY));
             }
-            state.rename_target = Some(destination.clone());
-        }
+            state.admit_metadata_from(move_credit, destination.len())?;
+            // Retain the admitted backing across intent publication. Nothing
+            // after begin_pending_move may reacquire it from the global budget.
+            let writer = state.writer_mut_from(move_credit)?;
+            if let Err(error) = ns.begin_pending_move(&old, &destination, source.ino) {
+                state.settle_metadata();
+                return Err(error);
+            }
+            writer.rename_target = Some(destination.clone());
+            state.settle_metadata();
+            published = true;
+            Ok(())
+        };
+        // A failed dirty-flush admission has not started a rename. Publish its
+        // persistent intent at the first mutating request instead; the scoped
+        // MoveLease already excludes local writers during preparation. Existing
+        // retry intent is never removed, and possibly applied requests retain it.
+        self.flush_node_locked_before(&source, Some(&mut || publish_move(&mut move_credit)))
+            .await?;
+        // A dirty flush created a new generation. Keep its complete HTTP
+        // properties only in this COPY operation's pre-admitted working set.
+        if self.metadata.enabled()
+            && source_was_dirty
+            && source.state.lock().unwrap().remote.is_some()
         {
-            let mut ns = self.lock_namespace();
-            ns.pending_moves.insert(old.clone(), source.ino);
-            ns.pending_moves.insert(destination.clone(), source.ino);
+            let key = {
+                let state = source.state.lock().unwrap();
+                let key = state.data_key.as_ref().unwrap_or(&state.key);
+                if directory {
+                    format!("{key}/")
+                } else {
+                    key.to_string()
+                }
+            };
+            let head = self.store.head(&key).await?;
+            let charge = move_credit.take(crate::metadata_budget::head_bytes(&head))?;
+            copy_heads.insert(
+                source.ino,
+                crate::metadata_budget::MetadataOwner::new(head, charge),
+            );
         }
-        self.flush_node_locked(&source).await?;
-        let mut renamed_head = None;
+        // A clean/no-directory-object flush sends no request. Keep only the
+        // scoped lease during read-only discovery; persistent intent starts at
+        // COPY, after its fallible preparation, not before LIST or ETag HEAD.
         if directory {
             // Drain paged source objects incrementally; never materialize a subtree.
             let prefix = format!("{old}/");
-            let cached: BTreeMap<_, _> = pinned
-                .iter()
-                .map(|node| (node.state.lock().unwrap().key.clone(), node.clone()))
-                .collect();
+            let _index_charge = move_credit.take(
+                bindings.len()
+                    * (std::mem::size_of::<(&str, Arc<Inode>)>() + crate::metadata_budget::LINKS),
+            )?;
+            let cached: BTreeMap<_, _> = {
+                let ns = self.lock_namespace();
+                bindings
+                    .iter()
+                    .map(|(key, ino)| (key.as_str(), ns.nodes[ino].clone()))
+                    .collect()
+            };
             let mut last_drained = None;
             loop {
                 let page = self.store.list(&prefix, None, None).await?;
@@ -2477,19 +3934,58 @@ impl Filesystem {
                         .strip_prefix(&prefix)
                         .ok_or_else(|| Error::InvalidResponse("rename prefix escape".into()))?;
                     let target = format!("{destination}/{suffix}");
+                    if self.metadata.enabled()
+                        && cached.contains_key(object.key.trim_end_matches('/'))
+                    {
+                        let node = &cached[object.key.trim_end_matches('/')];
+                        if !(copy_heads.contains_key(&node.ino)
+                            || node.ino == source.ino && source_was_dirty)
+                        {
+                            return Err(Error::Fs(libc::ESTALE));
+                        }
+                    }
                     let etag = match object.etag {
                         Some(etag) => etag,
                         None => self.store.head(&object.key).await?.etag,
                     };
+                    publish_move(&mut move_credit)?;
                     let copied = self.store.copy(&object.key, &target, &etag).await?;
                     if let Some(node) = cached.get(object.key.trim_end_matches('/')) {
-                        let head = self.store.head(&target).await?;
+                        let mut head = self.store.head(&target).await?;
                         if head.etag != copied {
                             return Err(Error::Fs(libc::ESTALE));
                         }
                         let mut state = node.state.lock().unwrap();
-                        state.remote = Some(head);
-                        state.data_key = Some(target.trim_end_matches('/').into());
+                        let mut _normalization = None;
+                        if self.metadata.enabled() {
+                            let expected = copy_heads.get(&node.ino).map(|head| &**head);
+                            if expected.is_none_or(|expected| !same_copy_metadata(expected, &head))
+                            {
+                                return Err(Error::Fs(libc::ESTALE));
+                            }
+                            _normalization =
+                                Some(move_credit.take(
+                                    2 * crate::metadata_budget::head_bytes(expected.unwrap()),
+                                )?);
+                            compact_copy_head(&mut head);
+                        }
+                        state.admit_metadata_from(
+                            &mut move_credit,
+                            self.metadata.estimate(|| {
+                                crate::metadata_budget::head_bytes(&head) + target.len()
+                            }),
+                        )?;
+                        let remote = state.cache_remote_from(head, &mut move_credit)?;
+                        if state.version == state.durable {
+                            state.metadata = remote.metadata.clone();
+                        }
+                        state.remote = Some(remote);
+                        state.writer_mut()?.data_key =
+                            Some(crate::metadata_budget::SharedKey::from_admitted(
+                                target.trim_end_matches('/').to_owned(),
+                                &mut move_credit,
+                            )?);
+                        state.settle_metadata();
                     }
                     self.store.delete(&object.key).await?;
                     last_drained = Some(object.key);
@@ -2499,21 +3995,46 @@ impl Filesystem {
             let needs_copy =
                 source.state.lock().unwrap().data_key.as_deref() != Some(destination.as_str());
             if needs_copy {
-                let mut head = source
-                    .state
-                    .lock()
-                    .unwrap()
-                    .remote
-                    .clone()
-                    .ok_or(Error::Fs(libc::EIO))?;
+                let (remote, mut head, _copy_charge) = {
+                    let state = source.state.lock().unwrap();
+                    let remote = state.remote.clone().ok_or(Error::Fs(libc::EIO))?;
+                    let head = copy_heads
+                        .get(&source.ino)
+                        .map(|head| (**head).clone())
+                        .unwrap_or_else(|| remote.read_head());
+                    let charge = move_credit.take(
+                        self.metadata
+                            .estimate(|| crate::metadata_budget::head_bytes(&head)),
+                    )?;
+                    (remote, head, charge)
+                };
+                publish_move(&mut move_credit)?;
                 head.etag = self.store.copy(&old, &destination, &head.etag).await?;
                 // Publish the backing key before DELETE can remove the old
                 // source, including cancellation or a lost DELETE response.
                 let mut state = source.state.lock().unwrap();
-                state.remote = Some(head);
-                state.data_key = Some(destination.clone());
+                state.admit_metadata_from(
+                    &mut move_credit,
+                    self.metadata
+                        .estimate(|| crate::metadata_budget::head_bytes(&head) + destination.len()),
+                )?;
+                let remote = if self.metadata.enabled() {
+                    state.cache_remote_from(head, &mut move_credit)?
+                } else {
+                    remote.with_generation(head.size, head.etag)?
+                };
+                if state.version == state.durable {
+                    state.metadata = remote.metadata.clone();
+                }
+                state.remote = Some(remote);
+                state.writer_mut()?.data_key =
+                    Some(crate::metadata_budget::SharedKey::from_admitted(
+                        destination.clone(),
+                        &mut move_credit,
+                    )?);
+                state.settle_metadata();
             }
-            let head = self.store.head(&destination).await?;
+            let mut head = self.store.head(&destination).await?;
             if source
                 .state
                 .lock()
@@ -2524,12 +4045,40 @@ impl Filesystem {
             {
                 return Err(Error::Fs(libc::ESTALE));
             }
-            renamed_head = Some(head);
+            {
+                let mut state = source.state.lock().unwrap();
+                let mut _normalization = None;
+                if self.metadata.enabled()
+                    && copy_heads
+                        .get(&source.ino)
+                        .is_none_or(|expected| !same_copy_metadata(expected, &head))
+                {
+                    return Err(Error::Fs(libc::ESTALE));
+                }
+                if self.metadata.enabled() {
+                    _normalization = Some(move_credit.take(
+                        2 * crate::metadata_budget::head_bytes(
+                            copy_heads.get(&source.ino).unwrap(),
+                        ),
+                    )?);
+                    compact_copy_head(&mut head);
+                }
+                state.admit_metadata_from(
+                    &mut move_credit,
+                    self.metadata
+                        .estimate(|| crate::metadata_budget::head_bytes(&head)),
+                )?;
+                let remote = state.cache_remote_from(head, &mut move_credit)?;
+                if state.version == state.durable {
+                    state.metadata = remote.metadata.clone();
+                }
+                state.remote = Some(remote);
+                state.settle_metadata();
+            }
             self.store.delete(&old).await?;
         }
         // Copy can change ETags, including for cached descendants. Refresh those
         // generations while their per-inode commit gates remain held.
-        let mut refreshed = BTreeMap::new();
         if directory {
             for node in &pinned {
                 let info = {
@@ -2546,50 +4095,96 @@ impl Filesystem {
                         &info.0[old.len()..],
                         if info.2 { "/" } else { "" }
                     );
-                    refreshed.insert(node.ino, self.store.head(&new).await?);
+                    let mut head = self.store.head(&new).await?;
+                    let mut state = node.state.lock().unwrap();
+                    let mut _normalization = None;
+                    if self.metadata.enabled()
+                        && copy_heads
+                            .get(&node.ino)
+                            .is_none_or(|expected| !same_copy_metadata(expected, &head))
+                    {
+                        return Err(Error::Fs(libc::ESTALE));
+                    }
+                    if self.metadata.enabled() {
+                        _normalization = Some(move_credit.take(
+                            2 * crate::metadata_budget::head_bytes(
+                                copy_heads.get(&node.ino).unwrap(),
+                            ),
+                        )?);
+                        compact_copy_head(&mut head);
+                    }
+                    state.admit_metadata_from(
+                        &mut move_credit,
+                        self.metadata
+                            .estimate(|| crate::metadata_budget::head_bytes(&head)),
+                    )?;
+                    let remote = state.cache_remote_from(head, &mut move_credit)?;
+                    if state.version == state.durable {
+                        state.metadata = remote.metadata.clone();
+                    }
+                    state.remote = Some(remote);
+                    state.settle_metadata();
                 }
             }
         }
+        // Reserve the complete publication before changing any name binding.
+        // Failed admission leaves the retryable move markers and old live names.
+        let _new_keys_charge = move_credit.take(self.metadata.estimate(|| {
+            bindings.len() * std::mem::size_of::<crate::metadata_budget::SharedKey>()
+        }))?;
         let mut ns = self.lock_namespace();
-        ns.tombstone(&old)?;
-        ns.tombstones.remove(&destination);
-        if let Some(ino) = ns.names.remove(&destination)
+        let new_keys = bindings
+            .iter()
+            .map(|(key, ino)| {
+                let new = format!("{destination}{}", &key[old.len()..]);
+                if let Some(node) = ns.nodes.get(ino) {
+                    let state = node.state.lock().unwrap();
+                    if let Some(backing) = &state.data_key
+                        && *backing == new
+                    {
+                        return Ok(backing.clone());
+                    }
+                }
+                crate::metadata_budget::SharedKey::from_admitted(new, &mut move_credit)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // Empty/pure-local directories reach this synchronous namespace commit
+        // without remote mutation: the scoped lease suffices, so no persistent
+        // retry intent is needed. There is no await during this publication.
+        ns.tombstone_reserved(&old, tombstone_credit)?;
+        ns.remove_tombstone(&destination);
+        if let Some(ino) = ns.names.remove(destination.as_str())
             && let Some(target) = ns.nodes.get(&ino)
         {
             let mut state = target.state.lock().unwrap();
             state.deleted = true;
-            state.extents.clear();
+            if let Some(writer) = state.writer.as_deref_mut() {
+                writer.extents.clear();
+            }
             state.durable = state.version;
         }
         ns.forget_dirty(&destination);
-        let changed = ns.bindings(&old, directory);
-        for (key, ino) in changed {
-            let new = format!("{destination}{}", &key[old.len()..]);
-            ns.names.remove(&key);
+        for ((key, &ino), new) in bindings.iter().map(|(key, ino)| (key, ino)).zip(new_keys) {
+            ns.names.remove(key.as_str());
             ns.names.insert(new.clone(), ino);
-            ns.forget_dirty(&key);
+            ns.forget_dirty(key);
             if let Ok(node) = ns.get(ino) {
                 let mut state = node.state.lock().unwrap();
                 state.key = new;
-                state.data_key = None;
+                if let Some(writer) = state.writer.as_deref_mut() {
+                    writer.data_key = None;
+                    if ino == source.ino {
+                        writer.rename_target = None;
+                    }
+                }
                 state.negative_lookups.clear();
-                if let Some(head) = refreshed.remove(&ino) {
-                    state.remote = Some(head);
-                }
-                if ino == source.ino {
-                    state.rename_target = None;
-                }
-                if ino == source.ino
-                    && let Some(head) = renamed_head.take()
-                {
-                    state.remote = Some(head);
-                }
                 ns.track_dirty(ino, &state);
+                state.settle_metadata();
             }
         }
         ns.changed(&destination);
-        ns.pending_moves.remove(&old);
-        ns.pending_moves.remove(&destination);
+        ns.remove_pending_move(&old);
+        ns.remove_pending_move(&destination);
         ns.get(newparent)?
             .state
             .lock()
@@ -2621,6 +4216,7 @@ impl Filesystem {
             if state.deleted {
                 return Err(Error::Fs(libc::ENOENT));
             }
+            let previous = (state.mode, state.uid, state.gid, state.mtime);
             if self.config.enable_perms {
                 if let Some(mode) = mode {
                     state.mode = (state.mode & libc::S_IFMT) | (mode & 0o7777);
@@ -2635,28 +4231,39 @@ impl Filesystem {
             if let Some(mtime) = mtime {
                 state.mtime = mtime;
             }
+            if let Err(error) = self.prepare_metadata(&mut state) {
+                (state.mode, state.uid, state.gid, state.mtime) = previous;
+                return Err(error);
+            }
             state.version += 1;
-            self.prepare_metadata(&mut state);
             ns.track_dirty(node.ino, &state);
         }
         Ok(node.attr())
     }
 
-    pub fn xattrs(&self, ino: u64) -> Result<BTreeMap<String, Vec<u8>>> {
+    pub fn xattrs(&self, ino: u64) -> Result<crate::metadata_budget::Xattrs> {
         if self.config.disable_xattr {
             return Err(Error::Fs(libc::ENOSYS));
         }
         let node = self.node(ino)?;
         let state = node.state.lock().unwrap();
+        let charge = self.metadata.charge_with(|| {
+            2 * state.metadata.map_bytes()
+                + state.metadata.len() * 5
+                + state
+                    .remote
+                    .as_ref()
+                    .map_or(0, |head| head.etag.len() + 128)
+        })?;
         let mut attrs: BTreeMap<_, _> = state
             .metadata
             .iter()
-            .map(|(k, v)| (format!("user.{k}"), v.clone()))
+            .map(|(k, v)| (format!("user.{k}"), v.to_vec()))
             .collect();
         if let Some(remote) = &state.remote {
             attrs.insert("s3.etag".into(), remote.etag.as_bytes().to_vec());
         }
-        Ok(attrs)
+        Ok(crate::metadata_budget::Xattrs::new(attrs, charge))
     }
 
     pub fn setxattr(&self, ino: u64, name: &str, value: Option<&[u8]>, flags: i32) -> Result<()> {
@@ -2695,25 +4302,58 @@ impl Filesystem {
         let size: usize = state
             .metadata
             .iter()
-            .filter(|(k, _)| k.as_str() != name)
+            .filter(|(k, _)| *k != name)
             .map(|(k, v)| k.len() + v.len())
             .sum();
         if size + name.len() + value.map_or(0, <[u8]>::len) > 65536 {
             return Err(Error::Fs(libc::E2BIG));
         }
         if let Some(value) = value {
-            state.metadata.insert(name.into(), value.to_vec());
+            state.metadata.try_insert(name, value)?;
         } else {
-            state.metadata.remove(name);
+            state.metadata.try_remove(name)?;
         }
         state.version += 1;
+        state.settle_metadata();
         ns.track_dirty(node.ino, &state);
         Ok(())
     }
 
     pub async fn shutdown(&self) -> Result<()> {
         self.closing.store(true, Ordering::Release);
+        let (cache, startup) = {
+            let mut disk = self.disk.lock().unwrap();
+            disk.closing = true;
+            if let Some(deferred) = disk.deferred.take() {
+                deferred.close();
+            }
+            (disk.cache.clone(), disk.startup.clone())
+        };
+        let deadline = self.config.request_timeout;
+        // Teardown is independently owned before the first writer await. A
+        // cancelled/failed flush cannot strand the optional directory lock.
+        let close = (cache.is_some() || startup.is_some()).then(|| {
+            tokio::spawn(async move {
+                if let Some(cache) = cache {
+                    cache.close(deadline).await?;
+                }
+                if let Some(startup) = startup {
+                    tokio::time::timeout(Duration::from_secs(120) + deadline, startup)
+                        .await
+                        .map_err(|_| Error::Timeout("L2 startup shutdown"))?
+                        .map_err(|error| Error::Config(error.to_string()))?;
+                }
+                Ok::<_, Error>(())
+            })
+        });
         let result = self.flush_all().await;
+        if let Some(close) = close {
+            match close.await {
+                Ok(Ok(())) => (),
+                Ok(Err(error)) => eprintln!("disk cache close failed: {error}"),
+                Err(error) => eprintln!("disk cache close task failed: {error}"),
+            }
+        }
         // Cancelled multipart tasks retain their admission token through abort.
         // Do not tear down the runtime while that bounded cleanup is in flight.
         let _idle = self

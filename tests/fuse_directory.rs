@@ -1,47 +1,13 @@
 //! Explicit native tests: never silently pass when a requested FUSE mount fails.
 mod support;
 
-use geesefs_rs::{filesystem::Filesystem, fuse::Fuse};
+use geesefs_rs::filesystem::Filesystem;
 use std::{
     path::Path,
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
-use support::MemoryStore;
-
-fn mounted(fs: Arc<Filesystem>, check: impl FnOnce(&Path)) {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .unwrap();
-    let directory = tempfile::tempdir().unwrap();
-    let adapter = Fuse::new(fs, runtime.handle().clone());
-    let notifier = adapter.notifier.clone();
-    let shutdown_error = adapter.shutdown_error.clone();
-    let mut options = fuser::Config::default();
-    let threads = std::env::var("GEESEFS_TEST_FUSE_THREADS")
-        .map(|value| value.parse::<usize>().expect("native fixture loop count"))
-        .unwrap_or(1);
-    options.n_threads = Some(threads);
-    options.clone_fd = threads > 1;
-    options
-        .mount_options
-        .push(fuser::MountOption::DefaultPermissions);
-    let session = fuser::Session::new(adapter, directory.path(), &options)
-        .expect("explicitly requested native FUSE mount must be available");
-    *notifier.lock().unwrap() = Some(session.notifier());
-    let session = session.spawn().unwrap();
-    let checked =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check(directory.path())));
-    session
-        .umount_and_join()
-        .expect("owned FUSE session must stop cleanly");
-    if let Err(panic) = checked {
-        std::panic::resume_unwind(panic);
-    }
-    assert!(shutdown_error.lock().unwrap().is_none());
-}
+use support::{MemoryStore, native::mounted};
 
 #[test]
 #[ignore = "requires an explicitly authorized Linux FUSE fixture"]
@@ -331,11 +297,21 @@ fn plus_pages_deliver_attributes_and_lookup_ownership_without_overlapping_lists(
             1,
             "Linux does not acquire lookup references for dot entries"
         );
+        let requests = store.list_requests.lock().unwrap();
+        let root_requests = requests
+            .iter()
+            .filter(|(prefix, _)| prefix.is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
+        // The initial flat probe cannot cover this directory. Ordinary LIST
+        // needs nine <=1000-name pages plus EOF, independent of kernel frames.
+        let mut expected = vec![(String::new(), None)];
+        expected.extend(std::iter::repeat_n((String::new(), Some("/".into())), 10));
         assert_eq!(
-            store.list_calls.load(Ordering::Relaxed),
-            10, // Nine <=1000-name backend pages plus EOF, despite smaller FUSE frames.
+            root_requests, expected,
             "kernel frames must not split backend pages into overlapping LIST requests"
         );
+        drop(requests);
         for name in &names {
             assert_eq!(std::fs::metadata(path.join(name)).unwrap().len(), 17);
         }
@@ -355,6 +331,10 @@ fn failed_plus_buffer_does_not_transfer_unsent_lookup_references() {
         store.seed(&format!("{number:04}"), b"data");
     }
     store.seed("z-directory/child", b"data");
+    // A complete flat page authoritatively establishes the implicit directory
+    // without a child LIST. Force pagination so the injected LIST is required
+    // after the regular entries have been buffered in the same PLUS reply.
+    store.page_size.store(5, Ordering::Relaxed);
     *store.failed_list_prefix.lock().unwrap() = Some("z-directory/".into());
     let fs = store.filesystem(16);
     mounted(fs.clone(), |path| {
@@ -364,6 +344,15 @@ fn failed_plus_buffer_does_not_transfer_unsent_lookup_references() {
         assert!(
             result.is_err(),
             "a failed metadata fetch must not publish a partial PLUS buffer"
+        );
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EIO));
+        assert!(
+            store
+                .list_requests
+                .lock()
+                .unwrap()
+                .contains(&("z-directory/".into(), Some("/".into()))),
+            "the dependency failure must actually be reached"
         );
         let references = fs
             .namespace
@@ -493,6 +482,207 @@ fn exhausted_file_handles_reject_create_before_namespace_mutation() {
 
 #[test]
 #[ignore = "requires an explicitly authorized Linux FUSE fixture"]
+fn live_directory_handles_use_the_handle_budget_not_request_concurrency() {
+    let store = MemoryStore::new();
+    store.seed("file", b"independent bytes");
+    let mut config = MemoryStore::config(16);
+    config.max_requests = 2;
+    config.entry_limit = 32;
+    let fs = Filesystem::new(config, store).unwrap();
+    mounted(fs.clone(), |path| {
+        let mut held = (0..32)
+            .map(|_| {
+                std::fs::read_dir(path).expect("idle directory handles are not active requests")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            std::fs::read_dir(path).unwrap_err().raw_os_error(),
+            Some(libc::EMFILE)
+        );
+        assert_eq!(
+            std::fs::File::open(path.join("file"))
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EMFILE),
+            "file and directory handles share the same bounded ownership budget"
+        );
+        let names = held[0]
+            .by_ref()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["file"]);
+    });
+    assert_eq!(fs.node(1).unwrap().state.lock().unwrap().opens, 0);
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Linux FUSE fixture"]
+fn native_du_reclaims_kernel_cached_entries_without_losing_open_file_bytes() {
+    use std::io::Read;
+
+    let store = MemoryStore::new();
+    for directory in 0..32 {
+        for file in 0..16 {
+            store.seed(&format!("dir-{directory:02}/file-{file:02}"), &[b'x'; 513]);
+        }
+    }
+    store.seed("anchor", b"held throughout traversal");
+    for entry_limit in [2048, 128] {
+        let mut config = MemoryStore::config(16);
+        config.entry_limit = entry_limit;
+        config.stat_cache_ttl = Duration::from_secs(60);
+        config.mount_options.push("ro".into());
+        let fs = Filesystem::new(config, store.clone()).unwrap();
+        mounted(fs.clone(), |path| {
+            let mut anchor = std::fs::File::open(path.join("anchor")).unwrap();
+            let output = std::process::Command::new("timeout")
+                .args(["15s", "du", "-s", "--block-size=1"])
+                .arg(path)
+                .output()
+                .unwrap();
+            let namespace = fs.namespace.lock().unwrap();
+            let kernel_pinned = namespace
+                .nodes
+                .values()
+                .filter(|node| node.state.lock().unwrap().lookups != 0)
+                .count();
+            let entries = namespace.nodes.len();
+            let evictions = namespace.evictions;
+            drop(namespace);
+            assert!(
+                output.status.success(),
+                "du must traverse more names than the inode bound: {output:?}; entries={}, kernel_pinned={kernel_pinned}",
+                entries
+            );
+            eprintln!(
+                "limit={entry_limit}, entries={}, kernel_pinned={kernel_pinned}, evictions={}, du={:?}",
+                entries, evictions, output
+            );
+            assert!(entries <= entry_limit as usize);
+            if entry_limit == 128 {
+                assert!(evictions > 0);
+            }
+            assert!(output.stderr.is_empty(), "{output:?}");
+            // 512 files each use two 512-byte blocks, plus one block for the anchor.
+            assert_eq!(
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .split_whitespace()
+                    .next(),
+                Some("524800")
+            );
+            let mut bytes = Vec::new();
+            anchor.read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, b"held throughout traversal");
+            assert_eq!(
+                std::fs::read(path.join("dir-00/file-00")).unwrap(),
+                [b'x'; 513]
+            );
+        });
+    }
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Linux FUSE fixture"]
+fn native_pressure_prefixes_advance_exhausted_pages_without_false_eof() {
+    use std::io::Read;
+
+    let store = MemoryStore::new();
+    for file in 0..1536 {
+        store.seed(&format!("file-{file:04}"), &[b'x'; 513]);
+    }
+    for metadata_limit in [None, Some(16 << 20)] {
+        let mut config = MemoryStore::config(16);
+        config.entry_limit = 2048;
+        config.metadata_limit = metadata_limit;
+        config.stat_cache_ttl = Duration::from_secs(60);
+        config.mount_options.push("ro".into());
+        let fs = Filesystem::new(config, store.clone()).unwrap();
+        mounted(fs.clone(), |path| {
+            // Real open files maintain pressure across every reply. All names
+            // fit the bound, isolating cursor progress from capacity exhaustion.
+            let mut held = (0..1024)
+                .map(|file| std::fs::File::open(path.join(format!("file-{file:04}"))).unwrap())
+                .collect::<Vec<_>>();
+            let output = std::process::Command::new("timeout")
+                .args(["15s", "du", "-s", "--block-size=1"])
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert!(output.stderr.is_empty(), "{output:?}");
+            // 1536 independent object bodies each occupy two 512-byte blocks.
+            assert_eq!(
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .split_whitespace()
+                    .next(),
+                Some("1572864")
+            );
+            let namespace = fs.namespace.lock().unwrap();
+            assert!(namespace.nodes.len() <= 2048);
+            assert_eq!(namespace.capacity_failures, 0);
+            drop(namespace);
+            let mut bytes = Vec::new();
+            held[0].read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, [b'x'; 513]);
+        });
+    }
+}
+
+#[test]
+#[ignore = "known flat-pressure progress gap; requires an explicitly authorized Linux FUSE fixture"]
+fn native_flat_directory_retires_kernel_owners_before_the_next_backend_page() {
+    let store = MemoryStore::new();
+    // More names than the namespace budget, with no external inode owners.
+    // Pending PLUS entries need headroom before their lookups reach the kernel.
+    for file in 0..8192 {
+        store.seed(&format!("file-{file:04}"), &[b'x'; 513]);
+    }
+    for metadata_limit in [None, Some(16 << 20)] {
+        let mut config = MemoryStore::config(16);
+        config.entry_limit = 2048;
+        config.metadata_limit = metadata_limit;
+        config.stat_cache_ttl = Duration::from_secs(60);
+        config.mount_options.push("ro".into());
+        let fs = Filesystem::new(config, store.clone()).unwrap();
+        mounted(fs.clone(), |path| {
+            let output = std::process::Command::new("timeout")
+                .args(["15s", "du", "-s", "--block-size=1"])
+                .arg(path)
+                .output()
+                .unwrap();
+            let namespace = fs.namespace.lock().unwrap();
+            eprintln!(
+                "flat: metadata={:?}, entries={}, kernel_pinned={}, evictions={}, capacity_failures={}, output={output:?}",
+                fs.metadata_usage(),
+                namespace.nodes.len(),
+                namespace
+                    .nodes
+                    .values()
+                    .filter(|node| node.state.lock().unwrap().lookups != 0)
+                    .count(),
+                namespace.evictions,
+                namespace.capacity_failures
+            );
+            drop(namespace);
+            assert!(output.status.success(), "{output:?}");
+            assert!(output.stderr.is_empty(), "{output:?}");
+            assert_eq!(
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .split_whitespace()
+                    .next(),
+                Some("8388608")
+            );
+            assert!(fs.namespace.lock().unwrap().nodes.len() <= 2048);
+            assert_eq!(std::fs::read(path.join("file-0000")).unwrap(), [b'x'; 513]);
+        });
+    }
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Linux FUSE fixture"]
 fn namespace_pressure_does_not_reclaim_or_reference_unsent_plus_entries() {
     let store = MemoryStore::new();
     for number in 0..12 {
@@ -540,18 +730,36 @@ fn plus_common_prefixes_preserve_directory_marker_permissions_and_ownership() {
             ("uid".into(), "1234".into()),
             ("gid".into(), "5678".into()),
         ]);
-    let fs = store.filesystem(16);
-    mounted(fs, |path| {
-        let names = std::fs::read_dir(path)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
+    for page_size in [1000, 1] {
+        store.page_size.store(page_size, Ordering::Relaxed);
+        store.head_keys.lock().unwrap().clear();
+        let fs = store.filesystem(16);
+        mounted(fs, |path| {
+            let names = std::fs::read_dir(path)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>();
+            assert_eq!(names, ["directory"]);
+            let metadata = std::fs::metadata(path.join("directory")).unwrap();
+            assert_eq!(metadata.mode() & 0o7777, 0o750);
+            assert_eq!((metadata.uid(), metadata.gid()), (1234, 5678));
+        });
+        let heads = store.head_keys.lock().unwrap();
+        let marker_heads = heads
+            .iter()
+            .filter(|key| key.starts_with("directory"))
+            .map(String::as_str)
             .collect::<Vec<_>>();
-        assert_eq!(names, ["directory"]);
-        let metadata = std::fs::metadata(path.join("directory")).unwrap();
-        assert_eq!(metadata.mode() & 0o7777, 0o750);
-        assert_eq!((metadata.uid(), metadata.gid()), (1234, 5678));
-    });
-    assert_eq!(store.head_starts.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            marker_heads,
+            if page_size == 1 {
+                vec!["directory/"]
+            } else {
+                vec![]
+            },
+            "a complete flat page reuses marker metadata; a common prefix resolves it"
+        );
+    }
 }
 
 #[test]

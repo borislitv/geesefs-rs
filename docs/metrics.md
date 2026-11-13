@@ -87,6 +87,71 @@ Explicit cache clearing and same-key replacements are not policy evictions.
 An evicted block can remain charged while a reader owns its backing. Byte admission,
 retention policy, span count and process RSS are different quantities.
 
+### Persistent payload tier
+
+See [selection and operation](disk-cache-operations.md) for the checked-in mirror
+payload regex and the distinction between whole files and cached records.
+
+These observations are separate from RAM ownership and process memory. The
+`geesefs_disk_cache_state{state}` vocabulary is `disabled`, `prepared`,
+`recovering`, `ready`, `closing`, `closed`, `bypass`. A proven-new Prepared cache
+reserves funding without constructing media. `geesefs_disk_cache_stats_available`
+is zero until an adapter snapshot exists; absent adapter gauges then remain
+omitted, not fabricated zero occupancy or a successful Ready observation.
+
+| Metric | Meaning |
+| --- | --- |
+| `geesefs_disk_cache_funding_bytes` | Fixed payload-budget deduction; not measured heap or RSS |
+| `geesefs_effective_l1_policy_bytes` | Remaining retention ceiling including revocable flush loans, not actual residency |
+| `geesefs_disk_cache_eligibility_decisions_total{reason}` | Sixteen fixed required-window decisions/observations; excludes optional touches/demotion. Contention can be followed by successful eligibility |
+| `geesefs_disk_cache_read_fallbacks_total{reason}` | Fourteen fixed admission/I/O/validation outcomes; not mutually exclusive S3 misses |
+| `geesefs_disk_cache_active_read_jobs` / `geesefs_disk_cache_active_spill_jobs` | Actual independently funded owners, at most four of each; includes work outliving its observer |
+| `geesefs_disk_cache_queued_reads` | Key-free FIFO waiters charged to their read windows |
+| `geesefs_disk_cache_admitted_demotions_total` / `geesefs_disk_cache_engine_admitted_demotions_total` | Admitted copy and accepted engine enqueue, respectively; neither is a durability acknowledgement |
+| `geesefs_disk_cache_read_operation_hits_total` / `geesefs_disk_cache_hits_total` | Worker-completed copies versus caller-delivered adapter results; a later generation check may still reject delivery |
+| `geesefs_disk_cache_hit_bytes_total` | Validated bytes delivered into the read pipeline, including alignment/read-ahead; not requested client bytes |
+| `geesefs_disk_cache_index_entries` / `geesefs_disk_cache_index_entry_limit` | Guarded index slots and their bound, including pending updates/tombstones; not distinct files or S3 objects |
+| `geesefs_disk_cache_managed_capacity_bytes` | Configured file/engine capacity, including storage overhead; not current occupancy |
+| `geesefs_disk_cache_regions{state}` | Current data regions: `clean` (reusable), `writing` (reserved by a flusher), `evictable` (sealed/recovered), `reclaiming` (being recycled) |
+| `geesefs_disk_cache_region_size_bytes` | One data-region allocation unit; independent of the up-to-128-KiB cached payload records |
+| `geesefs_disk_cache_region_capacity_bytes` | Actual data-region pool, excluding the tombstone log and unusable file tail |
+| `geesefs_disk_cache_region_free_bytes` | Clean reusable region capacity; not free filesystem space |
+| `geesefs_disk_cache_region_used_bytes` | Non-clean reserved region capacity, including unused region tails and obsolete records; not useful live payload bytes |
+| `geesefs_disk_cache_region_reclaims_started_total` | Region-picker callbacks, not completed per-record evictions or reclaimed bytes |
+| `geesefs_disk_cache_opened_file_allocated_bytes` | Opening-time file allocation observation, not current physical occupancy |
+| `geesefs_disk_cache_io_read_bytes_total` / `geesefs_disk_cache_io_write_bytes_total` | Cumulative engine I/O, including record overhead; reset on restart, can exceed capacity after reuse |
+| `geesefs_disk_cache_dropped_total` / `geesefs_disk_cache_errors_total` | Best-effort demotion refusals versus adapter/storage/decode errors; drops are not capacity evictions |
+
+Two different fullness limits must remain visible:
+
+```promql
+100 * geesefs_disk_cache_index_entries / geesefs_disk_cache_index_entry_limit
+100 * geesefs_disk_cache_region_used_bytes / geesefs_disk_cache_region_capacity_bytes
+```
+
+Interpret these only with `geesefs_disk_cache_state{state="ready"} == 1` and
+`geesefs_disk_cache_stats_available == 1`. Region gauges are omitted before an
+adapter exists, including disabled/prepared/bypass states, rather than presenting
+a misleading zero. `geesefs_disk_cache_instrumentation_available{observation="region_occupancy"}`
+reports availability. Independent state-gauge updates may straddle a transition;
+the pool capacity is fixed separately from the actual picker initialization.
+
+Recovery restores occupied-region observations even though session I/O counters
+restart at zero. A writer can reserve a clean region before writing bytes; even
+an empty drain fence can do this. `evictable` includes useful, obsolete and partially
+filled regions, not just garbage. Do not interpret region fullness as payload
+density, a count of complete cached objects, or evidence that every region has
+already been written. Exact useful payload bytes and distinct-object count remain
+unavailable (`payload_bytes` and `object_count` availability observations are zero).
+The bounded index limits live record slots independently of physical-region reuse.
+
+Request-correlated debug records include `l2_read_eligibility` and adapter
+decisions without object keys or dynamic metric labels. Use eligibility and
+adapter reasons together: a rejected window never reaches the adapter. Scraping
+does not initiate startup, read data, touch recency or admit work. Operation
+latencies include their admission/task wait and must not be labelled device
+service time. Detailed debug runs are separate from performance measurements.
+
 ### Read observations
 
 | Metric | Meaning |
@@ -112,6 +177,7 @@ cache hits can bypass this path; this is not an HTTP client hit ratio.
 | Metric | Meaning |
 | --- | --- |
 | `geesefs_namespace_entries` / `geesefs_namespace_names` | Live inode/name-map lengths, including root |
+| `geesefs_namespace_kernel_lookup_entries` | Inodes with nonzero kernel lookup ownership, including root; not the sum of lookup references or all cached inodes. Independent atomic snapshot, also available during namespace contention |
 | `geesefs_namespace_entry_limit` | Configured inode limit |
 | `geesefs_namespace_evictions_total` | Inodes removed under entry-limit pressure |
 | `geesefs_namespace_capacity_failures_total` | Inode admission failures without an eligible victim |
@@ -153,7 +219,7 @@ while owned read-ahead continues. A later error/deadline neither changes that
 reply nor adds a second failed reply. Completed histograms alone hide unfinished
 work: inspect inflight/oldest and active phases as well.
 
-Source reasons separate `admission_full`/`closing`, `deadline_before_reply`/
+Source reasons separate `admission_wait`/`admission_timeout`/`closing`, `deadline_before_reply`/
 `deadline_after_reply`, `s3_get_timeout`, and `read_ahead_timeout`/
 `read_ahead_cancelled`/`read_ahead_error`. Namespace EAGAIN sources identify the
 operation and condition, such as `lookup_moving`, `lookup_binding_busy`,
@@ -161,6 +227,12 @@ operation and condition, such as `lookup_moving`, `lookup_binding_busy`,
 `directory_generation_changed`, and `rename_listing_repeated`. They retain the
 existing EAGAIN contract. Source events can precede a caller retry or a background
 outcome; do not add them to terminal failures.
+
+`admission_wait` counts callbacks that encounter full request capacity, including
+ones that later succeed; it is not an error. `admission_timeout` identifies an
+expired semaphore wait before a job starts. The `fuse_admission` stage exposes
+its duration and live waiters separately from the admitted executor queue.
+Historical `admission_full` EAGAIN records describe the pre-backpressure adapter.
 
 ### Phase and remote-work observations
 
@@ -172,6 +244,7 @@ cancellation error, is `error`; dropping its future is `cancelled`.
 
 | Stage | Boundary and limitations |
 | --- | --- |
+| `fuse_admission` | Saturated request-slot wait on a fixed fuser receiver; excludes immediate acquisitions and kernel queueing |
 | `cache_read` | Initial payload-cache lookup and reply assembly/copy |
 | `fill_wait` | Waiting for an overlapping fill to publish/change; not an additional GET |
 | `payload_admission` | Only the pressured required-admission branch, including reclamation/flush/wait; fast reservations are excluded |
@@ -336,9 +409,9 @@ them or client delivery/kernel queueing by themselves.
 
 Start with the following hypotheses:
 
-- High executor delay or `admission_full`: dispatch/admission pressure, rather
-  than assuming every EAGAIN came from S3. Namespace source events identify a
-  different retry mechanism.
+- High executor delay or sustained `fuse_admission` waits: dispatch/admission
+  pressure. Historical `admission_full` records identify the old rejection path;
+  namespace EAGAIN events identify a different retry mechanism.
 - High sampled namespace waits/holds, `cache_read`, `fill_wait`, or pressured
   admission with ordinary S3 phases: investigate local locks, copies, pinned
   owners and payload pressure using matching CPU/off-CPU profiles.

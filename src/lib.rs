@@ -4,11 +4,14 @@
 pub mod backend;
 pub mod budget;
 pub mod cache;
+pub mod cache_policy;
 pub mod config;
+pub mod disk_cache;
 pub mod error;
 pub mod filesystem;
 pub mod fuse;
 pub mod inode;
+pub mod metadata_budget;
 pub mod metrics;
 pub mod namespace;
 pub mod parts;

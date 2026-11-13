@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+pub mod native;
 use aws_sdk_s3::{primitives::ByteStream, types::CompletedPart};
 use clap::Parser;
 use geesefs_rs::{
@@ -42,6 +43,7 @@ impl Drop for ActiveHead<'_> {
 }
 #[derive(Default)]
 pub struct MemoryStore {
+    pub cache_namespace: Mutex<Option<[u8; 32]>>,
     pub objects: Mutex<BTreeMap<String, Object>>,
     uploads: Mutex<HashMap<String, Upload>>,
     sequence: AtomicU64,
@@ -84,6 +86,7 @@ pub struct MemoryStore {
     head_response_pause: Mutex<Pause>,
     delete_pause: Mutex<Pause>,
     delete_response_pause: Mutex<Pause>,
+    copy_pause: Mutex<Pause>,
     pub delete_calls: AtomicUsize,
     pub fail_head_after_put_once: AtomicBool,
     pub fail_head_after_complete_once: AtomicBool,
@@ -175,6 +178,12 @@ impl MemoryStore {
         *self.list_pause.lock().unwrap() = Some((entered, wait));
         (seen, release)
     }
+    pub fn pause_copy(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, seen) = oneshot::channel();
+        let (release, wait) = oneshot::channel();
+        *self.copy_pause.lock().unwrap() = Some((entered, wait));
+        (seen, release)
+    }
     async fn barrier(pause: &Mutex<Pause>) {
         let pause = pause.lock().unwrap().take();
         if let Some((entered, wait)) = pause {
@@ -227,6 +236,13 @@ impl MemoryStore {
 
 #[async_trait::async_trait]
 impl Store for MemoryStore {
+    fn persistent_cache_scope(&self) -> Result<geesefs_rs::backend::cache_scope::CacheScope> {
+        use geesefs_rs::backend::cache_scope::{CacheBypass, CacheScope};
+        Ok(self.cache_namespace.lock().unwrap().map_or(
+            CacheScope::Bypass(CacheBypass::UnsupportedBackend),
+            CacheScope::Namespace,
+        ))
+    }
     async fn patch(
         &self,
         key: &str,
@@ -562,6 +578,7 @@ impl Store for MemoryStore {
         {
             return Err(Self::failure("copy"));
         }
+        Self::barrier(&self.copy_pause).await;
         let mut objects = self.objects.lock().unwrap();
         let mut object = objects.get(source).ok_or(Error::Fs(libc::ENOENT))?.clone();
         if object.etag != etag {

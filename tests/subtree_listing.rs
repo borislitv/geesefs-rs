@@ -85,7 +85,10 @@ async fn flat_markers_preserve_authoritative_directory_metadata() {
 }
 
 fn names(entries: Vec<geesefs_rs::filesystem::DirEntry>) -> Vec<String> {
-    entries.into_iter().map(|entry| entry.name).collect()
+    entries
+        .into_iter()
+        .map(|entry| entry.name.as_str().to_owned())
+        .collect()
 }
 
 #[tokio::test]
@@ -150,7 +153,7 @@ async fn large_directories_use_delimiter_pages_after_one_flat_attempt() {
         if entries.is_empty() {
             break;
         }
-        after = entries.last().unwrap().name.clone();
+        after = entries.last().unwrap().name.as_str().to_owned();
         actual.extend(names(entries));
     }
     assert_eq!(actual, ["a", "b", "c", "d", "e"]);

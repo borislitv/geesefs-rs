@@ -2,7 +2,16 @@ use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 use clap::{Parser, ValueEnum};
 
+use crate::cache_policy::CachePolicy;
 use crate::error::{Error, Result};
+
+/// Validated startup settings; opening/locking storage belongs to DiskCache.
+#[derive(Clone, Debug)]
+pub struct DiskCacheConfig {
+    pub directory: PathBuf,
+    pub max_bytes: u64,
+    pub policy: CachePolicy,
+}
 
 pub(crate) struct PayloadBudgets {
     pub data_bytes: usize,
@@ -99,6 +108,18 @@ pub struct Config {
     pub list_type: Option<ListType>,
     #[arg(long, default_value_t = 1000)]
     pub memory_limit: usize,
+    /// Optional application metadata byte ceiling, independent of payload/RSS.
+    #[arg(long, value_parser = parse_metadata_size)]
+    pub metadata_limit: Option<usize>,
+    /// Existing private local directory, outside the served mount (runtime pending).
+    #[arg(long, requires_all = ["disk_cache_max_size", "disk_cache_regex"])]
+    pub disk_cache_dir: Option<PathBuf>,
+    /// Managed disk capacity, e.g. '1 TiB'; requires directory and regex.
+    #[arg(long, value_parser = parse_disk_cache_size, requires_all = ["disk_cache_dir", "disk_cache_regex"])]
+    pub disk_cache_max_size: Option<u64>,
+    /// Rust regex on resolved mount-relative regular-file paths with leading '/'.
+    #[arg(long, requires_all = ["disk_cache_dir", "disk_cache_max_size"])]
+    pub disk_cache_regex: Option<CachePolicy>,
     #[arg(long)]
     pub use_enomem: bool,
     #[arg(long)]
@@ -247,6 +268,25 @@ fn parse_duration(value: &str) -> std::result::Result<Duration, String> {
     humantime::parse_duration(value).map_err(|_| "invalid finite duration".into())
 }
 
+fn parse_disk_cache_size(value: &str) -> std::result::Result<u64, String> {
+    let bytes = value.parse::<bytesize::ByteSize>()?.as_u64();
+    // bytesize saturates overflow. Reserve its saturation value rather than
+    // silently accept an overflowed capacity or duplicate its unit parser.
+    if bytes == 0 || bytes == u64::MAX {
+        return Err("disk-cache-max-size must be positive and less than u64::MAX bytes".into());
+    }
+    Ok(bytes)
+}
+
+fn parse_metadata_size(value: &str) -> std::result::Result<usize, String> {
+    let bytes = parse_disk_cache_size(value)
+        .map_err(|error| error.replace("disk-cache-max-size", "metadata-limit"))?;
+    usize::try_from(bytes)
+        .ok()
+        .filter(|bytes| *bytes <= tokio::sync::Semaphore::MAX_PERMITS)
+        .ok_or_else(|| "metadata-limit exceeds supported byte admission capacity".into())
+}
+
 fn parse_mode(s: &str) -> std::result::Result<u16, String> {
     // Go's flag integer parser accepts octal with a leading zero, decimal otherwise.
     let value = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
@@ -295,8 +335,55 @@ impl Config {
         !self.no_specials && (self.enable_specials || self.endpoint.contains("yandex"))
     }
     pub fn validate(&self) -> Result<()> {
+        self.disk_cache_config()?;
         self.validate_backend_options()?;
         self.validate_filesystem_options()
+    }
+
+    /// Validate without creating files, opening an engine or changing RAM budgets.
+    /// Disabled configuration does not inspect any disk-cache paths.
+    pub fn disk_cache_config(&self) -> Result<Option<DiskCacheConfig>> {
+        let (directory, max_bytes, policy) = match (
+            &self.disk_cache_dir,
+            self.disk_cache_max_size,
+            &self.disk_cache_regex,
+        ) {
+            (None, None, None) => return Ok(None),
+            (Some(directory), Some(bytes), Some(policy)) if bytes > 0 && bytes < u64::MAX => {
+                (directory, bytes, policy)
+            }
+            _ => return Err(Error::Config(
+                "disk-cache-dir, disk-cache-max-size and disk-cache-regex must be supplied together with a positive, non-overflowed capacity".into(),
+            )),
+        };
+        let directory = std::fs::canonicalize(directory)
+            .map_err(|error| Error::Config(format!("disk-cache-dir must exist: {error}")))?;
+        validate_cache_directory(&directory)?;
+        let mountpoint = std::fs::canonicalize(&self.mountpoint)
+            .map_err(|error| Error::Config(format!("disk-cache mountpoint must exist: {error}")))?;
+        if !mountpoint.is_dir() {
+            return Err(Error::Config(
+                "disk-cache mountpoint must be a directory".into(),
+            ));
+        }
+        if directory.starts_with(&mountpoint) || mountpoint.starts_with(&directory) {
+            return Err(Error::Config(
+                "disk-cache-dir and mountpoint must not overlap".into(),
+            ));
+        }
+        let lanes = self.payload_budgets()?;
+        let funding = crate::disk_cache::Funding::derive(max_bytes, lanes.data_bytes)
+            .map_err(|error| Error::Config(format!("disk-cache funding: {error}")))?;
+        if lanes.data_bytes.saturating_sub(funding.required_bytes) < 4 * crate::write::MAX_IO {
+            return Err(Error::Config(
+                "disk cache funding leaves insufficient read capacity".into(),
+            ));
+        }
+        Ok(Some(DiskCacheConfig {
+            directory,
+            max_bytes,
+            policy: policy.clone(),
+        }))
     }
 
     fn validate_backend_options(&self) -> Result<()> {
@@ -444,6 +531,14 @@ impl Config {
     }
 
     fn validate_memory_limits(&self) -> Result<()> {
+        if self
+            .metadata_limit
+            .is_some_and(|bytes| bytes == 0 || bytes > tokio::sync::Semaphore::MAX_PERMITS)
+        {
+            return Err(Error::Config(
+                "metadata-limit must fit positive byte admission capacity".into(),
+            ));
+        }
         self.payload_budgets()?;
         if self.entry_limit == 0 || self.entry_limit > tokio::sync::Semaphore::MAX_PERMITS as u64 {
             return Err(Error::Config(format!(
@@ -577,6 +672,46 @@ fn validate_iam_url(value: &str) -> Result<()> {
     {
         return Err(Error::Config(
             "iam-url must be an HTTP(S) URL without credentials".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cache_directory(directory: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::metadata(directory)
+        .map_err(|error| Error::Config(format!("cannot inspect disk-cache-dir: {error}")))?;
+    if !metadata.is_dir()
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.mode() & 0o700 != 0o700
+        || metadata.mode() & 0o022 != 0
+    {
+        return Err(Error::Config(
+            "disk-cache-dir must be an existing directory owned by the effective user, with owner rwx and no group/other write permissions".into(),
+        ));
+    }
+    let filesystem = rustix::fs::statfs(directory).map_err(|error| {
+        Error::Config(format!("cannot inspect disk-cache-dir filesystem: {error}"))
+    })?;
+    if [
+        libc::NFS_SUPER_MAGIC,
+        libc::SMB_SUPER_MAGIC,
+        // Linux UAPI include/uapi/linux/magic.h; libc does not expose these.
+        0xFF53_4D42, // CIFS_SUPER_MAGIC
+        0xFE53_4D42, // SMB2_SUPER_MAGIC
+        0x00C3_6400, // CEPH_SUPER_MAGIC
+        0x0102_1997, // V9FS_MAGIC
+        libc::AFS_SUPER_MAGIC,
+        libc::CODA_SUPER_MAGIC,
+        libc::FUSE_SUPER_MAGIC,
+        libc::PROC_SUPER_MAGIC,
+        libc::SYSFS_MAGIC,
+    ]
+    .contains(&filesystem.f_type)
+    {
+        return Err(Error::Config(
+            "disk-cache-dir must be on a local filesystem, not network/FUSE/pseudo storage".into(),
         ));
     }
     Ok(())

@@ -136,6 +136,123 @@ def denied(call):
     raise AssertionError("sealed fixture unexpectedly admitted a mutation")
 
 
+def mini_command(weed, work, config, ports=None):
+    command = [str(weed), "mini", f"-dir={work / 'data'}", "-ip=127.0.0.1", "-ip.bind=127.0.0.1",
+               f"-s3.config={config}", "-master.telemetry=false", "-webdav=false", "-admin.ui=false",
+               "-s3.iam=false", "-s3.autoCreateBucket=false", "-s3.port.iceberg=0", "-s3.port.lance=0",
+               "-master.volumeSizeLimitMB=1024", "-volume.max=16"]
+    if ports:
+        command += [f"-{name}={port}" for name, port in ports.items()]
+        command += [f"-filer.localSocket={work / 'filer.sock'}", f"-s3.localSocket={work / 's3.sock'}"]
+    else:
+        command += ["-metricsPort=9328"]
+    return command
+
+
+@contextlib.contextmanager
+def native_service(weed, work, prepare=None, sealed=False):
+    """Owned mini process for arbitrary disposable datasets, optionally sealed.
+
+    Reuses the supported mini command/config from the immutable fixture. The
+    preparation callback runs with seeder credentials BEFORE a sealed restart;
+    only the reader identity survives that restart. No fault injection is offered.
+    """
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+    import integration
+
+    work = Path(work).resolve()
+    version = subprocess.run([str(Path(weed).resolve()), 'version'], check=True,
+                             capture_output=True, text=True, timeout=10).stdout
+    if ' 4.51 ' not in version:
+        raise ValueError('native fixture requires SeaweedFS 4.51; got ' + version)
+    for name in ['data', 'temporary']:
+        (work / name).mkdir()
+    names = ['master.port', 'master.port.grpc', 'volume.port', 'volume.port.grpc',
+             'filer.port', 'filer.port.grpc', 's3.port', 's3.port.grpc', 'metricsPort']
+    ports = {}
+    for name in names:
+        port = integration.free_port()
+        while port in ports.values():
+            port = integration.free_port()
+        ports[name] = port
+    config = work / 's3.json'
+    reader = identity('fixture-reader', READER, ['Read', 'List'])
+    config.write_text(json.dumps({'identities': [reader, identity('fixture-seeder', SEEDER,
+                                  ['Admin', 'Read', 'List', 'Write', 'Tagging'])]}))
+    endpoint = f"http://127.0.0.1:{ports['s3.port']}"
+    environment = integration.private_environment(*SEEDER)
+    environment = {k: v for k, v in environment.items() if k not in ('S3_BUCKET', 'S3_TABLE_BUCKET')}
+    environment.update(HOME=str(work), TMPDIR=str(work / 'temporary'), GOMAXPROCS='4')
+    command = mini_command(Path(weed).resolve(), work, config, ports)
+    process = None
+    s3 = None
+    logs = []
+
+    def start(label):
+        nonlocal process
+        log = (work / (label + '-server.log')).open('xb')
+        logs.append(log)
+        # mini imports AWS_* credentials as an admin identity. Never let client
+        # credentials recreate the removed seeder during a sealed restart.
+        server_environment = {k: v for k, v in environment.items() if not k.startswith('AWS_')}
+        process = subprocess.Popen(command + ([f'-bucket={BUCKET}'] if label == 'seed' else []),
+                                   cwd=work, env=server_environment,
+                                   stdout=log, stderr=subprocess.STDOUT)
+        until = time.monotonic() + 150
+        with contextlib.closing(client(endpoint)) as ready:
+            while True:
+                if process.poll() is not None:
+                    raise RuntimeError(f'native fixture exited {process.returncode}; see {log.name}')
+                try:
+                    ready.list_objects_v2(Bucket=BUCKET, MaxKeys=1)
+                    break
+                except Exception:
+                    if time.monotonic() >= until:
+                        raise
+                    time.sleep(0.1)
+        (work / 'backend.pid').write_text(str(process.pid) + '\n')
+
+    def stop():
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=45)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+    try:
+        start('seed')
+        s3 = client(endpoint, SEEDER)
+        if prepare:
+            prepare(s3, BUCKET)
+        if sealed:
+            s3.close()
+            stop()
+            config.write_text(json.dumps({'identities': [reader]}))
+            start('sealed')
+            s3 = client(endpoint)
+            environment.update(integration.private_environment(*READER))
+        with contextlib.closing(client(endpoint)) as read_only:
+            denied(lambda: read_only.put_object(Bucket=BUCKET, Key='_permission-probe', Body=b'forbidden'))
+            denied(lambda: read_only.delete_object(Bucket=BUCKET, Key='_permission-probe'))
+            denied(lambda: read_only.create_multipart_upload(Bucket=BUCKET, Key='_permission-probe'))
+        if sealed:
+            with contextlib.closing(client(endpoint, SEEDER)) as removed:
+                denied(lambda: removed.put_object(Bucket=BUCKET, Key='_permission-probe', Body=b'forbidden'))
+        save(work / 'provider.json', dict(server='SeaweedFS 4.51', version=version, sealed=sealed,
+             binary_sha256=integration.sha_file(weed), command=command, ports=ports,
+             permissions_checked=4 if sealed else 3, fault_injection=False))
+        yield s3, BUCKET, endpoint, environment, True
+    finally:
+        if s3 is not None:
+            s3.close()
+        stop()
+        for log in logs:
+            log.close()
+
+
 def serve(args):
     signal.alarm(args.timeout)
     work, shared = Path(args.work), Path(args.shared)
@@ -152,10 +269,7 @@ def serve(args):
     environment = {key: value for key, value in os.environ.items()
                    if not key.startswith("AWS_") and key not in ("S3_BUCKET", "S3_TABLE_BUCKET")}
     environment.update(HOME=str(work), TMPDIR=str(temporary), GOMAXPROCS="4")
-    command = [args.weed, "mini", f"-dir={data}", "-ip=127.0.0.1", "-ip.bind=127.0.0.1",
-               f"-s3.config={config}", "-master.telemetry=false", "-webdav=false", "-admin.ui=false",
-               "-s3.iam=false", "-s3.autoCreateBucket=false", "-s3.port.iceberg=0", "-s3.port.lance=0",
-               "-master.volumeSizeLimitMB=1024", "-volume.max=16", "-metricsPort=9328"]
+    command = mini_command(args.weed, work, config)
     endpoint = "http://127.0.0.1:8333"
     process = None
     logs = []

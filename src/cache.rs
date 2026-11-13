@@ -13,6 +13,14 @@ use crate::budget::{Block, Budget, Reservation};
 /// idle-lane loans only transfer an exclusively owned allocation's existing charge.
 type Key = (u64, u64, u64);
 
+/// Only capacity pressure produces a victim eligible for optional demotion.
+pub(crate) struct CapacityVictim {
+    pub inode: u64,
+    pub generation: u64,
+    pub offset: u64,
+    pub block: Block,
+}
+
 pub(crate) fn first_gap(
     mut range: Range<u64>,
     covered: impl Iterator<Item = Range<u64>>,
@@ -41,6 +49,7 @@ struct State {
     loaned: usize,
     loans: BTreeSet<Key>,
     evictions: u64,
+    capacity_evictions: u64,
     evicted_bytes: u64,
     insertions: u64,
     replacements: u64,
@@ -56,6 +65,7 @@ pub struct CacheStats {
     pub entry_limit: usize,
     pub loaned_bytes: usize,
     pub evictions: u64,
+    pub capacity_evictions: u64,
     pub evicted_bytes: u64,
     pub insertions: u64,
     pub replacements: u64,
@@ -109,7 +119,7 @@ impl State {
         }
     }
 
-    fn removed(&mut self, key: Key, block: Block) {
+    fn removed(&mut self, key: Key, block: &Block) {
         self.index.remove(&key);
         self.weight -= block.as_slice().len() as u64;
         if block.is_loaned() {
@@ -118,19 +128,22 @@ impl State {
         }
     }
 
-    fn evict_lru(&mut self) -> bool {
-        if let Some((key, block)) = self.entries.pop_lru() {
-            self.evicted(key, block);
-            true
-        } else {
-            false
-        }
+    fn capacity_victim(&mut self) -> Option<CapacityVictim> {
+        let (key, block) = self.entries.pop_lru()?;
+        Some(self.capacity_removed(key, block))
     }
 
-    fn evicted(&mut self, key: Key, block: Block) {
+    fn capacity_removed(&mut self, key: Key, block: Block) -> CapacityVictim {
         self.evictions += 1;
+        self.capacity_evictions += 1;
         self.evicted_bytes += block.as_slice().len() as u64;
-        self.removed(key, block);
+        self.removed(key, &block);
+        CapacityVictim {
+            inode: key.0,
+            generation: key.1,
+            offset: key.2,
+            block,
+        }
     }
 }
 
@@ -153,6 +166,7 @@ impl ReadCache {
                 loaned: 0,
                 loans: BTreeSet::new(),
                 evictions: 0,
+                capacity_evictions: 0,
                 evicted_bytes: 0,
                 insertions: 0,
                 replacements: 0,
@@ -172,6 +186,7 @@ impl ReadCache {
             entry_limit: state.entries.cap().get(),
             loaned_bytes: state.loaned,
             evictions: state.evictions,
+            capacity_evictions: state.capacity_evictions,
             evicted_bytes: state.evicted_bytes,
             insertions: state.insertions,
             replacements: state.replacements,
@@ -249,36 +264,55 @@ impl ReadCache {
     }
 
     pub fn insert(&self, inode: u64, generation: u64, offset: u64, block: Block) {
+        self.insert_with_eviction(inode, generation, offset, block, drop);
+    }
+
+    pub(crate) fn insert_with_eviction(
+        &self,
+        inode: u64,
+        generation: u64,
+        offset: u64,
+        block: Block,
+        mut evicted: impl FnMut(CapacityVictim),
+    ) {
         if block.as_slice().is_empty() {
             return;
         }
         let key = (inode, generation, offset);
         let length = block.as_slice().len();
         let weight = length as u64;
-        let mut state = self.state.lock().unwrap();
-        if let Some(old) = state.entries.pop(&key) {
-            state.replacements += 1;
-            state.removed(key, old);
-        }
-        if weight > self.capacity {
-            state.oversized += 1;
+        loop {
+            let mut state = self.state.lock().unwrap();
+            if let Some(old) = state.entries.pop(&key) {
+                state.replacements += 1;
+                state.removed(key, &old);
+            }
+            if weight > self.capacity {
+                state.oversized += 1;
+                return;
+            }
+            if state.weight > self.capacity - weight
+                || state.entries.len() == state.entries.cap().get()
+            {
+                let victim = state
+                    .capacity_victim()
+                    .expect("capacity pressure owns an entry");
+                drop(state);
+                evicted(victim);
+                continue;
+            }
+            assert!(state.entries.push(key, block).is_none());
+            state.insertions += 1;
+            state.weight += weight;
+            state.index.insert(
+                key,
+                Span {
+                    length,
+                    consumed: 0,
+                },
+            );
             return;
         }
-        while state.weight > self.capacity - weight {
-            assert!(state.evict_lru(), "positive cache weight owns entries");
-        }
-        if let Some((key, victim)) = state.entries.push(key, block) {
-            state.evicted(key, victim);
-        }
-        state.insertions += 1;
-        state.weight += weight;
-        state.index.insert(
-            key,
-            Span {
-                length,
-                consumed: 0,
-            },
-        );
     }
 
     /// A bounded eviction hint, not a pin: disjoint tail reads cannot advance an
@@ -297,9 +331,50 @@ impl ReadCache {
             .consumed((inode, generation, start), relative, length);
     }
 
-    /// Release one cache owner; caller views retain their complete backing charge.
-    pub(crate) fn evict_lru(&self) -> bool {
-        self.state.lock().unwrap().evict_lru()
+    pub(crate) fn capacity_victim(&self) -> Option<CapacityVictim> {
+        self.state.lock().unwrap().capacity_victim()
+    }
+
+    /// Identity-only hint: eligibility checks must not pin a backing or nest
+    /// namespace/inode locks inside the cache lock.
+    pub(crate) fn loan_candidate(&self) -> Option<(u64, u64, u64)> {
+        self.state
+            .lock()
+            .unwrap()
+            .entries
+            .iter()
+            .rev()
+            .find(|(_, block)| !block.is_loaned())
+            .map(|(key, _)| *key)
+    }
+
+    /// Revalidate the hint after eligibility was checked without cache ownership.
+    /// Older loaned entries cannot release data-lane capacity for this request.
+    pub(crate) fn unloaned_capacity_victim(
+        &self,
+        expected: (u64, u64, u64),
+    ) -> Option<CapacityVictim> {
+        let mut state = self.state.lock().unwrap();
+        let (&key, _) = state
+            .entries
+            .iter()
+            .rev()
+            .find(|(_, block)| !block.is_loaned())?;
+        if key != expected {
+            return None;
+        }
+        let block = state.entries.pop(&key)?;
+        Some(state.capacity_removed(key, block))
+    }
+
+    pub(crate) fn span_at(&self, inode: u64, generation: u64, offset: u64) -> Option<(u64, usize)> {
+        let state = self.state.lock().unwrap();
+        state
+            .index
+            .range((inode, generation, 0)..=(inode, generation, offset))
+            .rev()
+            .find(|&(&(_, _, start), span)| offset - start < span.length as u64)
+            .map(|(&(_, _, start), span)| (start, span.length))
     }
 
     /// Keep LRU bytes by moving only their exclusive backing's existing charge.
@@ -338,12 +413,19 @@ impl ReadCache {
         }
         while let Some(key) = state.loans.first().copied() {
             let block = state.entries.pop(&key).expect("loaned cache owner");
-            state.evicted(key, block);
+            state.evictions += 1;
+            state.evicted_bytes += block.as_slice().len() as u64;
+            state.removed(key, &block);
         }
     }
 
     /// Speculation cannot fund itself with another reader's unconsumed data.
-    pub(crate) fn evict_consumed_lru(&self, inode: u64, generation: u64, consumed: u64) -> bool {
+    pub(crate) fn consumed_victim(
+        &self,
+        inode: u64,
+        generation: u64,
+        consumed: u64,
+    ) -> Option<CapacityVictim> {
         let mut state = self.state.lock().unwrap();
         if state
             .entries
@@ -357,9 +439,9 @@ impl ReadCache {
                 }
             })
         {
-            return false;
+            return None;
         }
-        state.evict_lru()
+        state.capacity_victim()
     }
 
     pub(crate) fn contains(&self, inode: u64, generation: u64, offset: u64) -> bool {

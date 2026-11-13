@@ -1,0 +1,1 @@
+(?i)\.(?:u?deb|rpm|apk|appimage|run|exe|msi|cab|(?:iso|img|raw|qcow2?|vhdx?|vmdk|vdi|dmg|squashfs|tar)(?:\.(?:gz|bz2|xz|zst|lz4|lzma))?|tgz|tbz2?|txz|tzst|zip|7z|rar|ova|whl|jar|crate)$

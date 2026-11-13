@@ -24,18 +24,68 @@ statistics. Startup multipart expiry is prefix-confined and must be explicitly
 disabled for a read-only diagnostic requiring no backend mutation.
 
 `Fuse::spawn` admits at most `max_requests` active jobs. Closing admission returns
-EINTR; saturation returns EAGAIN. A job owns its reply and permit until completion
-or the request deadline. Timeout drops the future and returns ETIMEDOUT for an
-unsent reply. A reply published before read-ahead is already terminal and cannot
-be sent again during cancellation. There is no unbounded application request queue.
+EINTR. Saturation waits on the existing semaphore in the fixed fuser receiver
+threads, instead of returning EAGAIN that Linux buffered reads can expose as EIO.
+There is at most one pending callback per receiver in addition to admitted jobs;
+no detached waiter queue is created. Pending WRITE input remains ingress-funded.
+No admission, file-registry or namespace mutex spans this wait.
 
-File-handle slots are reserved before create can mutate the namespace. A registry
-entry owns its slot and `Arc<OpenFile>`; admitted reads retain that open inode until
+One absolute deadline starts at request admission and covers capacity wait,
+executor queueing and execution. Already-expired jobs cannot begin a mutation.
+A job owns its reply and permit until actual completion or cancellation, including
+read-ahead after an early reply. Timeout returns ETIMEDOUT for an unsent reply;
+an already-published reply stays terminal and cannot be sent again.
+
+Waiting on a receiver deliberately delays later callbacks, including metadata
+and FORGET on a single receiver. Admitted async jobs progress independently of
+that receiver; kernel notification work has a separate slot and blocking worker.
+This is bounded backpressure, not priority scheduling or a bound on time still
+queued in the kernel. Synchronous non-yielding work remains non-preemptible.
+The executable uses a multithreaded Tokio runtime; tests using a current-thread
+runtime must continue driving it while fuser waits, as for other async callbacks.
+
+File and directory handles share an owned semaphore bounded by `entry_limit`,
+independently of active-request concurrency. Reserve a slot before create can
+mutate the namespace or opendir can retain an inode. File registry entries own
+their slots and `Arc<OpenFile>`; directory cursors retain their slots through any
+admitted readdir owner. Admitted reads retain that open inode until
 their last owner finishes. Closing admission drains requests before clearing the
 registry. READDIRPLUS holds accepted inode owners until successful buffer delivery;
 error/cancellation transfers no lookup references, and dot entries acquire none.
 
 ## Namespace and metadata
+
+An optional `--metadata-limit` adds independent lifetime byte admission for
+application metadata. It includes canonical inode/listing/result/writer owners
+and temporary operation plans; payload `--memory-limit` retains its meaning.
+The count guard is additional. Reclamation examines bounded batches and yields
+outside the namespace lock; lookup/open/dirty and in-flight pins remain intact.
+These are admitted logical allocations, not allocator size classes or an RSS cap.
+
+An active directory remainder pins its unsent inodes through frame preparation;
+the TTL page cache still holds numeric identities, not the whole namespace alive.
+Kernel lookup ownership is separate: TTL expiration does not send `FORGET`.
+A zero/nonzero identity counter requests bounded, detached `inval_entry` batches
+near count pressure. The finite scan excludes active, open, dirty and moving
+owners; names survive notification without retaining inode pins. Application locks
+are released before the potentially blocking notification. Real `FORGET` alone
+releases kernel lookup ownership. This improves the verified nested walk, but
+does not guarantee progress through every over-capacity flat directory.
+
+Clean current attributes and their committed baseline share `CachedMetadata`, an
+immutable sorted slice. Writers prepare a separately admitted copy-on-write
+version; old snapshots/baselines remain unchanged. `CachedRemote` retains only
+size, ETag and the canonical baseline. Full `ObjectHead`/HTTP properties belong to
+transient backend HEAD/COPY/REPLACE handling, where private upload receipts are
+checked before projection. Operation credit for committed-generation records is
+reserved before PUT/completion/PATCH and transferred into the new owners.
+
+`SharedKey` keeps one immutable key backing and its charge across namespace name
+bindings, inode state, snapshots and cached listing records. Both key and metadata
+wrappers expose borrowed data, preventing a caller from detaching storage from its
+permit. Shared backings are charged once until their final actual owner; index
+and operation-wrapper costs remain separate. Extended listings pass canonical
+metadata directly to inodes instead of encoding then decoding it again.
 
 `src/namespace.rs` binds names to stable inodes; `src/inode.rs` owns generation,
 remote object identity, dirty extents and lifetime state. Namespace epochs,
@@ -99,6 +149,64 @@ inode, authoritative LIST or resolved HEAD. Publishing a new names page does not
 renew cached permission/xattr freshness. Standard LIST may supply size/ETag but
 cannot revalidate absent user metadata; kernel attribute TTL remains bounded by
 that older observation. Later HEAD/commit generations still override older data.
+
+## Optional persistent payload tier
+
+The three disk-cache flags enable a private, locked local container through the
+maintained Foyer Store adapter. Proven-new media initially stays Prepared: funding
+and directory ownership are reserved, but no engine or payload file is constructed
+until eligible capacity pressure. Existing media starts bounded recovery eagerly;
+lazy creation must not discard its inventory. Only eligible capacity evictions
+populate it, after releasing the L1 lock; replacements, invalidations and loan
+revocation do not. Demotion funds an exact visible-range copy, promptly releasing
+the original backing. Qualified L2 hits promote into L1 while retaining the disk
+copy. Missing coverage and optional errors use ordinary conditional S3 reads.
+For a validated disk hit, reply/window delivery stays sliced, but L1 retains the
+actual complete record backing and original offset under the same charge. Later
+eviction therefore does not manufacture a second fragment identity. Partial disk
+records remain partial; this never rounds unknown bytes up to a block boundary.
+If the original disk entry is reclaimed, ordinary demotion can populate it again.
+
+Persistent keys include validated backend/access/encryption scope, exact object
+key, opaque ETag, size and coverage. Dirty/sparse/pending namespace states bypass
+the tier. Reads revalidate generation after waits, including after funding a
+window whose file may have changed size. Opaque/rotating credentials explicitly
+bypass persistent reuse rather than guessing a stable principal.
+
+Funding covers bounded index/order state, pools, copies, read/decode work and
+submission credits, reducing effective L1 capacity without taking writer or
+ingress reserves. Recovery is asynchronous with source fallback and no inventory
+reset. Owned jobs retain funding/directory ownership past caller cancellation;
+shutdown starts cache teardown even when writer flushing later fails.
+
+Required read windows use a key-free FIFO queue before allocating persistent
+identities. Four funded read-work owners are independent of four funded spill
+owners; eight aggregate jobs are possible without enlarging the fixed pools.
+Each potential disk block also reserves 4096 bytes of bookkeeping within the same
+data-window admission, reducing its effective ceiling rather than adding a pool.
+Eligibility borrows that credit and a read slot for bounded blocking work. It
+releases namespace ownership before waiting for inode state, then releases inode
+ownership before revalidating the namespace. No guard crosses disk/source I/O.
+Qualification and each block lookup have their own bounded operation deadline;
+a source gap does not age later lookups against one shared window deadline.
+Timed-out or cancelled tasks retain their actual slot, credit and owners until
+completion. Optional L1 touches and demotion still use immediate try-admission.
+
+Under byte pressure, Ready/eligible nonloaned victims demote before borrowing the
+idle flush lane. Loan-first selection would make subsequent victims ineligible
+and could starve L2 completely. Eligible pressure can start the deferred engine
+before the current read falls back to loans; it does not queue that victim for
+later demotion. Disabled, excluded and not-yet-Ready paths retain loan-first
+behavior; already loaned owners are always discarded without demotion.
+The published L1 policy capacity is an upper bound including revocable loans,
+not a promise that selected data uses the flush lane in Ready mode. Benchmark
+comparisons must report actual residency/loan counts as well as the funding cut.
+
+Metrics distinguish admission, actual worker completion and caller delivery.
+Region-reclaim callbacks are not per-record eviction counts; funded metadata is
+not measured index heap, and opening-time filesystem allocation is not a live
+physical-storage gauge. See [the design](disk-cache-design.md) and
+[qualification plan](disk-cache-plan-track.md) for remaining acceptance gates.
 
 ## Payload ownership and progress
 

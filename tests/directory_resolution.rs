@@ -161,7 +161,11 @@ async fn common_prefixes_do_not_replace_authoritative_directory_marker_attribute
             ("uid".into(), "1234".into()),
             ("gid".into(), "5678".into()),
         ]);
-    let fs = store.filesystem(16);
+    // TTL zero selects delimiter LIST, so this still exercises common prefixes
+    // rather than authoritative marker metadata from a flat response.
+    let mut config = MemoryStore::config(16);
+    config.stat_cache_ttl = Duration::ZERO;
+    let fs = Filesystem::new(config, store.clone()).unwrap();
     let entries = fs.directory_chunk(1, "", 8).await.unwrap();
     assert_eq!(entries.len(), 1);
     let directory = fs.refresh_inode_if_expired(entries[0].ino).await.unwrap();

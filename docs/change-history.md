@@ -5,6 +5,35 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-09: release 0.1.11 preparation
+
+Advance the package and lockfile together for bounded subtree prefetch. Package
+only the successful exact-source default-jemalloc CI build, including checksums,
+build provenance and complete locked dependency notices. Retain earlier immutable
+releases. Dependencies, timeouts and directory block accounting are unchanged.
+Publication does not close compatibility or comparative performance acceptance.
+
+## 2026-11-09: prefetch one flat page at the start of directory reads
+
+Delimiter-only directory reads repeated LIST for each small descendant. Follow
+the public Go 0.43.9 `DirHandle.loadListing`/`slurpOnce` rule: with a nonzero
+metadata TTL, try one flat page at a directory boundary, starting at the mount
+root with an exclusive key bound. Cache that bounded response in RAM for the
+complete directories it covers. If the requested directory is incomplete, use
+ordinary delimiter pages; continuation and zero-TTL reads do not start another
+flat prefetch. A point lookup retains its existing authoritative HEAD/fallback
+path and bounded optional parent preload.
+
+Reuse Moka 0.12.16 with TTL and entry-weighted capacity; cached directory keys
+share the response rather than copying its metadata. Conservatively charge a
+whole response per directory index entry and cap the index to 1000 directories.
+Local namespace changes invalidate speculative ranges. Preserve marker metadata,
+unknown-metadata HEAD resolution, generation checks, deadlines and errno.
+Synthetic traversal/request-count regressions first fail on the old code;
+full compatibility and comparative speed/memory acceptance remain open.
+
+Reference: [Go 0.43.9 directory listing, Apache-2.0](https://github.com/yandex-cloud/geesefs/blob/80c214ef14f620d93407454fc76ca01dd71fa25f/core/dir.go).
+
 ## 2026-11-08: consolidate merged corrections in release 0.1.10
 
 Publish the merged extended-list resume and Go-compatible symlink-size corrections

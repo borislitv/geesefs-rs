@@ -45,6 +45,74 @@ fn mounted(fs: Arc<Filesystem>, check: impl FnOnce(&Path)) {
 
 #[test]
 #[ignore = "requires an explicitly authorized Linux FUSE fixture"]
+fn native_du_traverses_a_small_subtree_with_one_flat_page() {
+    let store = MemoryStore::new();
+    store.seed("a/one", b"x");
+    store.seed("b/sub/two", &[b'y'; 513]);
+    store.seed("c/link", b"contents");
+    store
+        .objects
+        .lock()
+        .unwrap()
+        .get_mut("c/link")
+        .unwrap()
+        .metadata
+        .insert("--symlink-target".into(), "../a/one".into());
+    let fs = store.filesystem(16);
+    mounted(fs, |path| {
+        let output = std::process::Command::new("timeout")
+            .args(["15s", "du", "-s", "--block-size=1"])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        assert!(output.stderr.is_empty(), "{:?}", output);
+        // Three object bodies occupy 1 + 2 + 1 blocks; synthetic directories
+        // retain the existing zero-block accounting.
+        assert_eq!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .split_whitespace()
+                .next(),
+            Some("2048")
+        );
+        assert_eq!(
+            std::fs::read_link(path.join("c/link")).unwrap(),
+            Path::new("../a/one")
+        );
+        assert_eq!(std::fs::read(path.join("b/sub/two")).unwrap(), [b'y'; 513]);
+    });
+    // A native mount can also receive unrelated desktop trash probes. Check
+    // every request in the synthetic namespace, including the root listing.
+    let in_fixture = |key: &str| {
+        key.is_empty()
+            || ["a", "b", "c"]
+                .iter()
+                .any(|root| key == *root || key.starts_with(&format!("{root}/")))
+    };
+    assert_eq!(
+        store
+            .list_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(prefix, _)| in_fixture(prefix))
+            .cloned()
+            .collect::<Vec<_>>(),
+        [("".into(), None)]
+    );
+    assert!(
+        store
+            .head_keys
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|key| !in_fixture(key))
+    );
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Linux FUSE fixture"]
 fn concurrent_receivers_preserve_lookup_read_write_and_unmount_bytes() {
     use std::io::Write;
 

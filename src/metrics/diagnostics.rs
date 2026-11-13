@@ -130,6 +130,7 @@ struct Inner {
     executor: Histogram,
     post_reply: Histogram,
     events: Family<Labels, Counter>,
+    requests: Family<Labels, Counter>,
     attempts: Family<Labels, Counter>,
     retries: Family<Labels, Counter>,
     body_bytes: Counter,
@@ -306,7 +307,9 @@ impl Diagnostics {
                 "list" => 0,
                 "head" => 1,
                 "get" => 2,
-                "write" => 3,
+                "put" | "copy" | "delete" | "patch" | "multipart_create" | "multipart_upload"
+                | "multipart_copy" | "multipart_complete" | "multipart_abort"
+                | "multipart_list" => 3,
                 _ => 4,
             };
             let mut failures = trace.backend_failures.lock().unwrap();
@@ -374,6 +377,7 @@ impl Diagnostics {
             executor: histogram(),
             post_reply: histogram(),
             events: Family::default(),
+            requests: Family::default(),
             attempts: Family::default(),
             retries: Family::default(),
             body_bytes: Counter::default(),
@@ -428,6 +432,8 @@ impl Diagnostics {
             inner.attempts.get_or_create(&labels).inc();
             if retry {
                 inner.retries.get_or_create(&labels).inc();
+            } else {
+                inner.requests.get_or_create(&labels).inc();
             }
             self.debug("s3_attempt", || serde_json::json!({"operation": operation, "transport": transport, "retry": retry}));
         }
@@ -549,6 +555,11 @@ impl Diagnostics {
             "geesefs_diagnostic_events",
             "Conditions at their source, not a count of final failed requests",
             inner.events.clone(),
+        );
+        registry.register(
+            "geesefs_s3_requests",
+            "SDK executions and extension retry loops reaching their first transport attempt; excludes retries and presigning, not confirmed server receipts",
+            inner.requests.clone(),
         );
         registry.register(
             "geesefs_s3_attempts",

@@ -5,6 +5,20 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-13: account for completed read sources and distinct S3 operations
+
+Read-cache misses were counted before L2 validation and coalesced-fill reuse,
+misclassifying successful cached delivery and charging requested bytes to reads
+that failed. Record a successful requested result once, separating L1, validated
+L2, source and writer-overlay bytes. Keep prefetch/adapter observations independent;
+a later optional failure does not change an already published reply.
+
+Expose first-transmit S3 execution counts separately from attempts/retries and
+retain PUT, COPY, DELETE, PATCH and multipart operation identities instead of
+collapsing mutations into `write`. Persistent payload residency does not replace
+the bounded TTL-based namespace and directory caches. These observations do not
+establish a particular S3 reduction or resolve existing compatibility gaps.
+
 ## 2026-11-13: prepare the authorized 0.1.12 release
 
 Package the existing persistent-cache and metadata corrections as 0.1.12 without

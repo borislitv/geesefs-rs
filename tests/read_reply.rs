@@ -136,10 +136,19 @@ async fn failure_after_successful_reply_remains_an_observable_prefetch_error() {
     tail.close();
     assert!(matches!(finish(load).await, Some(Error::Cancelled)));
     assert_eq!(block.as_slice(), &expected[..STEP]);
+    let text = geesefs_rs::metrics::render(&fs).unwrap();
+    assert!(
+        text.lines()
+            .any(|line| line == "geesefs_read_cache_misses_total 1")
+    );
+    assert!(
+        text.lines()
+            .any(|line| line == "geesefs_read_cache_miss_bytes_total 131072")
+    );
 }
 
 #[tokio::test]
-async fn a_follower_already_waiting_for_the_window_observes_its_completed_range() {
+async fn metrics_a_waiting_follower_counts_reuse_of_the_published_range() {
     use std::{future::Future, task::Poll};
     let (store, fs, expected) = fixture();
     let ino = fs.lookup(1, "file").await.unwrap().ino;
@@ -184,6 +193,23 @@ async fn a_follower_already_waiting_for_the_window_observes_its_completed_range(
     tail.add_permits(1);
     assert!(finish(load).await.is_none());
     assert_eq!(store.read_ranges.lock().unwrap().len(), 2);
+    let text = geesefs_rs::metrics::render(&fs).unwrap();
+    assert!(
+        text.lines()
+            .any(|line| line == "geesefs_read_cache_hits_total 1")
+    );
+    assert!(
+        text.lines()
+            .any(|line| line == "geesefs_read_cache_misses_total 1")
+    );
+    assert!(
+        text.lines()
+            .any(|line| line == "geesefs_read_cache_hit_bytes_total 4096")
+    );
+    assert!(
+        text.lines()
+            .any(|line| line == "geesefs_read_cache_miss_bytes_total 131072")
+    );
 }
 
 #[tokio::test]

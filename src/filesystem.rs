@@ -2244,12 +2244,9 @@ impl Filesystem {
         });
         if let Some(block) = cached {
             self.touch_disk_hit(&node, generation, offset, length);
-            self.read_metrics.hits.inc();
-            self.read_metrics.hit_bytes.inc_by(length as u64);
+            self.read_metrics.cache_hit(length);
             return Ok(Some(block));
         }
-        self.read_metrics.misses.inc();
-        self.read_metrics.miss_bytes.inc_by(length as u64);
         // Miss admission reserves output and scratch atomically below.
         let budgets = self.effective_budgets();
         let mut start = if clean {
@@ -2293,6 +2290,7 @@ impl Filesystem {
             let cached = self.cache.read(ino, generation, offset, length, reply);
             if let Some(block) = cached {
                 self.touch_disk_hit(&node, generation, offset, length);
+                self.read_metrics.cache_hit(length);
                 return Ok(Some(block));
             }
             match admission {
@@ -2450,6 +2448,7 @@ impl Filesystem {
             None
         };
         let mut remaining = available;
+        let mut delivered = metrics::ReadBytes::default();
         if remaining == 0
             && let Some(ready) = ready.take()
         {
@@ -2585,6 +2584,14 @@ impl Filesystem {
             let left = at.max(offset);
             let right = (at + block.as_slice().len() as u64).min(offset + available as u64);
             if right > left {
+                let bytes = right - left;
+                if !single_buffer {
+                    delivered.overlay += bytes;
+                } else if block.is_disk_origin() {
+                    delivered.l2 += bytes;
+                } else {
+                    delivered.remote += bytes;
+                }
                 if borrow_reply && remaining == available && right - left == available as u64 {
                     // The delivered immutable owner already covers the reply.
                     // Retain its complete backing charge instead of allocating a copy.
@@ -2606,6 +2613,7 @@ impl Filesystem {
             if remaining == 0
                 && let Some(ready) = ready.take()
             {
+                self.read_metrics.completed(std::mem::take(&mut delivered));
                 ready(Ok(result.take().expect("completed requested result")));
             }
             if let Some((ino, generation)) =
@@ -2637,6 +2645,9 @@ impl Filesystem {
         }
         if let Some(error) = prefetch_error {
             return Err(error);
+        }
+        if result.is_some() {
+            self.read_metrics.completed(delivered);
         }
         Ok(result)
     }

@@ -302,6 +302,10 @@ async fn sdk_retries_are_attempts_of_one_header_scope_and_body_bytes_are_separat
     task.join().unwrap();
     for (name, expected) in [
         (
+            "geesefs_s3_requests_total{operation=\"get\",transport=\"sdk\"}",
+            1.,
+        ),
+        (
             "geesefs_s3_attempts_total{operation=\"get\",transport=\"sdk\"}",
             2.,
         ),
@@ -393,6 +397,161 @@ async fn extended_listing_presigning_is_not_a_transmitted_get_attempt() {
         ),
         1.
     );
+}
+
+#[tokio::test]
+async fn metrics_sdk_mutations_keep_their_operation_type() {
+    let (store, task) = server(200, &[("ETag", "\"put\"")], b"", None);
+    let (store, fs) = observed_backend(store);
+    assert_eq!(
+        store
+            .put("new", ByteStream::from_static(b"payload"), HashMap::new())
+            .await
+            .unwrap(),
+        "\"put\""
+    );
+    assert_eq!(task.join().unwrap().method, "PUT");
+    assert_eq!(
+        observation(
+            &fs,
+            "geesefs_s3_attempts_total{operation=\"put\",transport=\"sdk\"}"
+        ),
+        1.
+    );
+    assert!(
+        !geesefs_rs::metrics::render(&fs)
+            .unwrap()
+            .contains("operation=\"write\"")
+    );
+}
+
+#[tokio::test]
+async fn metrics_s3_copy_delete_and_multipart_are_distinct_executions() {
+    for (operation, method, body) in [
+        (
+            "copy",
+            "PUT",
+            "<CopyObjectResult><ETag>\"copied\"</ETag></CopyObjectResult>",
+        ),
+        ("delete", "DELETE", ""),
+        (
+            "multipart_create",
+            "POST",
+            "<InitiateMultipartUploadResult><UploadId>upload</UploadId></InitiateMultipartUploadResult>",
+        ),
+        ("multipart_upload", "PUT", ""),
+        (
+            "multipart_copy",
+            "PUT",
+            "<CopyPartResult><ETag>\"copied\"</ETag></CopyPartResult>",
+        ),
+        (
+            "multipart_complete",
+            "POST",
+            "<CompleteMultipartUploadResult><ETag>\"complete\"</ETag></CompleteMultipartUploadResult>",
+        ),
+        ("multipart_abort", "DELETE", ""),
+    ] {
+        let http = Server::http("127.0.0.1:0").unwrap();
+        let (store, fs) = observed_backend(backend(format!("http://{}", http.server_addr())));
+        let task = std::thread::spawn(move || {
+            if operation == "copy" {
+                // The configured copy path verifies the source generation first.
+                let request = http.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+                assert_eq!(request.method().as_str(), "HEAD");
+                request
+                    .respond(Response::new(
+                        StatusCode(200),
+                        vec![Header::from_bytes("ETag", "\"old\"").unwrap()],
+                        Cursor::new(Vec::<u8>::new()),
+                        Some(7),
+                        None,
+                    ))
+                    .unwrap();
+            }
+            let mut request = http.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+            let captured = capture(&mut request);
+            request
+                .respond(
+                    Response::from_string(body)
+                        .with_header(Header::from_bytes("ETag", "\"part\"").unwrap()),
+                )
+                .unwrap();
+            captured
+        });
+        match operation {
+            "copy" => {
+                store.copy("old", "new", "\"old\"").await.unwrap();
+            }
+            "delete" => store.delete("new").await.unwrap(),
+            "multipart_create" => {
+                store.begin_upload("new", HashMap::new(), 7).await.unwrap();
+            }
+            "multipart_upload" => {
+                store
+                    .upload_part("new", "upload", 1, ByteStream::from_static(b"payload"))
+                    .await
+                    .unwrap();
+            }
+            "multipart_copy" => {
+                store
+                    .copy_part("new", "upload", 1, "old", 0..=6, "\"old\"")
+                    .await
+                    .unwrap();
+            }
+            "multipart_complete" => {
+                let part = CompletedPart::builder()
+                    .part_number(1)
+                    .e_tag("\"part\"")
+                    .build();
+                store
+                    .complete_upload("new", "upload", vec![part])
+                    .await
+                    .unwrap();
+            }
+            "multipart_abort" => store.abort_upload("new", "upload").await.unwrap(),
+            _ => unreachable!(),
+        }
+        assert_eq!(task.join().unwrap().method, method);
+        for metric in ["geesefs_s3_requests_total", "geesefs_s3_attempts_total"] {
+            assert_eq!(
+                observation(
+                    &fs,
+                    &format!("{metric}{{operation=\"{operation}\",transport=\"sdk\"}}")
+                ),
+                1.,
+                "{operation}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn metrics_patch_presigning_does_not_fabricate_a_get_execution() {
+    let (store, task) = server(200, &[], b"<PatchObjectResult><Object><ETag>\"patched\"</ETag><LastModified>2026-01-01T00:00:00Z</LastModified></Object></PatchObjectResult>", None);
+    let (store, fs) = observed_backend(store);
+    let budget = Budget::new(7).unwrap();
+    let result = store
+        .patch(
+            "file",
+            0,
+            budget.reserve(7).await.unwrap().copy(b"payload").unwrap(),
+            "\"old\"",
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.etag, "\"patched\"");
+    assert_eq!(task.join().unwrap().method, "PATCH");
+    assert_eq!(
+        observation(
+            &fs,
+            "geesefs_s3_requests_total{operation=\"patch\",transport=\"extension\"}"
+        ),
+        1.
+    );
+    let text = geesefs_rs::metrics::render(&fs).unwrap();
+    assert!(!text.contains("operation=\"get\""));
 }
 
 #[tokio::test]

@@ -20,13 +20,17 @@ cannot be optimized or that Rust automatically improves memory or speed.
 
 ## Current operator scope — 2026-11-13
 
-The operator authorized merging the related implementation PRs, publishing the
-next release and updating the existing withdrawn trial reader. Continue its
-functional L2 overflow test and repeat the complete `du` on the same inventory,
-retaining the original cumulative input ceiling, deadline and resource settings.
-Use real files from the existing access-log-derived manifest. Independently check
-current-source/FUSE full hashes for approximately 2% of read events; distinguish
-the remaining complete byte/EOF checks from cryptographic integrity checks.
+The operator accepted the synthetic fixed-capacity recycling controls, stopped
+the long artificial population test and authorized traffic readmission on the
+existing scoped reader. Preserve the completed and partial traversal/workload
+evidence without promoting it to full inventory-turnover or traversal acceptance.
+
+The current task corrects read metrics so validated L2 delivery is a cache hit,
+audits related byte/operation/failure boundaries and exposes S3 operation traffic.
+The operator authorized the implementation PR/merge, the next full release,
+updating that reader, and migrating its dashboard to the new contract without
+old-schema fallbacks. Assess payload and metadata offload under existing traffic;
+retain the inventory, freshness/durability contract and resource settings.
 
 Go comparisons and new Go/A-A campaigns are no longer requested acceptance gates.
 Retain historical comparisons and failures with their original scope rather than
@@ -34,7 +38,7 @@ promoting them to passes. Report the new reader's total and peak RSS, allocator
 and cgroup/file/kernel memory before, during and after traversal and payload
 tests. Reclaim starts or cumulative traffic alone do not prove completed physical
 region reuse. This scoped release/update authorization does not authorize broader
-rollout, traffic readmission or source-data writes; unresolved compatibility and
+rollout or source-data writes; unresolved compatibility and
 functional failures remain explicit. Earlier statistical gates below are retained
 as the historical measurement contract, not prerequisites for this current task.
 

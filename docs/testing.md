@@ -5,6 +5,40 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Directory listing fixture contracts — 2026-11-13
+
+Three earlier native PLUS failures were stale fixture assumptions, not three
+additional runtime defects. Keep their original results below as historical
+source-scoped observations. The corrected fixtures retain full name/attribute and
+lookup-reference assertions:
+
+- An 8192-name directory requires one incomplete flat probe, nine ordinary
+  <=1000-name pages and EOF. Assert that root request sequence, not ten total
+  requests that omit the initial flat probe. Per-entry lookup counts and no-HEAD
+  checks remain unchanged.
+- A complete flat page establishes an implicit directory without its child LIST.
+  Use five-name backend pages to reach the injected child-LIST error after earlier
+  regular entries have been buffered. Require EIO, the actual failed dependency
+  request and zero escaped lookup references.
+- Check marker mode/uid/gid through both complete flat metadata reuse (no HEAD)
+  and a paginated common prefix (one marker HEAD). Do not require a redundant HEAD
+  when authoritative metadata is already present.
+
+Each corrected oracle rejects a relevant temporary runtime fault: eager lookup
+reference transfer, discarded marker metadata, and disabled directory-page reuse.
+All faults were reverted. The four focused PLUS controls pass with one default
+receiver and three all-feature receivers. The complete default native directory
+suite is **18 passed / 1 failed**; strict 8192-name/2048-inode flat traversal still
+fails ENOMEM and retains the exact 8388608-byte requirement. This is a fixture
+correction, not a runtime progress fix or target acceptance. Denied-warning
+all-feature all-target Clippy and fmt pass; no new coverage/CRAP score is claimed.
+
+```bash
+timeout 120s cargo +1.99.1 test --locked --offline --test fuse_directory plus_ -- --ignored --test-threads=1
+GEESEFS_TEST_FUSE_THREADS=3 timeout 120s cargo +1.99.1 test --locked --offline --all-features --test fuse_directory plus_ -- --ignored --test-threads=1
+timeout 120s cargo +1.99.1 test --locked --offline --test fuse_directory -- --ignored --test-threads=1
+```
+
 ## Directory-open teardown — 2026-11-12
 
 `destroy_releases_directory_handles_without_releasedir` uses fuser's actual

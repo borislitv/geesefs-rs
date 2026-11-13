@@ -297,11 +297,21 @@ fn plus_pages_deliver_attributes_and_lookup_ownership_without_overlapping_lists(
             1,
             "Linux does not acquire lookup references for dot entries"
         );
+        let requests = store.list_requests.lock().unwrap();
+        let root_requests = requests
+            .iter()
+            .filter(|(prefix, _)| prefix.is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
+        // The initial flat probe cannot cover this directory. Ordinary LIST
+        // needs nine <=1000-name pages plus EOF, independent of kernel frames.
+        let mut expected = vec![(String::new(), None)];
+        expected.extend(std::iter::repeat_n((String::new(), Some("/".into())), 10));
         assert_eq!(
-            store.list_calls.load(Ordering::Relaxed),
-            10, // Nine <=1000-name backend pages plus EOF, despite smaller FUSE frames.
+            root_requests, expected,
             "kernel frames must not split backend pages into overlapping LIST requests"
         );
+        drop(requests);
         for name in &names {
             assert_eq!(std::fs::metadata(path.join(name)).unwrap().len(), 17);
         }
@@ -321,6 +331,10 @@ fn failed_plus_buffer_does_not_transfer_unsent_lookup_references() {
         store.seed(&format!("{number:04}"), b"data");
     }
     store.seed("z-directory/child", b"data");
+    // A complete flat page authoritatively establishes the implicit directory
+    // without a child LIST. Force pagination so the injected LIST is required
+    // after the regular entries have been buffered in the same PLUS reply.
+    store.page_size.store(5, Ordering::Relaxed);
     *store.failed_list_prefix.lock().unwrap() = Some("z-directory/".into());
     let fs = store.filesystem(16);
     mounted(fs.clone(), |path| {
@@ -330,6 +344,15 @@ fn failed_plus_buffer_does_not_transfer_unsent_lookup_references() {
         assert!(
             result.is_err(),
             "a failed metadata fetch must not publish a partial PLUS buffer"
+        );
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EIO));
+        assert!(
+            store
+                .list_requests
+                .lock()
+                .unwrap()
+                .contains(&("z-directory/".into(), Some("/".into()))),
+            "the dependency failure must actually be reached"
         );
         let references = fs
             .namespace
@@ -707,18 +730,36 @@ fn plus_common_prefixes_preserve_directory_marker_permissions_and_ownership() {
             ("uid".into(), "1234".into()),
             ("gid".into(), "5678".into()),
         ]);
-    let fs = store.filesystem(16);
-    mounted(fs, |path| {
-        let names = std::fs::read_dir(path)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
+    for page_size in [1000, 1] {
+        store.page_size.store(page_size, Ordering::Relaxed);
+        store.head_keys.lock().unwrap().clear();
+        let fs = store.filesystem(16);
+        mounted(fs, |path| {
+            let names = std::fs::read_dir(path)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>();
+            assert_eq!(names, ["directory"]);
+            let metadata = std::fs::metadata(path.join("directory")).unwrap();
+            assert_eq!(metadata.mode() & 0o7777, 0o750);
+            assert_eq!((metadata.uid(), metadata.gid()), (1234, 5678));
+        });
+        let heads = store.head_keys.lock().unwrap();
+        let marker_heads = heads
+            .iter()
+            .filter(|key| key.starts_with("directory"))
+            .map(String::as_str)
             .collect::<Vec<_>>();
-        assert_eq!(names, ["directory"]);
-        let metadata = std::fs::metadata(path.join("directory")).unwrap();
-        assert_eq!(metadata.mode() & 0o7777, 0o750);
-        assert_eq!((metadata.uid(), metadata.gid()), (1234, 5678));
-    });
-    assert_eq!(store.head_starts.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            marker_heads,
+            if page_size == 1 {
+                vec!["directory/"]
+            } else {
+                vec![]
+            },
+            "a complete flat page reuses marker metadata; a common prefix resolves it"
+        );
+    }
 }
 
 #[test]

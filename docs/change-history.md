@@ -5,6 +5,21 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-13: correct native directory fixtures for flat metadata reuse
+
+Three preserved native failures assumed the older listing path: the request count
+omitted the initial flat probe, a child-LIST failure was no longer reached when a
+complete flat page established the directory, and the marker check demanded a HEAD
+despite authoritative flat metadata. Correct those fixtures without changing the
+runtime. Force real pagination before the injected failure, check EIO and zero
+escaped references, and verify marker metadata through both flat and common-prefix
+paths. The name/size/ownership contracts remain intact. Relevant temporary faults
+each fail the corresponding corrected oracle and are reverted.
+
+The native suite now has 18 passes and the same strict flat ENOMEM failure. Its
+8388608-byte requirement is unchanged; target traversal and physical recycling
+remain open. See [verification](testing.md#directory-listing-fixture-contracts--2026-11-13).
+
 ## 2026-11-12: tie directory-open lifetime to the admitted owner
 
 Native teardown intermittently retained directory opens after unmount. A real

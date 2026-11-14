@@ -13,6 +13,14 @@ avoidable source GETs. Give required-read reclamation one shared 250-ms maximum
 admission grace, without holding cache/inode locks or increasing existing funding.
 Writer admission and speculative refill remain nonwaiting.
 
+Independent review found that successful speculative byte admission still reached
+waiting eviction when the separate L1 entry cap was full. Optional insertion now
+keeps the resident entries without acquiring spill slots. A public read-reply
+regression first observes four unintended demotions, then verifies zero demotions
+and source-free reuse of the original records. The native fixture checks exact
+range coverage without overlaps instead of requiring a scheduling-dependent GET
+count; shifted refill and a separate missing prefix are a valid partition.
+
 Four raw 128-KiB payloads also exceed the 512-KiB serialization buffer once record
 envelopes are included. Derive spill concurrency from encoded-record bounds and
 cap aggregate engine admission at that buffer size. Count drops by closed reason,

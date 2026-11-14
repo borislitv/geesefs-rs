@@ -276,7 +276,7 @@ impl ReadCache {
         mut evicted: impl FnMut(CapacityVictim),
     ) {
         let mut block = Some(block);
-        while let Some(victim) = self.insert_step(inode, generation, offset, &mut block) {
+        while let Some(victim) = self.insert_step(inode, generation, offset, &mut block, true) {
             evicted(victim);
         }
     }
@@ -289,6 +289,7 @@ impl ReadCache {
         generation: u64,
         offset: u64,
         block: &mut Option<Block>,
+        evict: bool,
     ) -> Option<CapacityVictim> {
         let incoming = block.as_ref().expect("pending cache insertion");
         if incoming.as_slice().is_empty() {
@@ -310,6 +311,10 @@ impl ReadCache {
         }
         if state.weight > self.capacity - weight || state.entries.len() == state.entries.cap().get()
         {
+            if !evict {
+                block.take();
+                return None;
+            }
             let victim = state
                 .capacity_victim()
                 .expect("capacity pressure owns an entry");

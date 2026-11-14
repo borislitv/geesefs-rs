@@ -26,6 +26,10 @@ generation HEAD, no warm GET/HEAD/LIST, and metric conservation against actual H
 requests. Two userspace passes deliver 4 MiB from L1+L2 while the first promotion
 consumes 2 MiB of validated L2 pipeline; those scopes must not be conflated.
 This small fixture is not full-inventory, traversal or performance acceptance.
+Cold GET ranges must cover each object exactly once without overlap or holes;
+their count may vary with a shifted optional refill. A separate public read-reply
+regression exercises free byte admission with a full L1 entry cap and verifies
+that optional population preserves resident records without acquiring spill slots.
 
 ```bash
 timeout 180s cargo test --offline --locked --test disk_cache_pressure --test disk_cache --test disk_cache_metrics --test disk_cache_gap_overlap --test read_reply --test backend_contract --test metrics

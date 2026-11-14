@@ -1091,6 +1091,56 @@ async fn selected_loans_from_before_attachment_are_discarded_without_demotion_af
 }
 
 #[tokio::test]
+async fn optional_refill_preserves_resident_entries_instead_of_spilling_for_entry_capacity() {
+    let dir = tempfile::tempdir().unwrap();
+    let mount = tempfile::tempdir().unwrap();
+    let store = scoped_store();
+    let bytes: Vec<_> = (0x17..0x1fu8)
+        .flat_map(|byte| vec![byte; READ_BLOCK_BYTES])
+        .collect();
+    store.seed("package.rpm", &bytes);
+    let mut config = configured(dir.path(), mount.path());
+    config.entry_limit = 4;
+    config.read_ahead = 512;
+    config.read_ahead_small = 512;
+    config.read_ahead_large = 512;
+    config.read_ahead_parallel = READ_BLOCK_BYTES / 1024;
+    let fs = attach(config, store.clone()).await;
+    let ino = fs.lookup(1, "package.rpm").await.unwrap().ino;
+    assert_eq!(
+        fs.read(ino, 0, 4 * READ_BLOCK_BYTES)
+            .await
+            .unwrap()
+            .as_slice(),
+        &bytes[..4 * READ_BLOCK_BYTES]
+    );
+    let before = store.read_calls.load(Ordering::Relaxed);
+    assert!(
+        fs.read_reply_data(ino, 0, 4 * READ_BLOCK_BYTES, |result| {
+            assert_eq!(result.unwrap(), &bytes[..4 * READ_BLOCK_BYTES]);
+        })
+        .await
+        .is_none()
+    );
+    assert_eq!(
+        store.read_calls.load(Ordering::Relaxed) - before,
+        4,
+        "free byte admission must exercise the optional insertion path"
+    );
+    let stats = fs.disk_cache_stats().unwrap();
+    assert_eq!(
+        stats.admitted_demotions, 0,
+        "optional entry pressure must preserve resident owners instead of acquiring spill slots"
+    );
+    assert_eq!(stats.drops, 0);
+    let gets = store.read_calls.load(Ordering::Relaxed);
+    assert_eq!(fs.read(ino, 0, 13).await.unwrap().as_slice(), &bytes[..13]);
+    assert_eq!(store.read_calls.load(Ordering::Relaxed), gets);
+    assert_eq!(fs.disk_cache_stats().unwrap().hits, 0);
+    fs.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn mixed_disk_coverage_gets_only_the_missing_range_and_optional_refill_uses_l2() {
     let dir = tempfile::tempdir().unwrap();
     let mount = tempfile::tempdir().unwrap();

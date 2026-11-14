@@ -137,6 +137,44 @@ impl Objects {
             .filter(|(actual, _, _)| actual == method)
             .count()
     }
+
+    fn assert_cold_coverage(&self, payload_bytes: usize) {
+        let requests = self.requests.lock().unwrap();
+        for (object, size) in [
+            ("/bucket/prefix/reused.rpm", payload_bytes),
+            ("/bucket/prefix/pressure.txt", 48 * MIB),
+        ] {
+            let mut ranges: Vec<_> = requests
+                .iter()
+                .filter(|(method, path, _)| {
+                    method == "GET" && path.split('?').next() == Some(object)
+                })
+                .map(|(_, _, range)| {
+                    let (start, end) = range
+                        .as_ref()
+                        .unwrap()
+                        .strip_prefix("bytes=")
+                        .unwrap()
+                        .split_once('-')
+                        .unwrap();
+                    let start: usize = start.parse().unwrap();
+                    let end: usize = end.parse().unwrap();
+                    assert!(start <= end && end < size);
+                    (start, end + 1)
+                })
+                .collect();
+            ranges.sort_unstable();
+            let mut covered = 0;
+            for (start, end) in ranges {
+                assert_eq!(
+                    start, covered,
+                    "{object}: cold GET ranges must cover every byte once, without overlap or holes"
+                );
+                covered = end;
+            }
+            assert_eq!(covered, size, "{object}: cold GET coverage must reach EOF");
+        }
+    }
 }
 impl Drop for Objects {
     fn drop(&mut self) {
@@ -319,11 +357,9 @@ fn native_rsync_reuses_complete_l2_victims_without_extra_s3_requests() {
                 "cold source exchanges: {:?}",
                 objects.requests.lock().unwrap()
             );
-            assert_eq!(
-                objects.count("GET"),
-                25,
-                "each 2-MiB source window is fetched only once"
-            );
+            // Hit-driven refill may start between read-ahead grid boundaries.
+            // A separate missing-prefix GET is valid; repeated bytes are not.
+            objects.assert_cold_coverage(payload.len());
         }
     }
 }

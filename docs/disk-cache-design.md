@@ -138,7 +138,9 @@ The deadline is not renewed per record. This prevents synchronous bursts from
 discarding the tail before healthy background work runs. Writer admission and
 speculative refill never wait for optional spills. With L2 enabled, speculative
 refill stops when free admission is exhausted rather than evicting and dropping
-eligible victims; required reads perform the bounded sweep. A stalled disk cannot impose
+eligible victims. If only the L1 entry cap is full, optional insertion discards
+the incoming record without evicting a resident owner or acquiring a spill slot;
+required reads perform the bounded sweep. A stalled disk cannot impose
 an unbounded required-read wait or delay writer fsync for cache population.
 Guaranteed preservation, bounded RAM and nonblocking progress cannot all be
 promised when disk writes stop.

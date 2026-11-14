@@ -2677,7 +2677,10 @@ impl Filesystem {
                 let mut block = Some(block);
                 let deadline = tokio::time::Instant::now()
                     + self.config.request_timeout.min(Duration::from_millis(250));
-                while let Some(victim) = cache.insert_step(ino, generation, at, &mut block) {
+                // Explicit optional refill must not evict resident L2 candidates
+                // or acquire spill slots merely because the entry cap is full.
+                let evict = length > 0 || self.disk_funding_bytes == 0;
+                while let Some(victim) = cache.insert_step(ino, generation, at, &mut block, evict) {
                     self.demote_capacity(victim, Some(deadline)).await;
                 }
                 if right > left {

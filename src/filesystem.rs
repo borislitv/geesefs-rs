@@ -2361,6 +2361,7 @@ impl Filesystem {
         // Keep the entire requested range, but stop optional prefetch at the
         // first already-covered span, before reserving another whole window.
         if clean
+            && prefetch > relative + length
             && let Some(gap) = self
                 .cache
                 .gap(ino, generation, start..start + prefetch as u64)

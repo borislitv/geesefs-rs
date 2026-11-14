@@ -5,6 +5,23 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-14: bound the optional-tail cache lookup
+
+Independent review found that the new read-ahead trim scanned retained L1 records
+from offset zero, even when the entire window was already requested. Skip that
+lookup without an optional suffix. Bound other gap searches by a conservative
+largest-inserted span length using the existing BTreeMap range API; an earlier
+long overlap must remain visible behind a later short span. Removal/replacement
+may leave the scalar bound wider, and clear resets it. No owner or interval tree
+is added, and requested ranges, funding and source-free reuse remain unchanged.
+
+Private instrumented public-read probes first fail on the previous source, then
+observe no lookup for full/EOF-clipped demand and no distant-prefix visits for a
+useful cached separator. The counters exist only in the isolated evidence copy.
+Crate-visible cache tests check overlap, replacement, eviction, clear and offset
+saturation; targeted invalid-bound mutations prove their failure sensitivity.
+These checks establish local work and behavior, not production latency improvement.
+
 ## 2026-11-13: account for completed read sources and distinct S3 operations
 
 Eligible eviction bursts could discard most records before background spill work

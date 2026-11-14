@@ -5,6 +5,45 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-14: prepare the authorized 0.1.14 delivery
+
+Release the reviewed complete-directory absence correction as a patch without
+changing dependencies, cache budgets or freshness policy. The independent focused
+post-fix review found no new confirmed defect in that correction; the previously
+reproduced concurrency and amplification findings remain open. The operator now
+prioritizes the full release and the existing scoped reader update, followed by
+filesystem-backed routing of its entire mirrors HTTP prefix. Disposable native
+checks, exact-source build provenance and guarded handoff verification are separate
+from broader compatibility and performance acceptance. Dashboard redesign follows
+the code/routing delivery.
+
+## 2026-11-14: reuse complete metadata coverage and distinguish source reduction
+
+A complete fresh flat listing was retained for READDIR but ignored by LOOKUP.
+With negative caching enabled, 66 distinct absent names after one complete root
+listing produced 67 more LIST calls, with repeated HEAD probes on the same fallback
+path. Check the existing charged Moka subtree cache before speculative listing
+and authoritative fallback. Reuse
+only directories already proven complete, under the same namespace epoch, binding
+and original fetch-start TTL. Known objects, markers and implicit descendants
+outside the emitted chunk must still be resolved. No new cache, entry allowance,
+TTL or dependency is introduced; disabling negative caching retains miss probes.
+
+The two root/descendant absence regressions first fail on the preceding source;
+the focused suite preserves partial coverage, local mutation, failure/cancellation,
+marker/type/permission authority and zero/consumed TTL boundaries. Independent
+released-source probes also reproduce duplicate concurrent LISTs and an overlapping
+cold lookup returning EAGAIN; these are not repaired by complete-coverage reuse.
+Concurrent expired refresh, partial demanded-L1 re-fetch, cache prefix-scan work,
+unretainable optional refill and indexed-victim spill waits remain separate work.
+
+Document total successful requested delivery against SDK-consumed GET body rather
+than presenting the requested-byte hit ratio as source savings. Keep observed
+source reduction separate from causal L2 benefit, metadata operations and wire
+traffic. The existing exporter supplies both boundaries; no redundant hot-path
+counter is added. Dashboard/query verification is independent of filesystem and
+production acceptance.
+
 ## 2026-11-14: bound the optional-tail cache lookup
 
 Independent review found that the new read-ahead trim scanned retained L1 records

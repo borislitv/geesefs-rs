@@ -48,6 +48,40 @@ rollout or source-data writes; unresolved compatibility and
 functional failures remain explicit. Earlier statistical gates below are retained
 as the historical measurement contract, not prerequisites for this current task.
 
+### Follow-up scope — 2026-11-14
+
+The previous metrics release and scoped reader update are complete. The next task
+prioritizes total successful userspace delivery against actual consumed S3 GET
+body bytes, with requested L1/L2 breakdowns as secondary views. These descriptive
+ratios must preserve missing/reset/zero/negative cases and must not be labelled a
+causal benefit of L2. Reorganize the existing dashboard using the current exporter
+schema. The subsequent delivery instruction below separately authorizes the next
+release and the existing scoped reader update.
+
+Independently compare metadata request paths with public Go 0.43.9 source and
+reproduce concrete excess HEAD/LIST work. Preserve authoritative RAM metadata,
+bounded negative caching and the existing TTL. Reuse already proven complete
+listing coverage without treating a speculative attempt or partial page as
+authoritative absence. Source-confirmed or reproduced remaining findings remain
+explicit; identifying one does not imply that every finding is repaired.
+
+### Delivery priority — 2026-11-14
+
+The operator now prioritizes shipping the verified complete-coverage correction as
+a new full versioned release and updating the existing scoped reader. Preserve its
+persistent inventory, payload/entry budgets, TTL, argv and rollback. Run short
+disposable mounted-FUSE/S3 compatibility checks on the development VM before the
+guarded handoff and bounded live checks.
+
+After that update, route the entire mirrors HTTP prefix on that reader through the
+filesystem instead of the existing direct-S3 nginx proxy, with a source-backed
+configuration, exact rollback and full/Range response verification. This additional
+natural traffic replaces no correctness gate and does not authorize artificial
+population, other-reader rollout or source-data writes. Defer dashboard redesign
+until the code and routing are delivered; then research public dashboard guidance
+and make the operational questions and partial-coverage boundaries understandable.
+Full compatibility, turnover and production/performance acceptance remain open.
+
 ## Target and reference
 
 - Initial target: Linux, S3-compatible storage, and the extended metadata used by

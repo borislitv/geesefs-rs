@@ -1304,11 +1304,15 @@ impl Filesystem {
                     .negative_lookups
                     .get(name)
                     .is_some_and(|fetched| fetched.elapsed() < self.config.stat_cache_ttl);
-                !ns.is_moving(&key)
+                let preload = !ns.is_moving(&key)
                     && !ns.is_deleting(&key)
                     && !ns.hidden(&key)
                     && ns.named(&key).is_none()
-                    && !negative
+                    && !negative;
+                if preload && self.cached_directory_absence(&ns, parent, &key) {
+                    return Err(Error::Fs(libc::ENOENT));
+                }
+                preload
             };
             if preload {
                 // Speculation is optional. An absent/failed/standard-metadata
@@ -1353,6 +1357,9 @@ impl Filesystem {
                     return Err(Error::Fs(libc::ENOENT));
                 }
                 state.negative_lookups.remove(name);
+            }
+            if self.cached_directory_absence(&ns, parent, &key) {
+                return Err(Error::Fs(libc::ENOENT));
             }
             (
                 ns.epoch,
@@ -1446,6 +1453,45 @@ impl Filesystem {
             node.state.lock().unwrap().fetched = started;
             Ok(node)
         })
+    }
+
+    fn cached_directory_absence(&self, ns: &Namespace, parent: u64, key: &str) -> bool {
+        if self.config.negative_lookup_cache_size == 0 || ns.named(key).is_some() {
+            return false;
+        }
+        let Ok(parent) = ns.get(parent) else {
+            return false;
+        };
+        let state = parent.state.lock().unwrap();
+        if state.deleted
+            || ns.names.get(&state.key) != Some(&parent.ino)
+            || ns.is_moving(&state.key)
+            || ns.is_deleting(&state.key)
+        {
+            return false;
+        }
+        let prefix = if state.key.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", state.key)
+        };
+        if !key.strip_prefix(&prefix).is_some_and(direct_directory_name) {
+            return false;
+        }
+        // Only proven-complete directories enter this existing, charged cache.
+        // The shared flat page may contain names outside the emitted READDIR
+        // chunk, including marker objects or descendants of implicit directories.
+        self.subtree_pages
+            .get(&(ns.epoch, prefix))
+            .is_some_and(|page| {
+                page.fetched.elapsed() < self.config.stat_cache_ttl
+                    && !page.objects.iter().any(|(listed, _)| {
+                        listed.as_str() == key
+                            || listed
+                                .strip_prefix(key)
+                                .is_some_and(|rest| rest.starts_with('/'))
+                    })
+            })
     }
 
     async fn preload_directory(&self, parent: u64) -> Result<()> {

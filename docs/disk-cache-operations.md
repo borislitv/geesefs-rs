@@ -1,9 +1,12 @@
 # Persistent payload cache observations and selection
 
-L2 is populated from eligible clean L1 capacity victims, in records of at most
-128 KiB. It does not proactively download every matching file or retain an entire
-large object on its first read. Admission is best-effort within existing byte/job
-budgets; inspect demotion drops as well as hits and writes.
+L2 is populated from eligible validated source fills, in records of at most
+128 KiB. There is no retained application RAM payload tier. Active reads and
+replies retain charged immutable owners; independent reuse goes through Foyer
+and the backing-file page cache. Bounded read-ahead does not proactively download
+every matching file or require completing a large object. Without an eligible
+funded L2, reads fetch only their requested bytes. Population remains best-effort
+within the existing byte/job budgets; inspect copy/enqueue drops, hits and writes.
 
 ## Mirror payload selection
 
@@ -40,7 +43,7 @@ compressed images, mount-relative paths and sidecar exclusions.
 
 Change the launch policy at an ordinary planned restart and record the new
 configuration separately from an ongoing measurement. Preserve the existing cache
-inventory; newly selected paths are populated by subsequent eligible evictions.
+inventory; newly selected paths are populated by subsequent eligible source fills.
 
 ## Two independent fullness limits
 

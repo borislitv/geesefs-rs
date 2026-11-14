@@ -43,7 +43,7 @@ EVICTION_PIPELINE_BYTES = 5 * MIB
 READ_REASONS = ['output_reservation', 'output_coverage', 'state', 'poisoned', 'jobs', 'activity',
                 'timeout', 'join', 'backend_miss', 'backend_error', 'identity', 'output_copy',
                 'generation_before', 'generation_after']
-STATES = ['both_cold', 'l1_hot', 'l2_hot_pagecache_hot', 'l2_hot_pagecache_cold_requested']
+STATES = ['both_cold', 'l2_hot_pagecache_hot', 'l2_hot_pagecache_cold_requested']
 WORKLOADS = ['metadata', 'sequential', 'random', 'concurrent', 'eviction', 'mixed', 'writer_fsync']
 READS = ['sequential', 'random', 'concurrent', 'mixed']
 METRICS = ['throughput', 'p50_ms', 'p95_ms', 'p99_ms', 'rss_peak_bytes', 'rss_steady_bytes',
@@ -61,16 +61,15 @@ def invalidate(report):
 
 def example_manifest():
     return dict(schema=1, memory_limit_mb=64, metadata_limit='16 MiB', entry_limit=100000,
-                dataset_bytes=128 * MIB, l1_hot_bytes=MIB, eviction_bytes=512 * MIB,
+                dataset_bytes=128 * MIB, probe_bytes=MIB, eviction_bytes=512 * MIB,
                 disk_capacity_bytes=256 * MIB, metadata_entries=2048, random_operations=256,
                 random_block_bytes=128 * 1024, concurrency=4, writer_bytes=8 * MIB,
                 cpu_quota_us=200000, cpu_period_us=100000, cgroup_memory_max_mb=2048,
-                 measurement_cycles=8, l1_sequential_cycles=64,
+                measurement_cycles=8,
                  eviction_preparation=capacity_population.protocol(512 * MIB),
                 states=STATES[:], workloads=WORKLOADS[:],
-                disk_metrics=dict(l1_hit_bytes='geesefs_read_cache_hit_bytes_total',
-                                   l1_resident_bytes='geesefs_read_cache_bytes',
-                                   l1_loaned_bytes='geesefs_read_cache_loaned_bytes',
+                disk_metrics=dict(read_cache_hit_bytes='geesefs_read_cache_hit_bytes_total',
+                                   inflight_delivered_bytes='geesefs_read_delivered_bytes_total{source="inflight"}',
                                   remote_bytes='geesefs_read_remote_bytes_total',
                                   l2_hit_bytes='geesefs_disk_cache_hit_bytes_total',
                                   l2_hits='geesefs_disk_cache_hits_total',
@@ -116,7 +115,7 @@ def example_manifest():
                                   io_write_bytes='geesefs_disk_cache_io_write_bytes_total',
                                   managed_capacity_bytes='geesefs_disk_cache_managed_capacity_bytes',
                                   funding_bytes='geesefs_disk_cache_funding_bytes',
-                                  effective_l1_policy_bytes='geesefs_effective_l1_policy_bytes'),
+                                  read_work_capacity_bytes='geesefs_read_work_capacity_bytes'),
                  unavailable_disk_observations=['capacity_evictions', 'allocated_bytes',
                      'index_heap_bytes', 'latency_quantiles'],
                 superiority_targets={'sequential/l2_hot_pagecache_hot': ['throughput'],
@@ -137,16 +136,16 @@ def validate(config, pairs, controls):
             raise ValueError(f'{name} requires at least eight independent mounts')
     if config.get('schema') != 1:
         raise ValueError('manifest schema must be 1')
-    for key in ['memory_limit_mb', 'entry_limit', 'dataset_bytes', 'l1_hot_bytes',
+    for key in ['memory_limit_mb', 'entry_limit', 'dataset_bytes', 'probe_bytes',
                 'eviction_bytes', 'disk_capacity_bytes', 'metadata_entries', 'random_operations',
                 'random_block_bytes', 'concurrency', 'writer_bytes', 'cpu_quota_us',
                 'cpu_period_us', 'cgroup_memory_max_mb']:
         if type(config.get(key)) is not int or config[key] <= 0:
             raise ValueError(f'positive integer required: {key}')
     memory = config['memory_limit_mb'] * MIB
-    if not config['l1_hot_bytes'] <= memory // 16 < memory < config['dataset_bytes'] < config['disk_capacity_bytes'] < config['eviction_bytes']:
-        raise ValueError('require small L1 set, dataset > RAM, L2 capacity > dataset, eviction set > L2')
-    if config['random_block_bytes'] >= config['l1_hot_bytes'] or config['eviction_bytes'] > 2 * 1024 ** 3:
+    if not config['probe_bytes'] <= memory // 16 < memory < config['dataset_bytes'] < config['disk_capacity_bytes'] < config['eviction_bytes']:
+        raise ValueError('require small probe, dataset > RAM, L2 capacity > dataset, eviction set > L2')
+    if config['random_block_bytes'] >= config['probe_bytes'] or config['eviction_bytes'] > 2 * 1024 ** 3:
         raise ValueError('range must fit every dataset; local fixture bounded at 2 GiB')
     if config.get('eviction_preparation') != capacity_population.protocol(config['eviction_bytes']):
         raise ValueError('explicit fixed, matched eviction_preparation protocol required')
@@ -154,7 +153,7 @@ def validate(config, pairs, controls):
         raise ValueError('explicit complete state/workload matrix required; cold requested is not verified cold')
     mapping = config.get('disk_metrics', {})
     if set(mapping) != set(example_manifest()['disk_metrics']) or any(
-            not isinstance(value, str) or not re.fullmatch(r'[a-zA-Z_:][a-zA-Z0-9_:]*(?:\{(?:scope="queued_and_active"|phase="(?:startup|allocation|recovery)"|state="(?:prepared|ready|disabled)"|reason="[a-z_]+")\})?', value)
+            not isinstance(value, str) or not re.fullmatch(r'[a-zA-Z_:][a-zA-Z0-9_:]*(?:\{(?:scope="queued_and_active"|source="inflight"|phase="(?:startup|allocation|recovery)"|state="(?:prepared|ready|disabled)"|reason="[a-z_]+")\})?', value)
             for value in mapping.values()):
         raise ValueError('disk_metrics must explicitly map every required counter/gauge to an exact runtime name')
     if config.get('unavailable_disk_observations') != example_manifest()['unavailable_disk_observations']:
@@ -165,8 +164,6 @@ def validate(config, pairs, controls):
         raise ValueError('time-driven work is unsupported; declare measurement_cycles instead')
     if type(config.get('measurement_cycles')) is not int or not 1 <= config['measurement_cycles'] <= 8:
         raise ValueError('measurement_cycles must predeclare between one and eight fixed warm cycles')
-    if type(config.get('l1_sequential_cycles')) is not int or not 1 <= config['l1_sequential_cycles'] <= 64:
-        raise ValueError('l1_sequential_cycles must predeclare between one and 64 fixed small-read cycles')
     if type(config.get('writer_files', 1)) is not int or not 1 <= config.get('writer_files', 1) <= 8:
         raise ValueError('writer_files must predeclare between one and eight files')
     targets = config.get('superiority_targets')
@@ -243,17 +240,14 @@ def delta(before, after, name):
 
 
 def verify_state(state, before, after, arm):
-    if state == 'l1_hot':
-        if delta(before, after, 'l1_hit_bytes') <= 0:
-            raise RuntimeError('L1-hot requested but no observed L1 hit; client pagecache is not an L1 hit')
-        if delta(before, after, 'remote_bytes') != 0:
-            raise RuntimeError('L1-hot incurred remote payload reads')
+    if state not in STATES + ['normal']:
+        raise RuntimeError(f'unsupported cache state: {state}; no retained application RAM payload tier exists')
     if state.startswith('l2_hot') and arm == 'candidate':
         if delta(before, after, 'l2_hit_bytes') <= 0:
             raise RuntimeError('L2-hot requested but no observed L2 hit; runtime/eviction/recovery pending')
         if delta(before, after, 'remote_bytes') != 0:
             raise RuntimeError('L2-hot incurred remote payload reads; inventory coverage incomplete')
-    if state == 'l1_hot' or (state.startswith('l2_hot') and arm == 'candidate'):
+    if state.startswith('l2_hot') and arm == 'candidate':
         if delta(before, after, 'source_get_attempts') != 0:
             raise RuntimeError('pure-hot interval incurred source GET attempts')
         if delta(before, after, 'fuse_reads') <= 0:
@@ -292,11 +286,13 @@ def budget_comparison(baseline, candidate, memory_mb):
     total = memory_mb * MIB
     if any(value.get('payload_limit_bytes') != total for value in [baseline, candidate]):
         raise RuntimeError('effective payload budgets missing or not constant')
-    if any(type(value.get('read_cache_policy_bytes')) is not int for value in [baseline, candidate]):
-        raise RuntimeError('missing effective L1 capacity')
-    return dict(payload_limit_bytes=total, baseline_effective_l1_bytes=baseline['read_cache_policy_bytes'],
-                candidate_effective_l1_bytes=candidate['read_cache_policy_bytes'],
-                l1_reduction_bytes=baseline['read_cache_policy_bytes'] - candidate['read_cache_policy_bytes'],
+    if any(type(value.get(key)) is not int for value in [baseline, candidate]
+           for key in ['data_shared_bytes', 'disk_cache_funding_bytes']):
+        raise RuntimeError('missing active-read data capacity or persistent-tier funding')
+    left = baseline['data_shared_bytes'] - baseline['disk_cache_funding_bytes']
+    right = candidate['data_shared_bytes'] - candidate['disk_cache_funding_bytes']
+    return dict(payload_limit_bytes=total, baseline_read_work_bytes=left,
+                candidate_read_work_bytes=right, read_work_reduction_bytes=left - right,
                 disk_memory_is_free=False)
 
 
@@ -414,7 +410,7 @@ def native_snapshot(port, config, output, label, require_adapter=True):
         text = response.read(2 * MIB).decode()
     (output / (label + '-metrics.txt')).write_text(text)
     mapping = config['disk_metrics'] if require_adapter else {
-        key: config['disk_metrics'][key] for key in ['l1_hit_bytes', 'remote_bytes', 'l1_resident_bytes', 'l1_loaned_bytes',
+        key: config['disk_metrics'][key] for key in ['read_cache_hit_bytes', 'inflight_delivered_bytes', 'remote_bytes',
             'state_prepared', 'state_ready', 'state_disabled', 'stats_available', 'funding_bytes', 'managed_capacity_bytes']}
     values = parse_metrics(text, mapping)
     if values.get('state_prepared') == 1 and values.get('stats_available') == 0:
@@ -450,8 +446,7 @@ def io_counters(pid):
 
 def dataset_config(config, state, workload):
     result = dict(config)
-    result['dataset_bytes'] = (config['l1_hot_bytes'] if state == 'l1_hot' else
-                               config['eviction_bytes'] if workload == 'eviction' else config['dataset_bytes'])
+    result['dataset_bytes'] = config['eviction_bytes'] if workload == 'eviction' else config['dataset_bytes']
     return result
 
 
@@ -491,10 +486,6 @@ def operation_plan(config, workload, state):
     # pass; repeating mutation/fsync or refreshing the witness changes contract.
     if workload in ['eviction', 'writer_fsync'] or state == 'both_cold' or state.endswith('cold_requested'):
         cycles = 1
-    elif workload == 'sequential' and state == 'l1_hot':
-        cycles = config['l1_sequential_cycles']
-        if type(cycles) is not int or not 1 <= cycles <= 64:
-            raise ValueError('fixed l1_sequential_cycles must be an integer between one and 64')
     if workload in ['sequential', 'eviction']:
         transferred = config['dataset_bytes']
         operations = (transferred + MIB - 1) // MIB
@@ -526,9 +517,6 @@ def worker_main():
         path = Path(spec['path'])
         if spec['name'] == 'eviction':
             path = path / 'capacity-pressure'
-        if spec['state'] == 'l1_hot':
-            compare.workload(path, 'sequential', spec['config'], client, spec['bucket'],
-                             spec['prefix'], spec['endpoint'], True, spec['expected_sha'])
         drop_client_pages(path)
         print(json.dumps({'ready': True}), flush=True)
         sys.stdin.readline()
@@ -690,7 +678,7 @@ def prime(binary, fixture, work, record, config, cache, group, output):
     rounds = record['population_rounds'] = []
     record['population_policy'] = dict(read_ahead_kib=POPULATION_READ_AHEAD_KIB,
         measurement_read_ahead='unchanged defaults; initial 5 MiB', fixed_mounts=POPULATION_ROUNDS,
-        eviction_warm_bytes=EVICTION_PIPELINE_BYTES, eviction_requested_probe_bytes=min(MIB, config['l1_hot_bytes']))
+        eviction_warm_bytes=EVICTION_PIPELINE_BYTES, eviction_requested_probe_bytes=min(MIB, config['probe_bytes']))
     for number in range(POPULATION_ROUNDS):
         if time.monotonic() >= deadline:
             raise RuntimeError('population protocol exceeded its fixed deadline')
@@ -729,7 +717,7 @@ def prime(binary, fixture, work, record, config, cache, group, output):
         before = native_snapshot(port, config, output, label + '-before', require_adapter=record['arm'] == 'candidate')
         if record['workload'] == 'eviction':
             size = EVICTION_PIPELINE_BYTES
-            eviction_probe(path, min(MIB, config['l1_hot_bytes']))
+            eviction_probe(path, min(MIB, config['probe_bytes']))
         else:
             size = config['dataset_bytes']
             native_hash(path / 'payload', fixture['expected_sha'], group, max(1, min(30, deadline - time.monotonic())))
@@ -783,7 +771,7 @@ def measured_run(binary, fixture, work, record, config, group_root, output):
                 # Outside the timed workload; warm the same prefix in every arm.
                 # The candidate must prove it persisted, not just touched, the seed.
                 seed_before = native_snapshot(port, config, output, label + '-eviction-seed-before') if record['arm'] == 'candidate' else None
-                eviction_probe(path, min(MIB, config['l1_hot_bytes']))
+                eviction_probe(path, min(MIB, config['probe_bytes']))
                 if seed_before is not None:
                     disk_idle(port, config)
                     seed_after = native_snapshot(port, config, output, label + '-eviction-seed-after')
@@ -848,7 +836,7 @@ def measured_run(binary, fixture, work, record, config, group_root, output):
                     raise RuntimeError('measured reads did not reach FUSE')
                 if record['workload'] == 'eviction' and record['arm'] == 'candidate':
                     probe_io_before = io_counters(daemon.pid)
-                    eviction_probe(path, min(MIB, config['l1_hot_bytes']))
+                    eviction_probe(path, min(MIB, config['probe_bytes']))
                     probe_after = disk_idle(port, config)
                     probe_io_after = io_counters(daemon.pid)
                     record.update(eviction_probe_io_before=probe_io_before, eviction_probe_io_after=probe_io_after,
@@ -1436,8 +1424,7 @@ def execute(args, config, report):
     report['accounting_scope'] = 'daemon + fresh workload client in one owned cgroup; localhost S3 fixture is outside, not whole-machine cost'
     report['state_protocols'] = dict(
         both_cold='new mount and empty app caches; S3 fixture/device media not cold',
-        l1_hot='small verified working set primed inside same mount; FUSE direct-I/O; observed L1 hits/no remote bytes',
-        l2_hot_pagecache_hot='target demoted using excluded pressure, clean shutdown, owned cache file read-through, new mount',
+        l2_hot_pagecache_hot='validated target fills persisted, clean shutdown, owned cache file read-through, new mount',
         l2_hot_pagecache_cold_requested='same persisted target, owned-file DONTNEED before reopen; advisory, not verified cold')
     # Always local, uniquely owned; never consumes GEESEFS_TEST_ENDPOINT.
     with evidence_work(args.output) as work:
@@ -1451,7 +1438,7 @@ def execute(args, config, report):
             report['fixture_generations'] = {}
             for scope, sealed, workloads, sizes in [
                     ('sealed-ro', True, set(WORKLOADS) - {'writer_fsync'},
-                     [config['l1_hot_bytes'], config['dataset_bytes'], config['eviction_bytes']]),
+                     [config['probe_bytes'], config['dataset_bytes'], config['eviction_bytes']]),
                     ('disposable-rw', False, {'writer_fsync'}, [config['dataset_bytes']])]:
                 provider_work = work / scope
                 provider_work.mkdir()

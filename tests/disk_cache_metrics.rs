@@ -246,23 +246,32 @@ async fn cancelled_fill_follower_and_scrapes_do_not_count_another_l2_operation()
             .as_slice(),
         &[0x39; 37]
     );
-    assert_eq!(fs.read(ino, 11, 37).await.unwrap().as_slice(), &[0x39; 37]);
+    fs.drain_disk_cache(DEADLINE).await.unwrap();
+    *store.read_gate.lock().unwrap() = None;
+    assert_eq!(
+        tokio::time::timeout(DEADLINE, fs.read(ino, 11, 37))
+            .await
+            .unwrap()
+            .unwrap()
+            .as_slice(),
+        &[0x39; 37]
+    );
     let text = render(&fs).unwrap();
     assert_eq!(
         sample(&text, "geesefs_disk_cache_read_operations_total"),
-        1.
+        2.
     );
     assert_eq!(
         sample(&text, "geesefs_disk_cache_read_operation_misses_total"),
         1.
     );
-    assert_eq!(sample(&text, "geesefs_disk_cache_hits_total"), 0.);
+    assert_eq!(sample(&text, "geesefs_disk_cache_hits_total"), 1.);
     assert_eq!(store.read_calls.load(Ordering::Relaxed), 1);
     fs.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn real_eviction_recovery_and_aligned_l2_read_have_exact_count_and_byte_metrics() {
+async fn real_fill_recovery_and_independent_l2_reads_have_exact_count_and_byte_metrics() {
     let dir = tempfile::tempdir().unwrap();
     let mount = tempfile::tempdir().unwrap();
     let store = MemoryStore::new();
@@ -294,27 +303,9 @@ async fn real_eviction_recovery_and_aligned_l2_read_have_exact_count_and_byte_me
             .as_slice(),
         &[0x39; READ_BLOCK_BYTES]
     );
-    let step = fs
-        .effective_budgets()
-        .requested_read_ahead_bytes
-        .max(READ_BLOCK_BYTES);
-    store.seed("pressure.txt", &vec![0x71; 40 * step]);
-    let pressure = fs.lookup(1, "pressure.txt").await.unwrap();
-    for offset in (0..40 * step).step_by(step) {
-        assert_eq!(
-            fs.read(pressure.ino, offset as u64, READ_BLOCK_BYTES)
-                .await
-                .unwrap()
-                .as_slice(),
-            &[0x71; READ_BLOCK_BYTES]
-        );
-        fs.drain_disk_cache(DEADLINE).await.unwrap();
-    }
+    fs.drain_disk_cache(DEADLINE).await.unwrap();
     let text = render(&fs).unwrap();
-    assert_eq!(
-        sample(&text, "geesefs_read_cache_capacity_evictions_total"),
-        9.
-    );
+    assert!(!text.contains("geesefs_read_cache_capacity_evictions_total"));
     assert_eq!(sample(&text, "geesefs_disk_cache_misses_total"), 1.);
     assert_eq!(sample(&text, "geesefs_disk_cache_hits_total"), 0.);
     assert_eq!(sample(&text, "geesefs_disk_cache_hit_bytes_total"), 0.);
@@ -585,8 +576,8 @@ async fn real_eviction_recovery_and_aligned_l2_read_have_exact_count_and_byte_me
         budgets.disk_cache_funding_bytes as f64
     );
     assert_eq!(
-        sample(&text, "geesefs_effective_l1_policy_bytes"),
-        budgets.read_cache_policy_bytes as f64
+        sample(&text, "geesefs_read_work_capacity_bytes"),
+        (budgets.data_shared_bytes - budgets.disk_cache_funding_bytes) as f64
     );
     assert_eq!(sample(&text, "geesefs_metadata_limit_enabled"), 1.);
     assert_eq!(
@@ -660,7 +651,7 @@ async fn real_eviction_recovery_and_aligned_l2_read_have_exact_count_and_byte_me
         after.read_operations, stats.read_operations,
         "scrapes cannot record another operation"
     );
-    // An L1 hit is not a second completed L2 load or another L2 hit byte.
+    // Independent reads must execute Foyer again; no decoded RAM payload survives.
     assert_eq!(
         fs.read(package.ino, 11, 37).await.unwrap().as_slice(),
         &[0x39; 37]
@@ -668,9 +659,9 @@ async fn real_eviction_recovery_and_aligned_l2_read_have_exact_count_and_byte_me
     let again = render(&fs).unwrap();
     assert_eq!(
         sample(&again, "geesefs_disk_cache_read_operations_total"),
-        1.
+        2.
     );
-    assert_eq!(sample(&again, "geesefs_disk_cache_hit_bytes_total"), 48.);
+    assert_eq!(sample(&again, "geesefs_disk_cache_hit_bytes_total"), 96.);
     assert_eq!(
         fs.effective_budgets().data_used_bytes,
         budgets.data_used_bytes
@@ -689,5 +680,5 @@ async fn real_eviction_recovery_and_aligned_l2_read_have_exact_count_and_byte_me
         sample(&text, "geesefs_disk_cache_state{state=\"closed\"}"),
         1.
     );
-    assert_eq!(sample(&text, "geesefs_disk_cache_hit_bytes_total"), 48.);
+    assert_eq!(sample(&text, "geesefs_disk_cache_hit_bytes_total"), 96.);
 }

@@ -36,18 +36,26 @@ def check(binary, client, bucket, endpoint, environment, work):
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(url, timeout=5) as response:
             assert response.headers["Content-Type"].startswith("application/openmetrics-text;")
-            text = response.read(65536).decode()
+            encoded = response.read(1024 * 1024 + 1)
+            assert len(encoded) <= 1024 * 1024, "bounded exporter fixture exceeded 1 MiB"
+            text = encoded.decode()
+        (work / "scrape.txt").write_text(text)
         assert text.endswith("# EOF\n")
-        assert sample(text, "geesefs_read_cache_misses_total") == 1
-        assert sample(text, "geesefs_read_cache_hits_total") == 1
-        assert sample(text, "geesefs_read_remote_bytes_total") == len(BODY)
-        assert sample(text, "geesefs_read_cache_bytes") == len(BODY)
+        assert sample(text, "geesefs_read_cache_misses_total") == 2
+        assert sample(text, "geesefs_read_cache_hits_total") == 0
+        assert sample(text, "geesefs_read_remote_bytes_total") == 2 * len(BODY)
+        for source, expected in (("inflight", 0), ("l2", 0), ("s3", 2 * len(BODY)), ("overlay", 0)):
+            assert sample(text, f'geesefs_read_delivered_bytes_total{{source="{source}"}}') == expected
+        assert 'source="l1"' not in text
+        assert "geesefs_read_cache_bytes " not in text
+        assert "geesefs_read_cache_loaned_bytes " not in text
+        assert "geesefs_read_work_capacity_bytes " in text
+        assert sample(text, 'geesefs_payload_used_bytes{lane="data"}') == 0
         assert "private-fixture-object" not in text
         allocation = json.loads(stats.read_text().splitlines()[0])
         assert allocation["allocator"] in ("jemalloc", "system")
         assert allocation["allocated_bytes"] > 0
         assert "effective_budgets" in allocation
-        (work / "scrape.txt").write_text(text)
         receipt.update(pid=daemon.pid, metrics_url=url, allocator=allocation["allocator"])
     assert daemon.returncode == 0
     address = urllib.parse.urlsplit(url)

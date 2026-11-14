@@ -20,7 +20,7 @@ async fn attach(config: Config, store: std::sync::Arc<MemoryStore>) -> std::sync
     if let Some(mut prepared) = prepared {
         let disk = fs.config.disk_cache_config().unwrap().unwrap();
         if !disk.directory.join("payload-v1.cache").exists() {
-            // R1 exercises Ready demotion-before-loan, not initial startup.
+            // Exercise a Ready persistent tier; deferred startup has separate coverage.
             let resources = geesefs_rs::budget::Budget::new(32 * MIB).unwrap();
             let cache = geesefs_rs::disk_cache::DiskCache::open(prepared, &resources)
                 .await
@@ -51,9 +51,8 @@ async fn byte_pressure(enabled: bool, selected: bool, window: usize) {
     store.seed(key, &bytes);
     let mut config = MemoryStore::config(32);
     config.mountpoint = mount.path().into();
-    // Entry-count eviction must not mask the byte-admission path. A logical-
-    // block window isolates that path from optional JOBS=4 saturation; a larger
-    // MemoryStore backing also exercises bounded multi-fragment demotion.
+    // Metadata entry capacity is independent of persistent payload population.
+    // The larger window exercises bounded multi-fragment source delivery.
     config.entry_limit = 100_000;
     config.read_ahead = window / 1024;
     config.read_ahead_small = window / 1024;
@@ -83,12 +82,20 @@ async fn byte_pressure(enabled: bool, selected: bool, window: usize) {
                 <= 32 * MIB
         );
         if offset == 0 && enabled {
-            assert_eq!(fs.disk_cache_stats().unwrap().admitted_demotions, 0);
+            assert_eq!(
+                fs.disk_cache_stats().unwrap().admitted_demotions > 0,
+                selected
+            );
         }
     }
     assert_eq!(
         store.read_calls.load(Ordering::Relaxed),
-        bytes.len() / window
+        bytes.len()
+            / if enabled && selected {
+                window
+            } else {
+                READ_BLOCK_BYTES
+            }
     );
     let budgets = fs.effective_budgets();
     eprintln!("enabled={enabled} selected={selected} window={window} budgets={budgets:?}");
@@ -101,24 +108,18 @@ async fn byte_pressure(enabled: bool, selected: bool, window: usize) {
         if selected {
             assert!(
                 stats.admitted_demotions > 0,
-                "eligible byte-pressure victims must reach L2"
+                "eligible validated fills must reach L2 without waiting for RAM pressure"
             );
             assert!(stats.index_entries > 0);
         } else {
             assert_eq!(stats.admitted_demotions, 0);
             assert_eq!(stats.index_entries, 0);
-            assert!(
-                budgets.flush_used_bytes > 0,
-                "excluded data still uses idle loans"
-            );
+            assert_eq!(budgets.flush_used_bytes, 0);
         }
     } else {
         assert!(fs.disk_cache_stats().is_none());
         assert_eq!(budgets.disk_cache_funding_bytes, 0);
-        assert!(
-            budgets.flush_used_bytes > 0,
-            "disabled L2 must preserve idle loans"
-        );
+        assert_eq!(budgets.flush_used_bytes, 0);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
     if enabled && !selected {
@@ -133,19 +134,18 @@ async fn byte_pressure(enabled: bool, selected: bool, window: usize) {
             .unwrap()
             .unwrap();
         assert_eq!(store.bytes("writer.txt"), b"committed");
-        assert_eq!(fs.effective_budgets().read_cache_loaned_bytes, 0);
+        assert_eq!(fs.effective_budgets().flush_used_bytes, 0);
         assert_eq!(
             fs.disk_cache_stats().unwrap().admitted_demotions,
             demotions,
-            "writer loan revocation must not populate L2"
+            "writer flushes must not populate L2"
         );
     }
     fs.shutdown().await.unwrap();
     drop(fs);
 
-    // A fresh L1 excludes hits on retained RAM or a serving read view. The first
-    // block must have survived as an immutable persistent record, not just a
-    // demotion submission counter.
+    assert_eq!(budgets.data_used_bytes, budgets.disk_cache_funding_bytes);
+    // Recovery must expose real immutable records, not merely a submission counter.
     config.read_ahead = READ_BLOCK_BYTES / 1024;
     config.read_ahead_small = READ_BLOCK_BYTES / 1024;
     config.read_ahead_large = READ_BLOCK_BYTES / 1024;
@@ -162,7 +162,7 @@ async fn byte_pressure(enabled: bool, selected: bool, window: usize) {
     assert_eq!(
         store.read_calls.load(Ordering::Relaxed) - gets,
         usize::from(!(enabled && selected)),
-        "only a selected persistent victim can satisfy the restarted reader without GET"
+        "only a selected persistent fill can satisfy the restarted reader without GET"
     );
     if enabled && selected {
         assert!(fs.disk_cache_stats().unwrap().hits > 0);
@@ -192,12 +192,12 @@ async fn byte_pressure(enabled: bool, selected: bool, window: usize) {
 }
 
 #[tokio::test]
-async fn selected_byte_pressure_demotes_before_idle_loans_hide_capacity_victims() {
+async fn selected_fills_populate_with_bounded_ownership_beyond_the_data_lane_capacity() {
     byte_pressure(true, true, READ_BLOCK_BYTES).await;
 }
 
 #[tokio::test]
-async fn excluded_and_disabled_byte_pressure_preserves_idle_loans() {
+async fn excluded_and_disabled_reads_retain_no_payload_and_leave_the_flush_lane_to_writers() {
     byte_pressure(true, false, READ_BLOCK_BYTES).await;
     byte_pressure(false, true, READ_BLOCK_BYTES).await;
 }
@@ -208,7 +208,7 @@ async fn large_window_byte_pressure_preserves_correct_reads_with_bounded_optiona
 }
 
 #[tokio::test]
-async fn healthy_byte_pressure_retains_the_complete_evicted_window_for_source_free_reuse() {
+async fn healthy_fill_persists_the_complete_window_for_source_free_reuse() {
     let dir = tempfile::tempdir().unwrap();
     let mount = tempfile::tempdir().unwrap();
     let store = MemoryStore::new();
@@ -233,11 +233,9 @@ async fn healthy_byte_pressure_retains_the_complete_evicted_window_for_source_fr
     let block = fs.read(package.ino, 0, READ_BLOCK_BYTES).await.unwrap();
     assert_eq!(block.as_slice(), &bytes[..READ_BLOCK_BYTES]);
     drop(block);
-    assert_eq!(fs.disk_cache_stats().unwrap().admitted_demotions, 0);
+    assert_eq!(fs.disk_cache_stats().unwrap().admitted_demotions, 16);
     let pressure = fs.lookup(1, "pressure.txt").await.unwrap();
-    // Ordinary reads cause byte admission, with no drain after each read and no
-    // repeated warming rounds. A healthy real engine must retain the whole
-    // eligible victim, including offsets beyond its first four records.
+    // Unrelated excluded reads must not affect persistent payload ownership.
     for offset in (0..48 * MIB).step_by(2 * MIB) {
         let block = tokio::time::timeout(
             DEADLINE,
@@ -251,8 +249,7 @@ async fn healthy_byte_pressure_retains_the_complete_evicted_window_for_source_fr
     fs.shutdown().await.unwrap();
     drop(fs);
 
-    // Reopen the same media with empty L1; source calls must not be hidden by
-    // kernel cache, the old reader, or an in-flight cache submission.
+    // Reopen the same media after shutdown has completed all actual submissions.
     let fs = attach(config, store.clone()).await;
     let package = fs.lookup(1, "reused.rpm").await.unwrap();
     let gets = store.read_calls.load(Ordering::Relaxed);
@@ -270,7 +267,7 @@ async fn healthy_byte_pressure_retains_the_complete_evicted_window_for_source_fr
     assert_eq!(
         store.read_calls.load(Ordering::Relaxed),
         gets,
-        "a healthy L2 must avoid source GETs for the complete evicted window"
+        "a healthy L2 must avoid source GETs for the complete validated window"
     );
     assert_eq!(store.head_keys.lock().unwrap().len(), heads);
     let text = geesefs_rs::metrics::render(&fs).unwrap();
@@ -288,85 +285,9 @@ async fn healthy_byte_pressure_retains_the_complete_evicted_window_for_source_fr
         0
     );
     assert_eq!(
-        value("geesefs_read_delivered_bytes_total{source=\"l1\"}")
+        value("geesefs_read_delivered_bytes_total{source=\"inflight\"}")
             + value("geesefs_read_delivered_bytes_total{source=\"l2\"}"),
         bytes.len() as u64
     );
-    fs.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn repeated_pressure_advances_beyond_already_indexed_fragment_prefix() {
-    let dir = tempfile::tempdir().unwrap();
-    let mount = tempfile::tempdir().unwrap();
-    let store = MemoryStore::new();
-    *store.cache_namespace.lock().unwrap() = Some([84; 32]);
-    let mut bytes = vec![0x17; 2 * MIB];
-    bytes[MIB..].fill(0xa2);
-    store.seed("package.rpm", &bytes);
-    store.seed("pressure.txt", &vec![0x71; 48 * MIB]);
-    let mut config = MemoryStore::config(32);
-    config.mountpoint = mount.path().into();
-    config.entry_limit = 100_000;
-    config.disk_cache_dir = Some(dir.path().into());
-    config.disk_cache_max_size = Some(128 * MIB as u64);
-    config.disk_cache_regex = Some(r"\.rpm$".parse().unwrap());
-    config.read_ahead = 2048;
-    config.read_ahead_small = 2048;
-    config.read_ahead_large = 2048;
-    config.read_ahead_parallel = 2048;
-
-    // Match the native qualification's fixed eight population mounts, not a
-    // retry-until-hot. JOBS=4 bounds submissions, not durable records per round.
-    // Existing prefixes must not permanently starve the remaining offsets.
-    for round in 0..8 {
-        let fs = attach(config.clone(), store.clone()).await;
-        let package = fs.lookup(1, "package.rpm").await.unwrap();
-        for offset in (0..bytes.len()).step_by(READ_BLOCK_BYTES) {
-            let block = tokio::time::timeout(
-                DEADLINE,
-                fs.read(package.ino, offset as u64, READ_BLOCK_BYTES),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            assert_eq!(block.as_slice(), &bytes[offset..offset + READ_BLOCK_BYTES]);
-        }
-        let pressure = fs.lookup(1, "pressure.txt").await.unwrap();
-        for offset in (0..48 * MIB).step_by(2 * MIB) {
-            let block = tokio::time::timeout(
-                DEADLINE,
-                fs.read(pressure.ino, offset as u64, READ_BLOCK_BYTES),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            assert_eq!(block.as_slice(), &[0x71; READ_BLOCK_BYTES]);
-            drop(block);
-            fs.drain_disk_cache(DEADLINE).await.unwrap();
-        }
-        let stats = fs.disk_cache_stats().unwrap();
-        eprintln!("population round={round}: {stats:?}");
-        assert_eq!(stats.errors, 0);
-        assert_eq!(stats.active_jobs, 0);
-        assert_eq!(stats.copied_bytes, 0);
-        fs.shutdown().await.unwrap();
-        drop(fs);
-    }
-    let fs = attach(config, store.clone()).await;
-    let package = fs.lookup(1, "package.rpm").await.unwrap();
-    let gets = store.read_calls.load(Ordering::Relaxed);
-    for offset in (0..bytes.len()).step_by(READ_BLOCK_BYTES) {
-        let block = tokio::time::timeout(
-            DEADLINE,
-            fs.read(package.ino, offset as u64, READ_BLOCK_BYTES),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(block.as_slice(), &bytes[offset..offset + READ_BLOCK_BYTES]);
-    }
-    assert_eq!(store.read_calls.load(Ordering::Relaxed), gets);
-    assert_eq!(fs.disk_cache_read_bytes(), bytes.len() as u64);
     fs.shutdown().await.unwrap();
 }

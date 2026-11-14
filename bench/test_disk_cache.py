@@ -326,7 +326,7 @@ class Contracts(unittest.TestCase):
                 disk.validate(changed, 8, 8)
 
     def test_runtime_pending_does_not_become_a_successful_cache_hit(self):
-        before = {'l1_hit_bytes': 0, 'l2_hit_bytes': 0, 'remote_bytes': 0, 'source_get_attempts': 0, 'fuse_reads': 0}
+        before = {'l2_hit_bytes': 0, 'remote_bytes': 0, 'source_get_attempts': 0, 'fuse_reads': 0}
         with self.assertRaisesRegex(RuntimeError, 'L2'):
             disk.verify_state('l2_hot_pagecache_hot', before, dict(before), 'candidate')
         after = dict(before, l2_hit_bytes=4096, fuse_reads=1)
@@ -337,7 +337,7 @@ class Contracts(unittest.TestCase):
         after['remote_bytes'] = 1
         with self.assertRaisesRegex(RuntimeError, 'remote'):
             disk.verify_state('l2_hot_pagecache_hot', before, after, 'candidate')
-        with self.assertRaisesRegex(RuntimeError, 'missing'):
+        with self.assertRaisesRegex(RuntimeError, 'unsupported cache state'):
             disk.verify_state('l1_hot', {}, {}, 'candidate')
 
     def test_metrics_exact_names_not_substrings_or_reset_counters(self):
@@ -348,11 +348,11 @@ class Contracts(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'reset'):
             disk.delta({'x': 2}, {'x': 1}, 'x')
 
-    def test_constant_total_budget_reports_reduced_effective_l1(self):
-        baseline = {'payload_limit_bytes': 64 << 20, 'read_cache_policy_bytes': 32 << 20}
-        candidate = dict(baseline, read_cache_policy_bytes=24 << 20)
+    def test_constant_total_budget_reports_persistent_funding_deducted_from_read_work(self):
+        baseline = {'payload_limit_bytes': 64 << 20, 'data_shared_bytes': 32 << 20, 'disk_cache_funding_bytes': 0}
+        candidate = dict(baseline, disk_cache_funding_bytes=8 << 20)
         receipt = disk.budget_comparison(baseline, candidate, 64)
-        self.assertEqual(receipt['l1_reduction_bytes'], 8 << 20)
+        self.assertEqual(receipt['read_work_reduction_bytes'], 8 << 20)
         self.assertFalse(receipt['disk_memory_is_free'])
         with self.assertRaisesRegex(RuntimeError, 'payload'):
             disk.budget_comparison(baseline, dict(candidate, payload_limit_bytes=128 << 20), 64)
@@ -375,10 +375,11 @@ class Contracts(unittest.TestCase):
             metrics.update(operation_plan=plan, cycles=plan['cycles'], bytes=plan['bytes'], operations=plan['operations'])
             row = dict(case, metrics=metrics, correctness=True, independent_mount=True,
                 effective_budgets={'payload_limit_bytes': 64 << 20,
-                                    'read_cache_policy_bytes': (24 if candidate else 32) << 20})
+                                     'data_shared_bytes': 32 << 20,
+                                     'disk_cache_funding_bytes': (8 if candidate else 0) << 20})
             if case['workload'] in disk.READS:
-                row['cache_before'] = dict(l1_hit_bytes=0, l2_hit_bytes=0, remote_bytes=0, source_get_attempts=0, fuse_reads=0)
-                row['cache_after'] = dict(l1_hit_bytes=4096, l2_hit_bytes=4096 if candidate else 0,
+                row['cache_before'] = dict(l2_hit_bytes=0, remote_bytes=0, source_get_attempts=0, fuse_reads=0)
+                row['cache_after'] = dict(l2_hit_bytes=4096 if candidate else 0,
                                          remote_bytes=0, source_get_attempts=0, fuse_reads=1)
             if case['workload'] == 'eviction':
                 row['capacity_preparation'] = dict(byte_correct=True, bytes=536870912, reads=4096,
@@ -448,10 +449,10 @@ class Contracts(unittest.TestCase):
             expected = disk.integration.expected_range(0, 1024)
             (path / 'payload').write_bytes(expected)
             config = disk.example_manifest()
-            config.update(dataset_bytes=1024, measurement_cycles=2, l1_sequential_cycles=2)
+            config.update(dataset_bytes=1024, measurement_cycles=2)
             spec = dict(path=str(path), endpoint='http://127.0.0.1:9', bucket='fixture', prefix='data',
                         expected_sha=disk.hashlib.sha256(expected).hexdigest(), name='sequential',
-                        state='l1_hot', config=config)
+                         state='l2_hot_pagecache_hot', config=config)
             environment = disk.integration.private_environment('disposable-access', 'disposable-secret')
             command = [sys.executable, str(Path(disk.__file__)), '--worker']
             result = subprocess.run(command, input=json.dumps(spec) + '\nstart\ndone\n',

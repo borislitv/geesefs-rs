@@ -1042,7 +1042,7 @@ impl DiskCache {
     }
 
     /// Best-effort immutable-key population. Consumes and promptly drops the
-    /// victim; loans are rejected. Only an admitted exact visible-range copy may
+    /// source owner. Only an admitted exact visible-range copy may
     /// cross the async boundary, never a clone of a larger sliced backing.
     pub fn try_demote(&self, key: DiskKey, victim: Block) -> Demotion {
         let job = match self.inner().admit(false) {
@@ -1085,7 +1085,7 @@ impl DiskCache {
         let started = Instant::now();
         let i = self.inner();
         let outcome = (|| {
-            if victim.is_loaned() || victim.as_slice().len() != key.covered_len() {
+            if victim.as_slice().len() != key.covered_len() {
                 return Err(SpillDrop::InvalidBlock);
             }
             if i.backend.may_contains(&key) {
@@ -1349,7 +1349,7 @@ impl DiskCache {
         self.inner().read_fallback(reason);
     }
 
-    /// Advisory only: caller already validated this exact L2 identity through L1.
+    /// Advisory only: caller already validated the current remote generation.
     /// Touching a missing/pending record neither creates it nor marks new spills.
     pub fn touch_validated(&self, key: &DiskKey) -> bool {
         let i = self.inner();

@@ -51,7 +51,7 @@ original run URL and its checksums remain attached to the published release.
 CI compilation and library checks do not establish mounted filesystem or
 comparative performance acceptance.
 
-## Optional cache controls — 2026-11-10
+## Payload ownership and optional persistent cache — 2026-11-14
 
 - `--memory-limit` keeps its existing payload budget in MiB. Independent opt-in
   `--metadata-limit '128 MiB'` bounds admitted application metadata owners; neither
@@ -59,13 +59,16 @@ comparative performance acceptance.
   clean metadata while retaining COW writer baselines and pinned owners.
 - Supply `--disk-cache-dir`, `--disk-cache-max-size` and `--disk-cache-regex`
   together to enable persistent payload L2. For example, a regex
-  `'\.(deb|rpm)$'` selects resolved regular-file paths. Without them, reads retain
-  RAM-only operation. The cache has no payload TTL or inactivity expiry.
+  `'\.(deb|rpm)$'` selects resolved regular-file paths. There is no retained
+  application RAM payload cache: reads own bounded active buffers and replies.
+  Without an eligible funded persistent tier, fetch only required bytes.
+  Persistent payload has no TTL or inactivity expiry.
 - Use an existing private local directory outside the mount. Capacity is
   preallocated once; incompatible or damaged inventory is never automatically
-  wiped. Engine/index/workspace funding reduces effective L1 capacity within the
-  same payload total. Demotion is best-effort on capacity eviction, with source
-  fallback during recovery, overload or disk failure.
+  wiped. Engine/index/workspace funding reduces active data capacity within the
+  same payload total. Eligible validated source fills populate Foyer independently
+  of RAM pressure. Independent reuse goes through buffered file I/O/page cache,
+  with source fallback during recovery, overload or disk failure.
 - Persistent access scopes are supported for explicit known static credentials
   and anonymous access. Opaque/rotating/profile/IAM providers explicitly bypass
   persistence rather than sharing data under an inferred principal.

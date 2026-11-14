@@ -698,11 +698,14 @@ fn read_deadline_after_publication_preserves_bytes_without_a_second_reply() {
     let (runtime, store, fs) = fixture_on(
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
-            .start_paused(true)
             .build()
             .unwrap(),
         |_| {},
     );
+    let (fs, _directory) = runtime.block_on(store.disk_filesystem((*fs.config).clone()));
+    runtime.block_on(async {
+        tokio::time::pause();
+    });
     store.seed("file", &vec![73u8; 1024 * 1024]);
     let ino = runtime.block_on(fs.lookup(1, "file")).unwrap().ino;
     let tail = Arc::new(tokio::sync::Semaphore::new(0));
@@ -757,7 +760,9 @@ fn read_deadline_after_publication_preserves_bytes_without_a_second_reply() {
             ),
             1.
         );
-        tokio::time::advance(fs.config.request_timeout).await;
+        // Pausing after real Foyer startup can leave a fractional timer-wheel
+        // tick. Cross the deadline by one tick rather than testing rounding.
+        tokio::time::advance(fs.config.request_timeout + Duration::from_millis(1)).await;
         wait_until("expired post-reply READ retained its owner", || {
             metric(
                 &fs,
@@ -796,7 +801,10 @@ fn read_deadline_after_publication_preserves_bytes_without_a_second_reply() {
         store.read_calls.load(std::sync::atomic::Ordering::SeqCst),
         2
     );
-    assert_eq!(fs.effective_budgets().data_used_bytes, 512 * 1024);
+    assert_eq!(
+        fs.effective_budgets().data_used_bytes,
+        fs.effective_budgets().disk_cache_funding_bytes
+    );
 }
 
 #[test]
@@ -1727,19 +1735,14 @@ fn debug_records_correlate_successful_request_lifecycle_and_phase_scopes() {
         assert!(lookup.iter().any(|record| record["event"] == "fuse_reply"
             && record["errno"] == 0
             && record["reply_sent"] == true));
-        for hit in [false, true] {
-            assert!(
-                records.iter().any(|record| record["event"] == "read_cache"
-                    && record["details"]["hit"] == hit
-                    && record["details"]["bytes"] == 25),
-                "{stderr}"
-            );
-        }
-        assert!(
+        assert_eq!(
             records
                 .iter()
-                .any(|record| record["event"] == "read_fill"
-                    && record["details"]["role"] == "leader"),
+                .filter(|record| record["event"] == "read_fill"
+                    && record["details"]["role"] == "leader"
+                    && record["details"]["bytes"] == 25)
+                .count(),
+            2,
             "{stderr}"
         );
         for forbidden in ["private-request-path", "private-payload-never-log"] {

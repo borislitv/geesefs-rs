@@ -327,6 +327,36 @@ owned flush gate, conditional reads and private-receipt recovery contract.
 
 ## Selected mechanisms
 
+### Removal of retained application payload cache — 2026-11-14
+
+Reuse the existing Apache-2.0 Foyer 0.22.6 public fork at
+[`d60dd0462c1de1e0853590791371208b659c90bf`](https://github.com/borislitv/foyer/tree/d60dd0462c1de1e0853590791371208b659c90bf)
+for persistent indexing, CLOCK/region eviction, recovery, record I/O, serialization
+and integrity. Its `FileDeviceBuilder` defaults to buffered I/O, and the selected
+`Store` defaults to Psync; backing-file page cache already participates. Retain
+the supported passive hybrid factory, reject-all `Piece` source and guarded
+`Store::{load,try_enqueue,wait_guarded}` APIs. A zero memory capacity is not a
+hard allocation bound or a no-retention API. Do not replace the storage engine or
+disable its integrity checks to remove the application's `ReadCache`.
+
+The exact-pin high-level hybrid writer uses legacy `enqueue`, which is forbidden
+with guarded submission limits. Memory `get_or_fetch` deduplicates exact keys,
+spawns its producer independently of caller cancellation, and only publishes its
+result at producer completion (`foyer-memory/src/raw.rs:1082-1105`). It cannot
+replace overlapping-range coordination while preserving early requested replies,
+caller-owned optional tails and cancellation. Keep the existing small per-inode
+active-range coordinator, using Tokio watch and charged immutable `Block` owners
+only until the active producer and its subscribed consumers finish. This is
+transient request state, without an idle LRU, eviction policy or cross-request
+retained payload index. Metadata and dirty writer ownership remain independent.
+
+Populate Foyer from validated clean source fills, rather than RAM capacity
+victims. Preserve its bounded copy/queue/read funding and optional-tier fallback.
+This changes cache admission, not S3 writeback durability. Fresh inventory startup
+must follow the first eligible fill. No latency, RSS or whole-cgroup improvement
+is implied without measurements; kernel file pages and client memory remain
+separate from daemon RSS.
+
 | Concern | Selection and reason |
 | --- | --- |
 | FUSE | [fuser 0.18.0](https://docs.rs/fuser/0.18.0/fuser/) (MIT): protocol, callbacks and replies; no custom syscall/protocol stack. |
@@ -334,7 +364,7 @@ owned flush gate, conditional reads and private-receipt recovery contract.
 | Runtime/admission | [Tokio 1.54.1](https://docs.rs/tokio/1.54.1/tokio/) (MIT): owned semaphores, JoinSet, watch/mpsc, runtime and I/O; no custom executor. |
 | Upload provenance | [getrandom 0.4.3](https://docs.rs/getrandom/0.4.3/getrandom/) (MIT OR Apache-2.0), already locked transitively: safe OS randomness for 128-bit per-upload receipts; no custom entropy or cryptography. |
 | Metadata cache | [Moka 0.12.16](https://docs.rs/moka/0.12.16/moka/) (MIT OR Apache-2.0): bounded weighted directory/preload caches with namespace/TTL validation. |
-| Payload cache | [lru 0.19.0](https://docs.rs/lru/0.19.0/lru/) (MIT): synchronous `pop_lru` releases backing before required admission. Moka maintenance/policy changes cannot provide that boundary. |
+| Persistent region recency | [lru 0.19.0](https://docs.rs/lru/0.19.0/lru/) (MIT): bounded region-recency bookkeeping in the disk-cache policy; it does not retain clean RAM payload. |
 | Streaming/owners | bytes 1.12.1, futures-util 0.3.34, tokio-util 0.7.20 (MIT OR Apache-2.0): immutable owners and maintained stream/I/O adapters. Small charged Block views retain complete backing permits. |
 | Parsing/configuration | quick-xml 0.42.0 (MIT), clap/serde/serde_json/percent-encoding/thiserror (MIT OR Apache-2.0): bounded schema and compatibility adapters, not new parsers. |
 | OS/allocator | rustix 1.1.5 (Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT) safe process APIs; tikv jemalloc 0.7 (MIT OR Apache-2.0) default allocator/statistics. No local unsafe/FFI. |

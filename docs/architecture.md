@@ -12,7 +12,7 @@ Linux VFS / FUSE
   -> bounded Tokio request + owned reply + request deadline
   -> Filesystem (src/filesystem.rs)
        namespace / inode state / paged metadata
-       read policy + charged cache / sparse write generations
+       active read ownership + Foyer / sparse write generations
   -> Store trait (src/backend/mod.rs)
   -> AWS S3 SDK + narrow public-API adapters (src/backend/)
   -> S3-compatible endpoint
@@ -116,10 +116,10 @@ per-inode state/flush locks remain; dirty snapshots and subtree mutations cost
 proportionally to their own pending work.
 
 The [locking audit](locking.md) records every application mutex/RwLock domain and
-remaining contention risks. Payload cache reads use only short internal metadata
-transactions, with no outer mutex spanning response allocation/copying. Loan-key
-tracking makes revocation proportional to actual loans; synchronous in-progress
-copies retain their byte charges until they finish, never across an await.
+remaining contention risks. Active-fill publication and subscriber coverage use
+short internal transactions. Response composition is synchronous and retains its
+byte charges; a subscriber releases published owners before awaiting pressured
+output admission. There is no retained clean-cache or loan-revocation registry.
 
 Moka bounds directory-page/preload retention; listing and type resolution are
 paged and admission-limited. Remote metadata is validated against the observed
@@ -155,17 +155,12 @@ that older observation. Later HEAD/commit generations still override older data.
 The three disk-cache flags enable a private, locked local container through the
 maintained Foyer Store adapter. Proven-new media initially stays Prepared: funding
 and directory ownership are reserved, but no engine or payload file is constructed
-until eligible capacity pressure. Existing media starts bounded recovery eagerly;
-lazy creation must not discard its inventory. Only eligible capacity evictions
-populate it, after releasing the L1 lock; replacements, invalidations and loan
-revocation do not. Demotion funds an exact visible-range copy, promptly releasing
-the original backing. Qualified L2 hits promote into L1 while retaining the disk
-copy. Missing coverage and optional errors use ordinary conditional S3 reads.
-For a validated disk hit, reply/window delivery stays sliced, but L1 retains the
-actual complete record backing and original offset under the same charge. Later
-eviction therefore does not manufacture a second fragment identity. Partial disk
-records remain partial; this never rounds unknown bytes up to a block boundary.
-If the original disk entry is reclaimed, ordinary demotion can populate it again.
+until an eligible validated source fill. Existing media starts bounded recovery
+eagerly; lazy creation must not discard its inventory. Population funds an exact
+visible-range copy without retaining its full source backing. Qualified L2 hits
+serve active reads; no decoded RAM copy survives independent requests. Missing
+coverage and optional errors use ordinary conditional S3 reads. Partial records
+remain partial; unknown bytes are never rounded into a cache hit.
 
 Persistent keys include validated backend/access/encryption scope, exact object
 key, opaque ETag, size and coverage. Dirty/sparse/pending namespace states bypass
@@ -174,7 +169,7 @@ window whose file may have changed size. Opaque/rotating credentials explicitly
 bypass persistent reuse rather than guessing a stable principal.
 
 Funding covers bounded index/order state, pools, copies, read/decode work and
-submission credits, reducing effective L1 capacity without taking writer or
+submission credits, reducing active data capacity without taking writer or
 ingress reserves. Recovery is asynchronous with source fallback and no inventory
 reset. Owned jobs retain funding/directory ownership past caller cancellation;
 shutdown starts cache teardown even when writer flushing later fails.
@@ -190,17 +185,9 @@ ownership before revalidating the namespace. No guard crosses disk/source I/O.
 Qualification and each block lookup have their own bounded operation deadline;
 a source gap does not age later lookups against one shared window deadline.
 Timed-out or cancelled tasks retain their actual slot, credit and owners until
-completion. Optional L1 touches and demotion still use immediate try-admission.
-
-Under byte pressure, Ready/eligible nonloaned victims demote before borrowing the
-idle flush lane. Loan-first selection would make subsequent victims ineligible
-and could starve L2 completely. Eligible pressure can start the deferred engine
-before the current read falls back to loans; it does not queue that victim for
-later demotion. Disabled, excluded and not-yet-Ready paths retain loan-first
-behavior; already loaned owners are always discarded without demotion.
-The published L1 policy capacity is an upper bound including revocable loans,
-not a promise that selected data uses the flush lane in Ready mode. Benchmark
-comparisons must report actual residency/loan counts as well as the funding cut.
+completion. Source-fill population uses existing guarded admission with one
+cumulative bounded wait allowance per window. It is independent of RAM pressure
+and never borrows the writer flush reserve.
 
 Metrics distinguish admission, actual worker completion and caller delivery.
 Region-reclaim callbacks are not per-record eviction counts; funded metadata is
@@ -212,8 +199,8 @@ physical-storage gauge. See [the design](disk-cache-design.md) and
 
 `src/budget.rs` uses Tokio owned semaphore permits. Every `Block` owns its full
 physical allocation through an `Arc`; slices and clones retain that backing's
-charge. Cache eviction releases only cache ownership, not permits held by an
-active reader, reply, upload frame or dirty snapshot.
+charge until the last active reader, reply, upload frame or dirty snapshot drops.
+There is no retained application's clean-payload cache.
 
 All three lanes are carved from the requested payload limit:
 
@@ -221,57 +208,39 @@ All three lanes are carved from the requested payload limit:
 | --- | --- | --- |
 | ingress | `max(total / 16, 1 MiB)` | Bounded callback input and read replies |
 | flush | `2 * 5 MiB` | Reserved materialization/upload progress under dirty pressure |
-| data | `total - ingress - flush` | Shared clean cache, dirty extents and pinned/temporary payload |
+| data | `total - ingress - flush` | Persistent-tier funding, dirty extents and active/pinned payload |
 
 A 64 MiB configuration therefore provides 50 MiB data, 4 MiB ingress and 10 MiB
-flush. Required admission may move an exclusively cache-owned clean backing's
-charge from data into idle flush capacity. The retained policy ceiling is then
-60 MiB; no lane or total limit increases. Shared/pinned allocations cannot move.
-`effective_budgets()` reports capacities/use and current clean cache loans;
-`flush_used_bytes` includes these loans as well as upload allocations. These are
-payload-owner bounds, **not RSS, allocator or cgroup memory bounds**. Metadata, SDK/runtime,
-allocator retention, clients and kernel caches require separate measurement.
-
-Required data admission reclaims only enough LRU ownership to satisfy the request;
-queued semaphore waiters retain FIFO priority. Dirty-pressure progress can flush
-through the independent reserved lane. Optional read-ahead uses nonblocking
-data admission and skips pressure instead of initiating loans or blocking required
-work. A required miss may reclaim any cache owner; existing FIFO admission stays
-ahead of later hits or loans.
-
-A fill can publish new cache ownership after admission's first reclamation sweep.
-Waiting admission therefore listens for cache publication through Tokio `Notify`
-and retries reclamation while retaining the same FIFO semaphore reservation.
-Registering before inspecting the cache closes the check/wait race; cancellation
-drops the reservation and notification with the caller-owned future.
-
-Before uploading, a flusher holds shared Tokio `RwLock` activity and synchronously
-revokes cache loans. Independent uploads remain concurrent. The guard travels
-with cloned upload budgets into SDK bodies and jobs, preventing new loans until
-the last allocation-capable upload owner finishes, including after caller
-cancellation. Cache lending only tries exclusive activity synchronously and
-never waits. Loaned bytes are copied into an already admitted data reply before
-a caller-owned `Block` can leave the cache, so callers cannot pin a revocable reserve.
+flush. `effective_budgets()` reports these owner capacities and usage. No loan,
+revocation, cache-publication notification or upload/lending activity guard remains.
+Under data pressure, flush dirty data through the independent reserve and wait on
+the existing FIFO semaphore with a finite deadline. Cancellation drops the waiter
+with its caller-owned future. These are payload-owner bounds, **not RSS, allocator
+or cgroup memory bounds**. Metadata, SDK/runtime, allocator retention, clients and
+kernel caches require separate measurement.
 
 ## Reads, generations and cache
 
 `src/read.rs` derives a generation from local version and remote ETag. Overlapping
 fills of that generation share a bounded interval/watch notification; disjoint
 fills remain concurrent. The fill guard removes the interval on success, error
-or cancellation. Followers recheck current state/cache rather than inheriting an
-unvalidated result from a different generation.
-
-`src/cache.rs` retains charged immutable blocks using `lru` plus a range index.
-A normal cached backing can supply a view; joining fragments or reading a loaned
-backing uses admitted output. Required pressure may reclaim any LRU owner.
-Optional refill protects a foreign unread prefix using contiguous-consumption
-hints, not permanent pins.
+or cancellation. Followers recheck the current generation and reuse validated
+active owners. Before retaining those owners across a wait, obtain reply admission;
+otherwise release the subscription before queueing so it cannot self-pin an older
+FIFO reader. An admitting producer must first obtain its complete window budget;
+followers wait for its reading phase without reserving dependent output permits.
+A covering immutable owner supplies a view; fragmented results use
+their admitted composition output. Independent reads consult Foyer/source again.
 
 Each FUSE `OpenFile` owns its adaptive `Pattern`, matching the reference handle
-lifetime. Concurrent and reopened handles share payload/fills but not stream
-history. Legacy inode-only APIs retain their separate inode pattern. Cache hits
-advance policy and can start next-window refill after publishing the reply, in
-the same owned future, request slot and deadline.
+lifetime. Concurrent and reopened handles share persistent payload/active fills
+but not stream history. Legacy inode-only APIs retain their separate inode
+pattern. Every caller read advances history. A bounded planned-interval hint prevents
+sliding redundant speculative windows, without claiming persistent coverage.
+Seeking outside either boundary plans a new window.
+Without an eligible funded L2, fetch required bytes only. Read-ahead remains in
+the same caller-owned future, request slot and deadline; there is no hit-triggered
+retained-RAM refill.
 
 `FOPEN_KEEP_CACHE` is unset. After releasing a clean regular file with no remaining
 open owners, the adapter asks fuser to invalidate its kernel pages rather than
@@ -314,7 +283,7 @@ can retain its ETag. Pending renames preserve both parents until reconciliation;
 expired implicit directories recheck marker metadata unless directory objects
 are disabled.
 
-A clean fsync returns before upload admission and cache-loan revocation; dirty
+A clean fsync returns before upload admission; dirty
 generations and deleted inodes retain their durability/error checks.
 
 `src/parts.rs` supplies configured multipart boundaries. Upload/copy/queue
@@ -347,5 +316,5 @@ Default release builds use jemalloc and ThinLTO with one codegen unit. The
 `system-allocator` feature is an explicit alternative with differently scoped
 counters. RSS, live allocator use and cgroup file/kernel memory are not
 interchangeable. Current measured losses and remaining compatibility work are
-recorded in [next work](next-work.md); the idle-loan policy is a bounded ownership
-change, not proof of whole-filesystem speed or memory acceptance.
+recorded in [next work](next-work.md); removing retained clean payload is an
+ownership change, not proof of whole-filesystem speed or memory acceptance.

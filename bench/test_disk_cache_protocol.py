@@ -19,7 +19,6 @@ class Contracts(unittest.TestCase):
         config = disk.example_manifest()
         for name, state, cycles, transferred, operations in [
                 ('sequential', 'l2_hot_pagecache_hot', 8, 1073741824, 1024),
-                ('sequential', 'l1_hot', 64, 67108864, 64),
                 ('concurrent', 'l2_hot_pagecache_cold_requested', 1, 134217728, 1024),
                 ('concurrent', 'l2_hot_pagecache_hot', 8, 1073741824, 8192),
                 ('random', 'l2_hot_pagecache_hot', 8, 268435456, 2048),

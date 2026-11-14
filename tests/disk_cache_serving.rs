@@ -195,7 +195,7 @@ fn metric(fs: &Filesystem, name: &str) -> u64 {
 
 #[test]
 #[ignore = "explicit disposable Linux FUSE and rsync fixture; under a minute"]
-fn native_rsync_reuses_complete_l2_victims_without_extra_s3_requests() {
+fn native_rsync_reuses_complete_l2_fills_without_extra_s3_requests() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
@@ -312,7 +312,7 @@ fn native_rsync_reuses_complete_l2_victims_without_extra_s3_requests() {
                 assert_eq!(
                     objects.count("GET"),
                     gets,
-                    "empty-L1 remount must read every requested payload byte from L2"
+                    "recovered mount must read every requested payload byte from L2"
                 );
                 assert_eq!(
                     objects.count("HEAD") - heads,
@@ -324,15 +324,16 @@ fn native_rsync_reuses_complete_l2_victims_without_extra_s3_requests() {
                     0
                 );
                 let l2 = metric(&fs, "geesefs_read_delivered_bytes_total{source=\"l2\"}");
-                let l1 = metric(&fs, "geesefs_read_delivered_bytes_total{source=\"l1\"}");
+                let inflight = metric(
+                    &fs,
+                    "geesefs_read_delivered_bytes_total{source=\"inflight\"}",
+                );
                 assert!(l2 > 0, "the fresh reader must actually deliver L2 bytes");
-                // L2 read-ahead promotes the remaining records to L1 before
-                // later FUSE callbacks request them. Count each requested byte
-                // at its actual delivery boundary, not at its historical origin.
-                // KEEP_CACHE is unset on open. The explicit full read and rsync
-                // --checksum each request one full pass; only the first needs L2.
-                assert_eq!(l1 + l2, 2 * payload.len() as u64);
-                assert_eq!(fs.disk_cache_read_bytes(), payload.len() as u64);
+                // Concurrent callbacks may share an active validated owner.
+                // KEEP_CACHE is unset: full read and rsync --checksum each
+                // request one pass. Pipeline bytes additionally include read-ahead.
+                assert_eq!(inflight + l2, 2 * payload.len() as u64);
+                assert!(fs.disk_cache_read_bytes() >= payload.len() as u64);
                 assert_eq!(metric(&fs, "geesefs_read_cache_misses_total"), 0);
                 for method in ["get", "head"] {
                     assert_eq!(
@@ -357,8 +358,7 @@ fn native_rsync_reuses_complete_l2_victims_without_extra_s3_requests() {
                 "cold source exchanges: {:?}",
                 objects.requests.lock().unwrap()
             );
-            // Hit-driven refill may start between read-ahead grid boundaries.
-            // A separate missing-prefix GET is valid; repeated bytes are not.
+            // Required source coverage must contain neither holes nor refetches.
             objects.assert_cold_coverage(payload.len());
         }
     }

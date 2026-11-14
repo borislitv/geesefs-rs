@@ -82,6 +82,37 @@ until the code and routing are delivered; then research public dashboard guidanc
 and make the operational questions and partial-coverage boundaries understandable.
 Full compatibility, turnover and production/performance acceptance remain open.
 
+### Payload ownership simplification — 2026-11-14
+
+The operator requested removal of the application's retained clean RAM payload
+cache and maximum reuse of Foyer's supported APIs. Clean bytes may be owned by
+active reads, subscribed consumers and published replies; independent reuse goes
+through the persistent tier and its backing-file page cache. Authoritative RAM
+metadata and dirty writer/fsync ownership remain required. Eligible validated
+source fills populate L2 without waiting for a RAM capacity victim. Without an
+eligible funded persistent tier, fetch only required bytes.
+
+Remove tests specific to deleted retention/loan/refill mechanisms and redundant
+checks; preserve failure-sensitive coverage of returned bytes, bounded ownership,
+cancellation, progress, generation and durability. Acceptance includes independent
+WOOF review of correctness and architecture, particularly redundant structures,
+copies and source GET/HEAD/LIST work. Verify exporter, benchmark and dashboard
+contracts against the new source vocabulary and removed retention gauges. This
+development task requires a draft PR; the previous release's serving authorization
+does not automatically deploy this redesign. Performance and full compatibility
+remain separate, unaccepted gates.
+
+### Subsequent release authorization — 2026-11-14
+
+The operator subsequently requested completion of the rewrite, short local
+functional checks, a new full release and an update of the existing MOW reader.
+Complete the identified correctness/progress repairs and verify the actual release
+binary before that guarded handoff. Preserve the persistent inventory, metadata
+freshness, writer durability, resource settings and rollback. This authorizes the
+existing scoped reader only; it does not close the separate full-compatibility,
+sustained-performance or inventory-turnover gates. Coordinate the dashboard source
+schema with the new exporter and keep any transition's partial coverage explicit.
+
 ## Target and reference
 
 - Initial target: Linux, S3-compatible storage, and the extended metadata used by

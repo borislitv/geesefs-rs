@@ -1,24 +1,20 @@
 use std::{sync::Arc, time::Duration};
 
-use geesefs_rs::{budget::Budget, cache::ReadCache};
+use geesefs_rs::budget::Budget;
 use tokio::sync::oneshot;
 mod support;
 
 #[tokio::test]
-async fn pinned_evicted_allocation_remains_charged_until_last_owner_drops() {
+async fn shared_reply_allocation_remains_charged_until_last_owner_drops() {
     let budget = Budget::new(8).unwrap();
-    let cache = ReadCache::new(8);
     let block = budget.reserve(8).await.unwrap().copy(b"abcdefgh").unwrap();
-    cache.insert(1, 1, 0, block.clone());
-    cache.clear();
-    assert!(cache.get(1, 1, 0).is_none());
+    let pinned = block.slice(2..4);
     assert_eq!(block.as_slice(), b"abcdefgh");
     assert_eq!(budget.used(), 8);
-    // Moka reclamation is deferred. Destroy the cache to release its physical
-    // references; the externally pinned owner must still keep its byte charge.
-    drop(cache);
-    assert_eq!(budget.used(), 8);
     drop(block);
+    assert_eq!(pinned.as_slice(), b"cd");
+    assert_eq!(budget.used(), 8);
+    drop(pinned);
     assert_eq!(budget.used(), 0);
 }
 

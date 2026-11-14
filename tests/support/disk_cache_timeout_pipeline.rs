@@ -280,16 +280,6 @@ async fn qualified_range_stops_disk_waits_after_timeout_and_keeps_actual_worker_
         .unwrap()
         .unwrap();
     assert_eq!(data.as_slice(), &source.bytes[..MIB]);
-    for index in 1..4 {
-        let data = tokio::time::timeout(DEADLINE, fs.read(ino, (index * MIB) as u64, MIB))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            data.as_slice(),
-            &source.bytes[index * MIB..(index + 1) * MIB]
-        );
-    }
     let before_release = fs.effective_budgets().data_used_bytes;
     let active_before_release = fs.disk_cache_stats().unwrap().active_read_jobs;
     gate.held.store(false, Ordering::SeqCst);

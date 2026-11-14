@@ -406,7 +406,7 @@ async fn cancellation_releases_gap_pipeline_and_does_not_start_queued_get() {
     f.fs.truncate(f.ino, 0).unwrap();
     f.fs.drain_disk_cache(DEADLINE).await.unwrap();
     tokio::time::timeout(DEADLINE, async {
-        while f.fs.effective_budgets().data_used_bytes != funding + 4 * BLOCK {
+        while f.fs.effective_budgets().data_used_bytes != funding {
             tokio::task::yield_now().await;
         }
     })
@@ -464,8 +464,8 @@ async fn old_gap_fill_cannot_publish_over_a_concurrent_dirty_generation() {
     f.fs.drain_disk_cache(DEADLINE).await.unwrap();
     assert_eq!(
         f.fs.effective_budgets().data_used_bytes,
-        funding + 4 * BLOCK + 1,
-        "only pre-write cached records and the dirty byte remain, not late old-source backing or pipeline credit"
+        funding + 1,
+        "only the dirty byte remains above fixed funding, not completed or late old-source backing"
     );
     f.fs.shutdown().await.unwrap();
 }

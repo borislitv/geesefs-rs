@@ -185,12 +185,15 @@ async fn paged_directory_rename_retains_dirty_live_child_and_resumes_partial_fai
 }
 
 #[tokio::test]
-async fn read_ahead_hits_are_owned_and_writes_do_not_return_stale_cached_bytes() {
+async fn persistent_reads_do_not_return_stale_bytes_after_write_and_fsync() {
     let store = MemoryStore::new();
     store.seed("file", &vec![b'A'; 1024 * 1024]);
-    let fs = store.filesystem(32);
+    let (fs, _directory) = store.disk_filesystem(MemoryStore::config(32)).await;
     let node = fs.lookup(1, "file").await.unwrap();
     assert_eq!(fs.read(node.ino, 0, 4).await.unwrap().as_slice(), b"AAAA");
+    fs.drain_disk_cache(std::time::Duration::from_secs(10))
+        .await
+        .unwrap();
     let reads = store.read_calls.load(Ordering::Relaxed);
     assert_eq!(fs.read(node.ino, 4, 4).await.unwrap().as_slice(), b"AAAA");
     assert_eq!(store.read_calls.load(Ordering::Relaxed), reads);

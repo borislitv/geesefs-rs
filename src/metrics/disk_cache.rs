@@ -35,21 +35,21 @@ pub(super) fn register(registry: &mut Registry, fs: &Filesystem, snapshot: &Snap
     gauge(
         registry,
         "geesefs_disk_cache_funding_bytes",
-        "Configured payload-budget deduction from effective L1; recovery or adapter bypass may remain funded; not measured heap or RSS",
+        "Configured data-lane deduction; recovery or adapter bypass may remain funded; not measured heap or RSS",
         funded as u64,
     );
-    let l1 = snapshot
+    let read_work = snapshot
         .lanes
         .iter()
-        .filter(|(lane, _, _)| *lane != "ingress")
+        .filter(|(lane, _, _)| *lane == "data")
         .map(|(_, _, limit)| *limit)
         .sum::<usize>()
         .saturating_sub(funded);
     gauge(
         registry,
-        "geesefs_effective_l1_policy_bytes",
-        "Payload cache policy ceiling including revocable flush loans, after disk funding; not current ownership",
-        l1 as u64,
+        "geesefs_read_work_capacity_bytes",
+        "Data-lane capacity after persistent-tier funding, for active reads and dirty owners; not retained cache or RSS",
+        read_work as u64,
     );
     funding_metrics(registry, funding.as_ref());
     metadata(registry, fs);
@@ -62,7 +62,7 @@ pub(super) fn register(registry: &mut Registry, fs: &Filesystem, snapshot: &Snap
             .inc_by(counts[reason as usize]);
     }
     registry.register("geesefs_disk_cache_eligibility_decisions",
-        "Required read-window eligibility only, not optional L1 touches/demotions; contention may be resolved without fallback; fixed closed reasons",
+        "Required read-window eligibility only, not optional fill population; contention may be resolved without fallback; fixed closed reasons",
         decisions);
 }
 
@@ -134,7 +134,7 @@ fn adapter(registry: &mut Registry, stats: Option<&Stats>) {
             .inc_by(stats.map_or(0, |stats| stats.spill_drops[reason as usize]));
     }
     registry.register("geesefs_disk_cache_spill_drops",
-        "Demotion refusals by closed reason; their sum equals dropped_total, not capacity evictions or durable-write failures",
+        "Population refusals by closed reason; their sum equals dropped_total, not capacity evictions or durable-write failures",
         drops);
     for (name, help, value) in [
         (
@@ -246,7 +246,7 @@ fn adapter(registry: &mut Registry, stats: Option<&Stats>) {
         ),
         (
             "geesefs_disk_cache_dropped",
-            "Best-effort demotion drops/rejections including loan/size/copy/job/submission refusal; not capacity evictions",
+            "Best-effort population refusals including size/copy/job/submission limits; not capacity evictions",
             stats.map_or(0, |s| s.drops),
         ),
         (

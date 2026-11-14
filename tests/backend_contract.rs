@@ -1,3 +1,4 @@
+mod support;
 use std::{
     collections::{BTreeMap, HashMap},
     io::{Cursor, Read},
@@ -212,10 +213,15 @@ fn file_server(body: impl Read + Send + 'static, length: usize) -> (S3, JoinHand
     (backend(endpoint), task)
 }
 
-fn filesystem(store: S3) -> std::sync::Arc<geesefs_rs::filesystem::Filesystem> {
+async fn filesystem(
+    store: S3,
+) -> (
+    std::sync::Arc<geesefs_rs::filesystem::Filesystem>,
+    tempfile::TempDir,
+) {
     use clap::Parser;
-    use geesefs_rs::{config::Config, filesystem::Filesystem};
-    let config = Config::try_parse_from([
+    use geesefs_rs::config::Config;
+    let mut config = Config::try_parse_from([
         "geesefs-rs",
         "-f",
         "--list-type",
@@ -226,7 +232,21 @@ fn filesystem(store: S3) -> std::sync::Arc<geesefs_rs::filesystem::Filesystem> {
         "/tmp/mount",
     ])
     .unwrap();
-    Filesystem::new(config, std::sync::Arc::new(store)).unwrap()
+    config.no_detect = true;
+    let store = store
+        .with_static_credentials(Credentials::new(
+            "disposable-access",
+            "disposable-secret",
+            None,
+            None,
+            "test-only",
+        ))
+        .with_options(&config)
+        .unwrap()
+        .initialize()
+        .await
+        .unwrap();
+    support::disk_filesystem(config, std::sync::Arc::new(store)).await
 }
 
 fn observed_backend(store: S3) -> (S3, std::sync::Arc<geesefs_rs::filesystem::Filesystem>) {
@@ -1173,7 +1193,7 @@ async fn filesystem_reply_publishes_a_body_prefix_while_its_get_remains_owned() 
         release: Some(wait),
     };
     let (store, task) = file_server(body, expected.len());
-    let fs = filesystem(store);
+    let (fs, _directory) = filesystem(store).await;
     let ino = fs.lookup(1, "file").await.unwrap().ino;
     let (ready, received) = tokio::sync::oneshot::channel();
     let load = tokio::spawn({
@@ -1210,6 +1230,7 @@ async fn filesystem_reply_publishes_a_body_prefix_while_its_get_remains_owned() 
     assert_eq!(captured.headers["range"], "bytes=0-524287");
     assert_eq!(captured.headers["if-match"], "\"generation-one\"");
     assert!(fs.effective_budgets().data_used_bytes <= fs.effective_budgets().data_shared_bytes);
+    fs.drain_disk_cache(Duration::from_secs(10)).await.unwrap();
     let following = tokio::time::timeout(
         Duration::from_secs(3),
         fs.read(ino, CHUNK as u64 + 7, CHUNK),
@@ -1365,7 +1386,7 @@ async fn filesystem_keeps_a_valid_prefix_after_tail_failure_or_cancellation() {
             release: Some(wait),
         };
         let (store, task) = file_server(body, expected.len());
-        let fs = filesystem(store);
+        let (fs, _directory) = filesystem(store).await;
         let ino = fs.lookup(1, "file").await.unwrap().ino;
         let (ready, received) = tokio::sync::oneshot::channel();
         let load = tokio::spawn({
@@ -1416,22 +1437,27 @@ async fn filesystem_keeps_a_valid_prefix_after_tail_failure_or_cancellation() {
             );
         }
         task.join().unwrap();
+        fs.drain_disk_cache(Duration::from_secs(3)).await.unwrap();
+        let funding = fs.effective_budgets().disk_cache_funding_bytes;
         tokio::time::timeout(Duration::from_secs(3), async {
-            while fs.effective_budgets().data_used_bytes != 2 * CHUNK {
+            while fs.effective_budgets().data_used_bytes != funding + CHUNK {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("only the complete cached prefix backing and published reply may remain");
-        let hit = tokio::time::timeout(Duration::from_secs(3), fs.read(ino, 3, 7))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(hit.as_slice(), &expected[3..10]);
+        .expect("only fixed L2 funding and the published reply may remain");
+        // Cancellation may precede optional population. A completed tail error,
+        // however, must preserve the validated prefix already submitted to Foyer.
+        if !cancel {
+            let hit = tokio::time::timeout(Duration::from_secs(3), fs.read(ino, 3, 7))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(hit.as_slice(), &expected[3..10]);
+        }
         assert_eq!(block.as_slice(), &expected[..CHUNK]);
-        drop(hit);
         drop(block);
-        assert_eq!(fs.effective_budgets().data_used_bytes, CHUNK);
+        assert_eq!(fs.effective_budgets().data_used_bytes, funding);
     }
 }
 
@@ -1449,7 +1475,7 @@ async fn borrowed_wire_reply_shares_admission_and_survives_tail_failure_or_cance
             release: Some(wait),
         };
         let (store, server) = file_server(body, expected.len());
-        let fs = filesystem(store);
+        let (fs, _directory) = filesystem(store).await;
         let ino = fs.lookup(1, "file").await.unwrap().ino;
         let (ready, received) = tokio::sync::oneshot::channel();
         let load = tokio::spawn({
@@ -1477,8 +1503,8 @@ async fn borrowed_wire_reply_shares_admission_and_survives_tail_failure_or_cance
         assert_eq!(bytes.unwrap(), expected[7..4103]);
         assert_eq!(
             charge,
-            expected.len(),
-            "borrowed wire replies must reuse the full GET charge without a second output"
+            fs.effective_budgets().disk_cache_funding_bytes + expected.len() + 16 * 1024,
+            "borrowed wire replies reuse GET ownership; only fixed L2 funding and four 4-KiB gap-pipeline credits are additional"
         );
         assert!(!load.is_finished());
         if cancel {
@@ -1509,17 +1535,22 @@ async fn borrowed_wire_reply_shares_admission_and_survives_tail_failure_or_cance
             );
         }
         server.join().unwrap();
+        fs.drain_disk_cache(Duration::from_secs(3)).await.unwrap();
         tokio::time::timeout(Duration::from_secs(3), async {
-            while fs.effective_budgets().data_used_bytes != CHUNK {
+            while fs.effective_budgets().data_used_bytes
+                != fs.effective_budgets().disk_cache_funding_bytes
+            {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("only the complete cached prefix backing may survive borrowed reply cleanup");
-        assert_eq!(
-            fs.read(ino, 7, 4096).await.unwrap().as_slice(),
-            &expected[7..4103]
-        );
+        .expect("no decoded payload may survive borrowed reply cleanup");
+        if !cancel {
+            assert_eq!(
+                fs.read(ino, 7, 4096).await.unwrap().as_slice(),
+                &expected[7..4103]
+            );
+        }
     }
 }
 
@@ -1536,7 +1567,7 @@ async fn borrowed_wire_reply_composes_fragments_before_publishing_complete_bytes
         release: Some(wait),
     };
     let (store, server) = file_server(body, expected.len());
-    let fs = filesystem(store);
+    let (fs, _directory) = filesystem(store).await;
     let ino = fs.lookup(1, "file").await.unwrap().ino;
     let (ready, mut received) = tokio::sync::oneshot::channel();
     let load = tokio::spawn({
@@ -1573,7 +1604,11 @@ async fn borrowed_wire_reply_composes_fragments_before_publishing_complete_bytes
             .is_none()
     );
     server.join().unwrap();
-    assert_eq!(fs.effective_budgets().data_used_bytes, expected.len());
+    fs.drain_disk_cache(Duration::from_secs(3)).await.unwrap();
+    assert_eq!(
+        fs.effective_budgets().data_used_bytes,
+        fs.effective_budgets().disk_cache_funding_bytes
+    );
 }
 
 fn head(size: u64) -> ObjectHead {
@@ -1835,7 +1870,7 @@ async fn contiguous_dirty_put_retries_exact_bytes_with_signed_checksum_headers()
     ] {
         let size = payload.len();
         let (store, task) = retried_put_server(size);
-        let fs = filesystem(store);
+        let (fs, _directory) = filesystem(store).await;
         let node = fs
             .create(1, "new", libc::S_IFREG | 0o600, None, 0)
             .await

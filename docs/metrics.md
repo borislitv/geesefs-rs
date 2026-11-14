@@ -47,10 +47,10 @@ scrape_configs:
 
 There are at most two active HTTP connections, with a five-second total connection
 deadline, 16 headers and an 8 KiB request buffer. Connections close after the
-response. Unknown paths return 404, other methods 405. A contended namespace/cache
+response. Unknown paths return 404, other methods 405. A contended namespace
 snapshot still returns 200 with independent observations. The affected component's
 series are omitted and `geesefs_metrics_snapshot_available{component="namespace"}`
-or `{component="read_cache"}` is zero. No stale snapshot or false zero occupancy
+is zero. No stale snapshot or false zero occupancy
 is substituted. Watch both Prometheus `up` and component availability.
 
 ## Metric contract
@@ -68,24 +68,18 @@ payload bytes or calls S3. Detailed scrapes visit live request traces, not the
 retained namespace. Process status and allocator statistics are sampled locally.
 Optional unavailable allocator/process values are omitted.
 
-### Payload cache
+### Payload ownership
 
 | Metric | Meaning |
 | --- | --- |
-| `geesefs_read_cache_bytes` | Retained visible span bytes; not total charged backing storage |
-| `geesefs_read_cache_capacity_bytes` | Retention policy including revocable idle-flush loans |
-| `geesefs_read_cache_entries` / `geesefs_read_cache_entry_limit` | Retained spans and their entry cap |
-| `geesefs_read_cache_loaned_bytes` | Retained visible bytes currently charged to the flush lane |
-| `geesefs_read_cache_evictions_total` | Byte/entry/admission-pressure and loan-reclamation evictions |
-| `geesefs_read_cache_evicted_bytes_total` | Visible bytes removed by those evictions, not necessarily physically freed |
-| `geesefs_read_cache_insertions_total` | Nonempty admitted span insertions |
-| `geesefs_read_cache_replacements_total` | Old spans removed for the same inode/generation/offset |
-| `geesefs_read_cache_oversized_total` | Insertions rejected for exceeding retention capacity |
 | `geesefs_payload_used_bytes{lane="…"}` / `geesefs_payload_limit_bytes{lane="…"}` | Charged permits and hard byte admission per lane, including pinned/in-flight owners |
+| `geesefs_read_work_capacity_bytes` | Data-lane capacity minus fixed persistent-tier funding, shared by active reads and dirty owners |
 
-Explicit cache clearing and same-key replacements are not policy evictions.
-An evicted block can remain charged while a reader owns its backing. Byte admission,
-retention policy, span count and process RSS are different quantities.
+The retained clean RAM cache and idle-flush loans have been removed. Its
+occupancy/capacity/entry/eviction/insertion/loan gauges and counters, the
+`read_cache` snapshot component and the unused `cache_read` phase are absent,
+not zero-valued compatibility series. Neither active byte admission nor Foyer
+funding is a process RSS measurement; the flush lane belongs exclusively to writers.
 
 ### Persistent payload tier
 
@@ -102,12 +96,11 @@ omitted, not fabricated zero occupancy or a successful Ready observation.
 | Metric | Meaning |
 | --- | --- |
 | `geesefs_disk_cache_funding_bytes` | Fixed payload-budget deduction; not measured heap or RSS |
-| `geesefs_effective_l1_policy_bytes` | Remaining retention ceiling including revocable flush loans, not actual residency |
-| `geesefs_disk_cache_eligibility_decisions_total{reason}` | Sixteen fixed required-window decisions/observations; excludes optional touches/demotion. Contention can be followed by successful eligibility |
+| `geesefs_disk_cache_eligibility_decisions_total{reason}` | Sixteen fixed required-window decisions/observations; excludes optional population. Contention can be followed by successful eligibility |
 | `geesefs_disk_cache_read_fallbacks_total{reason}` | Fourteen fixed admission/I/O/validation outcomes; not mutually exclusive S3 misses |
 | `geesefs_disk_cache_active_read_jobs` / `geesefs_disk_cache_active_spill_jobs` | Actual independently funded owners, at most four reads and three spills; includes work outliving its observer |
 | `geesefs_disk_cache_queued_reads` | Key-free FIFO waiters charged to their read windows |
-| `geesefs_disk_cache_admitted_demotions_total` / `geesefs_disk_cache_engine_admitted_demotions_total` | Admitted copy and accepted engine enqueue, respectively; neither is a durability acknowledgement |
+| `geesefs_disk_cache_admitted_demotions_total` / `geesefs_disk_cache_engine_admitted_demotions_total` | Historical family names for admitted validated-fill copies and accepted guarded engine enqueues, respectively; neither means RAM eviction or durability |
 | `geesefs_disk_cache_read_operation_hits_total` / `geesefs_disk_cache_hits_total` | Worker-completed copies versus caller-delivered adapter results; a later generation check may still reject delivery |
 | `geesefs_disk_cache_hit_bytes_total` | Validated bytes delivered into the read pipeline, including alignment/read-ahead; not requested client bytes |
 | `geesefs_disk_cache_index_entries` / `geesefs_disk_cache_index_entry_limit` | Guarded index slots and their bound, including pending updates/tombstones; not distinct files or S3 objects |
@@ -120,8 +113,8 @@ omitted, not fabricated zero occupancy or a successful Ready observation.
 | `geesefs_disk_cache_region_reclaims_started_total` | Region-picker callbacks, not completed per-record evictions or reclaimed bytes |
 | `geesefs_disk_cache_opened_file_allocated_bytes` | Opening-time file allocation observation, not current physical occupancy |
 | `geesefs_disk_cache_io_read_bytes_total` / `geesefs_disk_cache_io_write_bytes_total` | Cumulative engine I/O, including record overhead; reset on restart, can exceed capacity after reuse |
-| `geesefs_disk_cache_dropped_total` / `geesefs_disk_cache_errors_total` | Best-effort demotion refusals versus adapter/storage/decode errors; drops are not capacity evictions |
-| `geesefs_disk_cache_spill_drops_total{reason}` | Closed demotion-refusal reasons; their sum equals `dropped_total` outside concurrent scrape skew |
+| `geesefs_disk_cache_dropped_total` / `geesefs_disk_cache_errors_total` | Best-effort population refusals versus adapter/storage/decode errors; drops are not capacity evictions |
+| `geesefs_disk_cache_spill_drops_total{reason}` | Closed population-refusal reasons; their sum equals `dropped_total` outside concurrent scrape skew |
 
 Spill reasons are `jobs`, `timeout`, `state`, `activity`, `invalid_block`, `copy`,
 `engine_no_space`, `engine_error`, and `unindexed_after_drain`. The last means the
@@ -169,9 +162,9 @@ service time. Detailed debug runs are separate from performance measurements.
 
 | Metric | Meaning |
 | --- | --- |
-| `geesefs_read_cache_hits_total` / `geesefs_read_cache_misses_total` | Successful nonempty clean results served entirely from L1/L2 versus results requiring any requested S3 bytes |
-| `geesefs_read_cache_hit_bytes_total` / `geesefs_read_cache_miss_bytes_total` | Requested bytes actually served from L1/L2 versus S3 in successful clean results; mixed results contribute to both byte counters |
-| `geesefs_read_delivered_bytes_total{source}` | Successful requested bytes by `l1`, `l2`, `s3`, or `overlay`; excludes alignment and read-ahead |
+| `geesefs_read_cache_hits_total` / `geesefs_read_cache_misses_total` | Successful nonempty clean results served entirely from active-fill reuse/L2 versus results requiring any requested S3 bytes |
+| `geesefs_read_cache_hit_bytes_total` / `geesefs_read_cache_miss_bytes_total` | Requested active-fill/L2 reuse versus S3 bytes in successful clean results; mixed results contribute to both byte counters |
+| `geesefs_read_delivered_bytes_total{source}` | Successful requested bytes by `inflight`, `l2`, `s3`, or `overlay`; excludes alignment and read-ahead |
 | `geesefs_read_overlay_reads_total` | Successful nonempty writer-overlay materializations, excluded from clean hit/miss denominators |
 | `geesefs_read_fill_jobs_total` | Started read-window chunk jobs, including optional read-ahead and local overlays |
 | `geesefs_read_fill_errors_total` | Failed chunk jobs; includes optional read-ahead failures |
@@ -179,7 +172,8 @@ service time. Detailed debug runs are separate from performance measurements.
 
 The result boundary replaces the former initial-L1-lookup contract. A validated,
 current-generation L2 result is a hit. A follower served by an existing fill's
-published memory is an L1 hit, not another miss or GET. A mixed L2/S3 result counts
+published memory is `inflight` reuse, not another source miss or GET. This label
+describes reuse from a concurrent producer even when that producer used L2. A mixed L2/S3 result counts
 once as a missed operation; its cached and source bytes remain separate. A pure
 L2 result contributes only its requested bytes even when a whole record or larger
 window was loaded. An adapter result rejected by generation validation is not a
@@ -212,9 +206,9 @@ For the same reader/process lifecycle and aligned interval, define:
 - Delivered/source factor: `T / S` when `S > 0`.
 
 Show `T / elapsed_seconds` and `S / elapsed_seconds` together in bytes/second
-before the requested L1/L2 breakdown. Do not add hit/miss byte counters to `T`:
-they account for the same delivery again. A subsequent reuse after L2 promotion
-is L1 delivery, but still contributes once to `T`.
+before the active-fill/L2/source breakdown. Do not add hit/miss byte counters to
+`T`: they account for the same delivery again. Each independent read loads its
+own L2 backing; no decoded payload is retained for a later L1 hit.
 
 This is descriptive source consumption, not a causal estimate of bytes or requests
 saved specifically by L2. `S` includes alignment/read-ahead and consumed prefixes
@@ -318,9 +312,8 @@ cancellation error, is `error`; dropping its future is `cancelled`.
 | Stage | Boundary and limitations |
 | --- | --- |
 | `fuse_admission` | Saturated request-slot wait on a fixed fuser receiver; excludes immediate acquisitions and kernel queueing |
-| `cache_read` | Initial payload-cache lookup and reply assembly/copy |
 | `fill_wait` | Waiting for an overlapping fill to publish/change; not an additional GET |
-| `payload_admission` | Only the pressured required-admission branch, including reclamation/flush/wait; fast reservations are excluded |
+| `payload_admission` | Only the pressured required-admission branch, including dirty flush and FIFO wait; fast reservations are excluded |
 | `metadata_slots` | Directory metadata concurrency admission, including select-cancelled scopes |
 | `namespace_wait_sampled` / `namespace_hold_sampled` | One in 1,024 acquisitions through the filesystem helper; not all namespace transactions or a request-level distribution |
 | `s3_head` / `s3_list` | Logical backend method, including SDK work/retries and LIST fallback/parsing |
@@ -358,7 +351,8 @@ boundaries. Neither counts TLS framing, retransmissions or direct nginx S3 work.
 
 ### Interpreting S3 offload
 
-L1 and L2 cache object contents; persistent records do not contain the live
+L2 caches object contents; active producers can share validated chunks with
+concurrent subscribers. Persistent records do not contain the live
 namespace or directory listings. Fresh metadata and directory pages are held in
 separate bounded memory caches under `stat-cache-ttl` and entry limits. Extended
 LIST metadata can satisfy file lookups without individual HEAD requests. Expiry,
@@ -366,7 +360,7 @@ capacity eviction, changed paths and directory pagination can still require
 HEAD/LIST even when every requested payload byte is available in L2. A validated
 L2 hit does not issue an additional GET just to reauthorize downloaded contents.
 
-Evaluate requested L1/L2/S3 bytes separately from GET executions, attempts and
+Evaluate requested active-fill/L2/S3 bytes separately from GET executions, attempts and
 body bytes. The same missing byte count can require different numbers of Range
 GETs; cached separators can split source ranges. Read-ahead changes transfer
 volume independently of requested bytes. Cache capacity or region occupancy alone
@@ -470,8 +464,8 @@ missing severe records. This is not a durable audit log.
   `details.scope_id`, so parallel scopes of the same stage can be paired.
   Completion includes duration, `ok`/`error`/`cancelled`, and a bounded error class.
   Existing namespace-lock sampling remains one in 1,024 acquisitions.
-- `read_cache` reports the initial cache hit/miss and EOF-clipped range;
-  `read_fill` reports leader/follower ownership and the read-ahead window.
+- `read_fill` reports leader/follower ownership, the requested range and the
+  planned read-ahead window. There is no retained-cache lookup event.
 - `s3_attempt` records operation, transport and retry status; `s3_body_chunk`
   records yielded byte counts. `diagnostic_event` retains bounded source reasons.
   These events inherit an instrumented FUSE context; standalone/background backend
@@ -508,7 +502,7 @@ Start with the following hypotheses:
 - High executor delay or sustained `fuse_admission` waits: dispatch/admission
   pressure. Historical `admission_full` records identify the old rejection path;
   namespace EAGAIN events identify a different retry mechanism.
-- High sampled namespace waits/holds, `cache_read`, `fill_wait`, or pressured
+- High sampled namespace waits/holds, `fill_wait`, or pressured
   admission with ordinary S3 phases: investigate local locks, copies, pinned
   owners and payload pressure using matching CPU/off-CPU profiles.
 - High GET headers or HEAD/LIST duration with retry growth: inspect SDK/transport
@@ -596,37 +590,65 @@ Keep `--no-diagnostics` available for basic-only controls and collect production
 profiles separately rather than treating these fixture results as a release
 performance claim.
 
-## Deciding whether a larger cache helps
+## Deciding whether larger read or persistent capacity helps
 
 Collect a representative sustained workload at the existing limits first. Inspect
 the following per instance, not a mixture of unrelated mounts:
 
 ```promql
-geesefs_read_cache_bytes / geesefs_read_cache_capacity_bytes
-
 rate(geesefs_read_cache_hit_bytes_total[15m])
 /
-clamp_min(rate(geesefs_read_cache_hit_bytes_total[15m]) + rate(geesefs_read_cache_miss_bytes_total[15m]), 1)
-
-rate(geesefs_read_cache_evicted_bytes_total[15m])
-
-geesefs_read_cache_entries / geesefs_read_cache_entry_limit
+(rate(geesefs_read_cache_hit_bytes_total[15m]) + rate(geesefs_read_cache_miss_bytes_total[15m]))
 
 geesefs_payload_used_bytes / geesefs_payload_limit_bytes
+
+geesefs_read_work_capacity_bytes
+
+geesefs_disk_cache_index_entries / geesefs_disk_cache_index_entry_limit
 
 rate(geesefs_read_remote_bytes_total[15m])
 ```
 
-A full cache, recurring misses and substantial evictions justify an experiment,
-not an automatic increase: sequential one-pass reads can churn at any size.
-Distinguish span-count pressure, byte admission, revoked flush loans and metadata
-pressure. More payload bytes will not correct an entry-count limit, TTL refresh,
-backend errors, allocator retention or unrelated metadata growth.
+The clean-byte reuse ratio is undefined when no clean bytes were delivered;
+do not clamp a missing or zero denominator into a measured hit ratio. The payload
+lane ratio describes charged active/dirty/funding owners, not retained clean
+occupancy. Inspect persistent index/region and adapter admission observations
+alongside repeated misses; index presence alone does not establish useful bytes.
+Saturated admission or persistent capacity justifies an experiment, not an
+automatic increase: sequential one-pass reads can churn at any size. Distinguish
+active byte admission, persistent submission/index bounds and metadata pressure.
+More payload bytes will not correct a metadata entry limit, TTL refresh, backend
+errors, allocator retention or unrelated metadata growth.
 
 Compare unchanged-budget and larger-budget windows with equivalent traffic,
 generations, startup/steady state and independent repetitions. Require improved
 cache reuse/backend traffic and user-visible tails/throughput without unacceptable
 RSS/cgroup pressure. These counters alone do not estimate the whole working set
-or prove a benefit from doubling memory. Existing binaries without this listener
-provide no historical hit/miss/occupancy series; deployment and collection remain
-separate from adding the feature.
+or prove a benefit from doubling memory. Removed retained-cache gauges have no
+current equivalents. Released readers using the earlier `l1` source contract and
+this candidate's `inflight` contract require explicitly matched dashboards;
+deployment and collection remain separate from adding the feature.
+
+## Dashboard schema migration
+
+The retained-cache removal is an explicit exporter contract change. A dashboard
+for released readers with `source="l1"` is not compatible with this candidate:
+
+- Complete delivery cohorts must require `inflight`, `l2`, `s3` and `overlay`,
+  together with consumed GET-body observations and the applicable diagnostics mode.
+  Replace the source vocabulary in both traffic expressions and membership checks;
+  updating only a legend or summing `source="*"` does not update cohort admission.
+- Remove retained occupancy, eviction, span-count, loan and insertion-policy charts;
+  these measurements have no meaningful zero-valued replacements.
+- Replace the effective L1 policy ceiling with `geesefs_read_work_capacity_bytes`.
+  Keep persistent funding and payload-lane ownership distinct from process RSS,
+  allocator and kernel/file-cache memory.
+- Remove the deleted `cache_read` stage and lookup event from diagnostics. Preserve
+  actual active-fill wait, payload admission and persistent I/O observations.
+- Keep total delivery versus consumed source descriptive. Missing/reset cohorts
+  remain gaps, a zero denominator remains undefined, and negative reduction remains
+  visible. Do not mix old/new readers through fallback source labels or fake zeros.
+
+Source-level and disposable-exporter checks do not migrate a live dashboard.
+Deployment needs a separately verified consumer model and matched-reader read-back;
+the development candidate does not authorize changing a serving reader.

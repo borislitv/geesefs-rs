@@ -103,17 +103,6 @@ async fn fresh_attachment_reserves_funding_without_constructing_an_unused_engine
         !dir.path().join("payload-v1.cache").exists(),
         "unused fresh L2 must not preallocate media or build engine/index/pools"
     );
-    let node = fs.lookup(1, "selected.rpm").await.unwrap();
-    for _ in 0..2 {
-        for offset in (0..MIB).step_by(READ_BLOCK_BYTES) {
-            let block =
-                tokio::time::timeout(DEADLINE, fs.read(node.ino, offset as u64, READ_BLOCK_BYTES))
-                    .await
-                    .unwrap()
-                    .unwrap();
-            assert_eq!(block.as_slice(), &[0x53; READ_BLOCK_BYTES]);
-        }
-    }
     assert_eq!(status.state(), State::Prepared);
     assert!(fs.disk_cache_stats().is_none());
     let metrics = geesefs_rs::metrics::render(&fs).unwrap();
@@ -129,14 +118,36 @@ async fn fresh_attachment_reserves_funding_without_constructing_an_unused_engine
     assert_eq!(status.opened_file_allocated_bytes(), None);
     assert!(!dir.path().join("payload-v1.cache").exists());
     assert!(PreparedDiskCache::prepare(dir.path(), 16 * MIB as u64).is_err());
+    let node = fs.lookup(1, "selected.rpm").await.unwrap();
+    for _ in 0..2 {
+        for offset in (0..MIB).step_by(READ_BLOCK_BYTES) {
+            let block =
+                tokio::time::timeout(DEADLINE, fs.read(node.ino, offset as u64, READ_BLOCK_BYTES))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(block.as_slice(), &[0x53; READ_BLOCK_BYTES]);
+            drop(block);
+            fs.drain_disk_cache(DEADLINE).await.unwrap();
+        }
+    }
+    assert_eq!(status.state(), State::Ready);
+    assert_eq!(status.startup().startup.count, 1);
+    assert_eq!(
+        store.read_calls.load(std::sync::atomic::Ordering::Relaxed),
+        MIB / READ_BLOCK_BYTES
+    );
     fs.shutdown().await.unwrap();
     assert_eq!(status.state(), State::Closed);
-    assert_eq!(fs.effective_budgets().data_used_bytes, MIB);
+    assert_eq!(
+        fs.effective_budgets().data_used_bytes,
+        budgets.disk_cache_funding_bytes
+    );
     assert!(PreparedDiskCache::prepare(dir.path(), 16 * MIB as u64).is_ok());
 }
 
 #[tokio::test]
-async fn byte_pressure_starts_a_funded_empty_tier_without_loan_first_starvation() {
+async fn fills_start_a_funded_empty_tier_and_remain_bounded_beyond_its_capacity() {
     let fixture = Fixture::new(100_000);
     let fs = fixture.attach().await;
     let funding = fs.effective_budgets().disk_cache_funding_bytes;
@@ -153,7 +164,7 @@ async fn byte_pressure_starts_a_funded_empty_tier_without_loan_first_starvation(
     }
     let stats = fs
         .disk_cache_stats()
-        .expect("eligible byte pressure must start L2 before loans hide all victims");
+        .expect("eligible fills must start L2 independently of RAM pressure");
     assert_eq!(stats.state, State::Ready);
     assert_eq!(stats.startup.startup.count, 1);
     assert_eq!(stats.startup.allocation.count, 1);
@@ -211,7 +222,7 @@ async fn existing_inventory_recovers_before_any_new_capacity_victim() {
 }
 
 #[tokio::test]
-async fn preattachment_selected_loans_survive_deferred_start_then_revoke_without_demotion() {
+async fn preattachment_reads_and_writer_flushes_do_not_start_or_populate_the_deferred_tier() {
     let fixture = Fixture::new(100_000);
     let fs = Filesystem::new(fixture.config.clone(), fixture.store.clone()).unwrap();
     let ino = fs.lookup(1, "selected.rpm").await.unwrap().ino;
@@ -229,12 +240,11 @@ async fn preattachment_selected_loans_survive_deferred_start_then_revoke_without
             .unwrap()
             .unwrap();
     }
-    let loans = fs.effective_budgets().read_cache_loaned_bytes;
-    assert!(loans > 0);
+    assert_eq!(fs.effective_budgets().flush_used_bytes, 0);
     fs.truncate(holder.ino, 0).unwrap();
     fs.attach_disk_cache(fixture.prepare()).await.unwrap();
     assert_eq!(fs.disk_cache_state(), Some(State::Prepared));
-    assert_eq!(fs.effective_budgets().read_cache_loaned_bytes, loans);
+    assert_eq!(fs.effective_budgets().flush_used_bytes, 0);
     for index in 0..14 {
         tokio::time::timeout(DEADLINE, fs.write(holder.ino, (index * MIB) as u64, &bytes))
             .await
@@ -242,19 +252,18 @@ async fn preattachment_selected_loans_survive_deferred_start_then_revoke_without
             .unwrap();
     }
     fs.drain_disk_cache(DEADLINE).await.unwrap();
-    assert_eq!(fs.disk_cache_state(), Some(State::Ready));
-    assert!(fs.effective_budgets().read_cache_loaned_bytes >= loans);
-    assert_eq!(fs.disk_cache_stats().unwrap().admitted_demotions, 0);
+    assert_eq!(fs.disk_cache_state(), Some(State::Prepared));
+    assert_eq!(fs.effective_budgets().flush_used_bytes, 0);
+    assert!(fs.disk_cache_stats().is_none());
     tokio::time::timeout(DEADLINE, fs.fsync(holder.ino))
         .await
         .unwrap()
         .unwrap();
     assert_eq!(fixture.store.bytes("holder"), vec![0x31; 14 * MIB]);
-    assert_eq!(fs.effective_budgets().read_cache_loaned_bytes, 0);
-    let stats = fs.disk_cache_stats().unwrap();
-    assert_eq!(stats.admitted_demotions, 0);
-    assert_eq!(stats.index_entries, 0);
-    assert_eq!(stats.drops, 0);
+    assert_eq!(fs.effective_budgets().flush_used_bytes, 0);
+    assert_eq!(fs.disk_cache_state(), Some(State::Prepared));
+    assert!(fs.disk_cache_stats().is_none());
+    assert!(!fixture.dir.path().join("payload-v1.cache").exists());
     fs.shutdown().await.unwrap();
 }
 
@@ -294,10 +303,7 @@ fn startup_is_singleflight_owned_and_does_not_block_required_reads_or_early_clos
         assert_eq!(status.startup().allocation.count, 0);
         assert!(PreparedDiskCache::prepare(fixture.dir.path(), 16 * MIB as u64).is_err());
         let funding = fs.effective_budgets().disk_cache_funding_bytes;
-        assert_eq!(
-            fs.effective_budgets().data_used_bytes,
-            funding + 2 * READ_BLOCK_BYTES
-        );
+        assert_eq!(fs.effective_budgets().data_used_bytes, funding);
         let shutdown = tokio::spawn({
             let fs = fs.clone();
             async move { fs.shutdown().await }
@@ -328,7 +334,7 @@ fn startup_is_singleflight_owned_and_does_not_block_required_reads_or_early_clos
         fs.drain_disk_cache(DEADLINE).await.unwrap();
         assert_eq!(status.startup().startup.count, 1);
         assert_eq!(status.startup().allocation.count, 1);
-        assert_eq!(fs.effective_budgets().data_used_bytes, 2 * READ_BLOCK_BYTES);
+        assert_eq!(fs.effective_budgets().data_used_bytes, 0);
         assert!(PreparedDiskCache::prepare(fixture.dir.path(), 16 * MIB as u64).is_ok());
     });
 }

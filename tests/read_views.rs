@@ -7,7 +7,7 @@ const MIB: usize = 1024 * 1024;
 const STEP: usize = 128 * 1024;
 
 #[tokio::test]
-async fn pressure_does_not_discard_recent_backings_when_old_ones_free_enough_bytes() {
+async fn independent_reads_release_their_backings_instead_of_retaining_recent_data() {
     let store = MemoryStore::new();
     for (name, byte) in [("old", b'o'), ("recent", b'r'), ("incoming", b'n')] {
         store.seed(name, &vec![byte; 2 * MIB]);
@@ -30,8 +30,8 @@ async fn pressure_does_not_discard_recent_backings_when_old_ones_free_enough_byt
     assert_eq!(data.as_slice(), vec![b'r'; STEP]);
     assert_eq!(
         store.read_ranges.lock().unwrap().len(),
-        3,
-        "pressure must not refetch a recent backing when evicting old data was sufficient"
+        4,
+        "without L2 every independent read fetches its required bytes"
     );
     assert!(fs.effective_budgets().data_used_bytes <= 5 * MIB);
 }
@@ -64,13 +64,12 @@ async fn a_borrowed_miss_reply_reuses_its_complete_charged_backing() {
             .is_none()
         );
         assert_eq!(replies, 1);
-        let charged = store.read_ranges.lock().unwrap()[0].1;
-        assert_eq!(fs.effective_budgets().data_used_bytes, charged);
+        assert_eq!(fs.effective_budgets().data_used_bytes, 0);
     }
 }
 
 #[tokio::test]
-async fn cached_reply_keeps_the_complete_backing_charge_without_another_payload_allocation() {
+async fn owned_reply_keeps_only_its_required_backing_until_the_last_view_drops() {
     let expected: Vec<u8> = (0..2 * MIB).map(|at| (at % 251) as u8).collect();
     let store = MemoryStore::new();
     store.seed("cached", &expected);
@@ -83,25 +82,25 @@ async fn cached_reply_keeps_the_complete_backing_charge_without_another_payload_
     let other = fs.lookup(1, "other").await.unwrap();
     let pressure = fs.lookup(1, "pressure").await.unwrap();
     drop(fs.read(node.ino, 0, STEP).await.unwrap());
-    assert_eq!(fs.effective_budgets().data_used_bytes, 2 * MIB);
+    assert_eq!(fs.effective_budgets().data_used_bytes, 0);
 
     let view = fs.read(node.ino, 65_539, 4096).await.unwrap();
     assert_eq!(view.as_slice(), &expected[65_539..65_539 + 4096]);
     assert_eq!(
         fs.effective_budgets().data_used_bytes,
-        2 * MIB,
-        "a cache-hit reply must share its already charged allocation, not allocate another payload"
+        4096,
+        "a required-only source reply owns its exact admitted bytes"
     );
     drop(fs.read(other.ino, 0, STEP).await.unwrap());
     drop(fs.read(pressure.ino, 0, STEP).await.unwrap());
     assert_eq!(view.as_slice(), &expected[65_539..65_539 + 4096]);
     assert_eq!(
         fs.effective_budgets().data_used_bytes,
-        4 * MIB,
-        "eviction must not release the full backing charge while a small view still owns it"
+        4096,
+        "independent completed reads must not retain unrelated payloads"
     );
     drop(view);
-    assert_eq!(fs.effective_budgets().data_used_bytes, 2 * MIB);
+    assert_eq!(fs.effective_budgets().data_used_bytes, 0);
 }
 
 #[tokio::test]

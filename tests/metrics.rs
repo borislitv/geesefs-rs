@@ -286,6 +286,39 @@ async fn failed_remote_fill_counts_error_without_fabricating_bytes() {
 }
 
 #[tokio::test]
+async fn metrics_failed_read_does_not_count_undelivered_bytes_as_a_cache_miss() {
+    let (store, fs) = fixture();
+    let ino = fs.lookup(1, "private-object-name").await.unwrap().ino;
+    store.objects.lock().unwrap().clear();
+    assert!(fs.read(ino, 0, 3).await.is_err());
+    let text = render(&fs).unwrap();
+    assert_eq!(sample(&text, "geesefs_read_fill_errors_total"), 1.);
+    assert_eq!(sample(&text, "geesefs_read_cache_misses_total"), 0.);
+    assert_eq!(sample(&text, "geesefs_read_cache_miss_bytes_total"), 0.);
+}
+
+#[tokio::test]
+async fn writer_overlay_is_not_reported_as_an_l1_l2_or_source_only_result() {
+    let (_, fs) = fixture();
+    let ino = fs.lookup(1, "private-object-name").await.unwrap().ino;
+    fs.write(ino, 2, b"XY").await.unwrap();
+    assert_eq!(fs.read(ino, 0, 8).await.unwrap().as_slice(), b"abXYefgh");
+    let text = render(&fs).unwrap();
+    assert_eq!(sample(&text, "geesefs_read_overlay_reads_total"), 1.);
+    assert_eq!(
+        sample(
+            &text,
+            "geesefs_read_delivered_bytes_total{source=\"overlay\"}"
+        ),
+        8.
+    );
+    assert_eq!(sample(&text, "geesefs_read_cache_hits_total"), 0.);
+    assert_eq!(sample(&text, "geesefs_read_cache_misses_total"), 0.);
+    assert_eq!(sample(&text, "geesefs_read_cache_hit_bytes_total"), 0.);
+    assert_eq!(sample(&text, "geesefs_read_cache_miss_bytes_total"), 0.);
+}
+
+#[tokio::test]
 async fn http_scrape_routes_contention_bind_errors_and_shutdown_are_observable() {
     let (store, fs) = fixture();
     let server = MetricsServer::bind("127.0.0.1:0".parse().unwrap(), fs.clone())
@@ -461,6 +494,10 @@ async fn cancelling_a_fill_follower_is_not_success_and_does_not_leave_an_infligh
         store.read_calls.load(Ordering::Relaxed),
         0,
         "cancelled unpolled jobs must not start a GET"
+    );
+    assert_eq!(
+        sample(&render(&fs).unwrap(), "geesefs_read_cache_misses_total"),
+        0.
     );
 }
 

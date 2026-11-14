@@ -858,7 +858,7 @@ async fn validated_l1_hit_touches_existing_hot_record_without_populating_cold_re
 }
 
 #[tokio::test]
-async fn saturated_optional_spill_and_revoked_writer_loans_preserve_fsync_progress() {
+async fn bursty_optional_spill_and_revoked_writer_loans_preserve_fsync_progress() {
     for saturated in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let mount = tempfile::tempdir().unwrap();
@@ -913,9 +913,18 @@ async fn saturated_optional_spill_and_revoked_writer_loans_preserve_fsync_progre
             assert_eq!(block.as_slice(), &[0x53; 128]);
         }
         if saturated {
+            // The healthy writer can drain bounded admission between victims.
+            // A burst is not proof of a stalled engine and must not require
+            // rejecting otherwise reusable records to let fsync progress.
+            let stats = fs.disk_cache_stats().unwrap();
             assert!(
-                fs.disk_cache_stats().unwrap().drops > 0,
-                "a synchronous multi-record eviction must drop jobs beyond bounded admission"
+                stats.admitted_demotions > 0,
+                "the selected burst must actually exercise optional spill"
+            );
+            assert_eq!(
+                stats.spill_drops[geesefs_rs::disk_cache::SpillDrop::Jobs as usize],
+                0,
+                "required reads allow bounded spill admission instead of synchronous job rejection"
             );
         } else {
             assert!(fs.effective_budgets().read_cache_loaned_bytes > 0);
@@ -1079,6 +1088,56 @@ async fn selected_loans_from_before_attachment_are_discarded_without_demotion_af
         assert_eq!(stats.copied_bytes, 0);
         fs.shutdown().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn optional_refill_preserves_resident_entries_instead_of_spilling_for_entry_capacity() {
+    let dir = tempfile::tempdir().unwrap();
+    let mount = tempfile::tempdir().unwrap();
+    let store = scoped_store();
+    let bytes: Vec<_> = (0x17..0x1fu8)
+        .flat_map(|byte| vec![byte; READ_BLOCK_BYTES])
+        .collect();
+    store.seed("package.rpm", &bytes);
+    let mut config = configured(dir.path(), mount.path());
+    config.entry_limit = 4;
+    config.read_ahead = 512;
+    config.read_ahead_small = 512;
+    config.read_ahead_large = 512;
+    config.read_ahead_parallel = READ_BLOCK_BYTES / 1024;
+    let fs = attach(config, store.clone()).await;
+    let ino = fs.lookup(1, "package.rpm").await.unwrap().ino;
+    assert_eq!(
+        fs.read(ino, 0, 4 * READ_BLOCK_BYTES)
+            .await
+            .unwrap()
+            .as_slice(),
+        &bytes[..4 * READ_BLOCK_BYTES]
+    );
+    let before = store.read_calls.load(Ordering::Relaxed);
+    assert!(
+        fs.read_reply_data(ino, 0, 4 * READ_BLOCK_BYTES, |result| {
+            assert_eq!(result.unwrap(), &bytes[..4 * READ_BLOCK_BYTES]);
+        })
+        .await
+        .is_none()
+    );
+    assert_eq!(
+        store.read_calls.load(Ordering::Relaxed) - before,
+        4,
+        "free byte admission must exercise the optional insertion path"
+    );
+    let stats = fs.disk_cache_stats().unwrap();
+    assert_eq!(
+        stats.admitted_demotions, 0,
+        "optional entry pressure must preserve resident owners instead of acquiring spill slots"
+    );
+    assert_eq!(stats.drops, 0);
+    let gets = store.read_calls.load(Ordering::Relaxed);
+    assert_eq!(fs.read(ino, 0, 13).await.unwrap().as_slice(), &bytes[..13]);
+    assert_eq!(store.read_calls.load(Ordering::Relaxed), gets);
+    assert_eq!(fs.disk_cache_stats().unwrap().hits, 0);
+    fs.shutdown().await.unwrap();
 }
 
 #[tokio::test]

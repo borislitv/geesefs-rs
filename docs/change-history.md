@@ -5,6 +5,63 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-14: bound the optional-tail cache lookup
+
+Independent review found that the new read-ahead trim scanned retained L1 records
+from offset zero, even when the entire window was already requested. Skip that
+lookup without an optional suffix. Bound other gap searches by a conservative
+largest-inserted span length using the existing BTreeMap range API; an earlier
+long overlap must remain visible behind a later short span. Removal/replacement
+may leave the scalar bound wider, and clear resets it. No owner or interval tree
+is added, and requested ranges, funding and source-free reuse remain unchanged.
+
+Private instrumented public-read probes first fail on the previous source, then
+observe no lookup for full/EOF-clipped demand and no distant-prefix visits for a
+useful cached separator. The counters exist only in the isolated evidence copy.
+Crate-visible cache tests check overlap, replacement, eviction, clear and offset
+saturation; targeted invalid-bound mutations prove their failure sensitivity.
+These checks establish local work and behavior, not production latency improvement.
+
+## 2026-11-13: account for completed read sources and distinct S3 operations
+
+Eligible eviction bursts could discard most records before background spill work
+was scheduled. A single population pass followed by a fresh-L1 reopen reproduces
+avoidable source GETs. Give required-read reclamation one shared 250-ms maximum
+admission grace, without holding cache/inode locks or increasing existing funding.
+Writer admission and speculative refill remain nonwaiting.
+
+Independent review found that successful speculative byte admission still reached
+waiting eviction when the separate L1 entry cap was full. Optional insertion now
+keeps the resident entries without acquiring spill slots. A public read-reply
+regression first observes four unintended demotions, then verifies zero demotions
+and source-free reuse of the original records. The native fixture checks exact
+range coverage without overlaps instead of requiring a scheduling-dependent GET
+count; shifted refill and a separate missing prefix are a valid partition.
+
+Four raw 128-KiB payloads also exceed the 512-KiB serialization buffer once record
+envelopes are included. Derive spill concurrency from encoded-record bounds and
+cap aggregate engine admission at that buffer size. Count drops by closed reason,
+including keys absent after guarded drain, and log bounded pressure/error details.
+Enqueue acceptance still does not mean publication, durability or a validated hit.
+
+After a neighboring shifted refill completes, an aligned prefix miss could GET
+the already cached tail again. End optional read-ahead at the first cached span,
+while retaining the full requested range. A public read regression records the
+redundant range before correction; a disposable FUSE/SDK/rsync fixture checks
+complete-window reuse after restart, actual HTTP requests and byte counters.
+
+Read-cache misses were counted before L2 validation and coalesced-fill reuse,
+misclassifying successful cached delivery and charging requested bytes to reads
+that failed. Record a successful requested result once, separating L1, validated
+L2, source and writer-overlay bytes. Keep prefetch/adapter observations independent;
+a later optional failure does not change an already published reply.
+
+Expose first-transmit S3 execution counts separately from attempts/retries and
+retain PUT, COPY, DELETE, PATCH and multipart operation identities instead of
+collapsing mutations into `write`. Persistent payload residency does not replace
+the bounded TTL-based namespace and directory caches. These observations do not
+establish a particular S3 reduction or resolve existing compatibility gaps.
+
 ## 2026-11-13: prepare the authorized 0.1.12 release
 
 Package the existing persistent-cache and metadata corrections as 0.1.12 without

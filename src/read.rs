@@ -229,6 +229,19 @@ pub(crate) fn debug_disk_fallback(
     reason: crate::disk_cache::ReadFallback,
 ) {
     if let Some(trace) = crate::metrics::context() {
+        use crate::disk_cache::ReadFallback;
+        if matches!(
+            reason,
+            ReadFallback::Poisoned
+                | ReadFallback::Timeout
+                | ReadFallback::Join
+                | ReadFallback::BackendError
+                | ReadFallback::Identity
+                | ReadFallback::OutputCopy
+                | ReadFallback::OutputCoverage
+        ) {
+            trace.cache_warning(reason.label());
+        }
         trace.debug("l2_read_fallback", || {
             let stats = cache.stats();
             serde_json::json!({"reason": reason.label(), "state": format!("{:?}", stats.state),

@@ -130,6 +130,7 @@ struct Inner {
     executor: Histogram,
     post_reply: Histogram,
     events: Family<Labels, Counter>,
+    requests: Family<Labels, Counter>,
     attempts: Family<Labels, Counter>,
     retries: Family<Labels, Counter>,
     body_bytes: Counter,
@@ -306,7 +307,9 @@ impl Diagnostics {
                 "list" => 0,
                 "head" => 1,
                 "get" => 2,
-                "write" => 3,
+                "put" | "copy" | "delete" | "patch" | "multipart_create" | "multipart_upload"
+                | "multipart_copy" | "multipart_complete" | "multipart_abort"
+                | "multipart_list" => 3,
                 _ => 4,
             };
             let mut failures = trace.backend_failures.lock().unwrap();
@@ -374,6 +377,7 @@ impl Diagnostics {
             executor: histogram(),
             post_reply: histogram(),
             events: Family::default(),
+            requests: Family::default(),
             attempts: Family::default(),
             retries: Family::default(),
             body_bytes: Counter::default(),
@@ -406,6 +410,34 @@ impl Diagnostics {
             self.debug("diagnostic_event", || serde_json::json!({"reason": reason}));
         }
     }
+    /// Bounded background diagnostics, including work outside a FUSE trace.
+    pub(crate) fn warning(&self, event: &'static str, details: impl FnOnce() -> serde_json::Value) {
+        let Some(inner) = &self.0 else {
+            return;
+        };
+        let level = DiagnosticLogLevel::Warn;
+        if inner.log_level < level {
+            return;
+        }
+        let Some(writer) = inner.log_writer(level) else {
+            return;
+        };
+        if !inner.admit_log(level) {
+            return;
+        }
+        let record = format!(
+            "{}{}\n",
+            inner.log_prefix(level),
+            serde_json::json!({
+                "event": event, "level": "warn", "process_id": std::process::id(),
+                "timestamp_unix_seconds": SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|duration| duration.as_secs_f64()),
+                "details": details(),
+            })
+        );
+        // One queue item per complete record, rather than a formatting write for
+        // each JSON token (which can exhaust the bounded queue mid-record).
+        let _ = writer.clone().write_all(record.as_bytes());
+    }
     pub(crate) fn background_error(&self, error: &crate::error::Error) {
         let reason = match error {
             crate::error::Error::Timeout(_) => "read_ahead_timeout",
@@ -428,6 +460,8 @@ impl Diagnostics {
             inner.attempts.get_or_create(&labels).inc();
             if retry {
                 inner.retries.get_or_create(&labels).inc();
+            } else {
+                inner.requests.get_or_create(&labels).inc();
             }
             self.debug("s3_attempt", || serde_json::json!({"operation": operation, "transport": transport, "retry": retry}));
         }
@@ -549,6 +583,11 @@ impl Diagnostics {
             "geesefs_diagnostic_events",
             "Conditions at their source, not a count of final failed requests",
             inner.events.clone(),
+        );
+        registry.register(
+            "geesefs_s3_requests",
+            "SDK executions and extension retry loops reaching their first transport attempt; excludes retries and presigning, not confirmed server receipts",
+            inner.requests.clone(),
         );
         registry.register(
             "geesefs_s3_attempts",
@@ -786,6 +825,9 @@ impl Trace {
                 Some(details()),
             );
         }
+    }
+    pub(crate) fn cache_warning(&self, reason: &'static str) {
+        self.log(DiagnosticLogLevel::Warn, "l2_read_fallback", 0, reason);
     }
     fn record(
         &self,

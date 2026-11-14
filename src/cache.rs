@@ -45,6 +45,9 @@ struct Span {
 struct State {
     entries: LruCache<Key, Block>,
     index: BTreeMap<Key, Span>,
+    // A conservative overlap bound, left wide after removal/replacement. It
+    // avoids walking the entire file prefix without hiding older long spans.
+    max_span_bytes: u64,
     weight: u64,
     loaned: usize,
     loans: BTreeSet<Key>,
@@ -162,6 +165,7 @@ impl ReadCache {
             state: Arc::new(Mutex::new(State {
                 entries: LruCache::sparse(NonZeroUsize::new(entry_limit.max(1)).unwrap()),
                 index: BTreeMap::new(),
+                max_span_bytes: 0,
                 weight: 0,
                 loaned: 0,
                 loans: BTreeSet::new(),
@@ -275,44 +279,63 @@ impl ReadCache {
         block: Block,
         mut evicted: impl FnMut(CapacityVictim),
     ) {
-        if block.as_slice().is_empty() {
-            return;
+        let mut block = Some(block);
+        while let Some(victim) = self.insert_step(inode, generation, offset, &mut block, true) {
+            evicted(victim);
+        }
+    }
+
+    /// Release the cache lock before handing one funded victim to its caller.
+    /// The incoming owner remains admitted across asynchronous demotion.
+    pub(crate) fn insert_step(
+        &self,
+        inode: u64,
+        generation: u64,
+        offset: u64,
+        block: &mut Option<Block>,
+        evict: bool,
+    ) -> Option<CapacityVictim> {
+        let incoming = block.as_ref().expect("pending cache insertion");
+        if incoming.as_slice().is_empty() {
+            block.take();
+            return None;
         }
         let key = (inode, generation, offset);
-        let length = block.as_slice().len();
+        let length = incoming.as_slice().len();
         let weight = length as u64;
-        loop {
-            let mut state = self.state.lock().unwrap();
-            if let Some(old) = state.entries.pop(&key) {
-                state.replacements += 1;
-                state.removed(key, &old);
-            }
-            if weight > self.capacity {
-                state.oversized += 1;
-                return;
-            }
-            if state.weight > self.capacity - weight
-                || state.entries.len() == state.entries.cap().get()
-            {
-                let victim = state
-                    .capacity_victim()
-                    .expect("capacity pressure owns an entry");
-                drop(state);
-                evicted(victim);
-                continue;
-            }
-            assert!(state.entries.push(key, block).is_none());
-            state.insertions += 1;
-            state.weight += weight;
-            state.index.insert(
-                key,
-                Span {
-                    length,
-                    consumed: 0,
-                },
-            );
-            return;
+        let mut state = self.state.lock().unwrap();
+        if let Some(old) = state.entries.pop(&key) {
+            state.replacements += 1;
+            state.removed(key, &old);
         }
+        if weight > self.capacity {
+            state.oversized += 1;
+            block.take();
+            return None;
+        }
+        if state.weight > self.capacity - weight || state.entries.len() == state.entries.cap().get()
+        {
+            if !evict {
+                block.take();
+                return None;
+            }
+            let victim = state
+                .capacity_victim()
+                .expect("capacity pressure owns an entry");
+            return Some(victim);
+        }
+        assert!(state.entries.push(key, block.take().unwrap()).is_none());
+        state.insertions += 1;
+        state.weight += weight;
+        state.max_span_bytes = state.max_span_bytes.max(weight);
+        state.index.insert(
+            key,
+            Span {
+                length,
+                consumed: 0,
+            },
+        );
+        None
     }
 
     /// A bounded eviction hint, not a pin: disjoint tail reads cannot advance an
@@ -457,9 +480,10 @@ impl ReadCache {
     /// Locate only the first missing interval without cloning or touching owners.
     pub(crate) fn gap(&self, inode: u64, generation: u64, range: Range<u64>) -> Option<Range<u64>> {
         let state = self.state.lock().unwrap();
+        let earliest = range.start.saturating_sub(state.max_span_bytes);
         let covered = state
             .index
-            .range((inode, generation, 0)..(inode, generation, range.end))
+            .range((inode, generation, earliest)..(inode, generation, range.end))
             .map(|(&(_, _, start), span)| start..start.saturating_add(span.length as u64));
         first_gap(range, covered)
     }
@@ -468,8 +492,51 @@ impl ReadCache {
         let mut state = self.state.lock().unwrap();
         state.entries.clear();
         state.index.clear();
+        state.max_span_bytes = 0;
         state.weight = 0;
         state.loaned = 0;
         state.loans.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReadCache;
+    use crate::budget::Budget;
+
+    #[test]
+    fn gap_preserves_an_earlier_long_overlap_behind_a_shorter_span() {
+        let budget = Budget::new(512).unwrap();
+        let cache = ReadCache::new(512);
+        for (start, length) in [(0, 128), (96, 8), (200, 16)] {
+            cache.insert(1, 1, start, budget.try_reserve(length).unwrap().zeroed());
+        }
+        assert_eq!(cache.gap(1, 1, 100..120), None);
+        assert_eq!(cache.gap(1, 1, 100..240), Some(128..200));
+        assert_eq!(cache.gap(1, 1, 128..240), Some(128..200));
+        assert_eq!(cache.gap(1, 1, 216..240), Some(216..240));
+        assert_eq!(cache.gap(1, 2, 100..240), Some(100..240));
+        assert_eq!(cache.gap(2, 1, 100..240), Some(100..240));
+    }
+
+    #[test]
+    fn gap_bound_survives_replacement_eviction_clear_and_offset_saturation() {
+        let budget = Budget::new(512).unwrap();
+        let cache = ReadCache::with_entry_limit(256, 2);
+        for (start, length) in [(0, 128), (96, 8), (0, 4)] {
+            cache.insert(1, 1, start, budget.try_reserve(length).unwrap().zeroed());
+        }
+        assert_eq!(cache.gap(1, 1, 100..200), Some(104..200));
+        cache.insert(1, 1, 200, budget.try_reserve(16).unwrap().zeroed());
+        assert_eq!(cache.gap(1, 1, 100..240), Some(100..200));
+        cache.clear();
+        cache.insert(1, 1, 0, budget.try_reserve(32).unwrap().zeroed());
+        cache.insert(1, 1, u64::MAX - 7, budget.try_reserve(8).unwrap().zeroed());
+        assert_eq!(cache.gap(1, 1, 0..32), None);
+        assert_eq!(cache.gap(1, 1, u64::MAX - 3..u64::MAX), None);
+        assert_eq!(
+            cache.gap(1, 1, u64::MAX - 10..u64::MAX),
+            Some(u64::MAX - 10..u64::MAX - 7)
+        );
     }
 }

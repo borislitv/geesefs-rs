@@ -647,10 +647,11 @@ async fn sliced_backing_is_released_and_stalled_spill_is_byte_and_job_bounded() 
         0,
         "only the exact admitted copy may cross the async boundary"
     );
-    for n in 1..4 {
+    let slots = cache.funding().spill_jobs;
+    for n in 1..slots {
         assert_eq!(
             cache.try_demote(
-                key(n * MAX_PAYLOAD_BYTES as u64, MAX_PAYLOAD_BYTES),
+                key((n * MAX_PAYLOAD_BYTES) as u64, MAX_PAYLOAD_BYTES),
                 block(&vec![n as u8; MAX_PAYLOAD_BYTES])
             ),
             Demotion::Admitted
@@ -658,13 +659,24 @@ async fn sliced_backing_is_released_and_stalled_spill_is_byte_and_job_bounded() 
     }
     assert_eq!(
         cache.try_demote(
-            key(4 * MAX_PAYLOAD_BYTES as u64, MAX_PAYLOAD_BYTES),
+            key((slots * MAX_PAYLOAD_BYTES) as u64, MAX_PAYLOAD_BYTES),
             block(&vec![9; MAX_PAYLOAD_BYTES])
         ),
         Demotion::Dropped
     );
-    assert_eq!(cache.stats().active_jobs, 4);
-    assert_eq!(cache.stats().copied_bytes, 4 * MAX_PAYLOAD_BYTES);
+    assert_eq!(cache.stats().active_jobs, slots);
+    assert_eq!(cache.stats().copied_bytes, slots * MAX_PAYLOAD_BYTES);
+    assert!(matches!(
+        cache.spill_admission(tokio::time::Instant::now()).await,
+        Err(disk_cache::SpillDrop::Timeout)
+    ));
+    {
+        use futures_util::FutureExt;
+        let waiting = cache.spill_admission(tokio::time::Instant::now() + DEADLINE);
+        assert!(waiting.now_or_never().is_none());
+    }
+    assert_eq!(cache.stats().copied_bytes, slots * MAX_PAYLOAD_BYTES);
+    assert_eq!(cache.stats().drops, 1);
     assert!(cache.drain(std::time::Duration::ZERO).await.is_err());
     gate.hold_writes.store(false, Ordering::SeqCst);
     gate.release.add_permits(16);
@@ -672,6 +684,21 @@ async fn sliced_backing_is_released_and_stalled_spill_is_byte_and_job_bounded() 
     assert_eq!(cache.stats().copied_bytes, 0);
     assert_eq!(cache.stats().active_jobs, 0);
     assert!(cache.stats().submission_bytes <= cache.funding().submission_bytes);
+    for n in 0..slots {
+        let output = Budget::new(MAX_PAYLOAD_BYTES).unwrap();
+        let read = cache
+            .read_block(
+                &key((n * MAX_PAYLOAD_BYTES) as u64, MAX_PAYLOAD_BYTES),
+                &output,
+            )
+            .await
+            .expect("every healthy accepted record must survive the bounded batch");
+        assert_eq!(read.as_slice(), vec![n as u8; MAX_PAYLOAD_BYTES]);
+    }
+    assert_eq!(
+        cache.stats().spill_drops.iter().sum::<u64>(),
+        cache.stats().drops
+    );
     cache.close(DEADLINE).await.unwrap();
 }
 

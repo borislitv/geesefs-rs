@@ -547,7 +547,7 @@ impl S3 {
             for (name, value) in signed.headers() {
                 request = request.header(name, value);
             }
-            self.diagnostics.attempt("write", "extension", false);
+            self.diagnostics.attempt("patch", "extension", false);
             let mut response = request
                 .body(bytes::Bytes::from_owner(body))
                 .send()

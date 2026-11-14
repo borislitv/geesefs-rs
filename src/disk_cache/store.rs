@@ -27,7 +27,7 @@ use std::{
     },
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU8, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -395,6 +395,53 @@ pub enum Demotion {
     Dropped,
 }
 
+#[derive(Clone, Copy, Debug)]
+#[repr(usize)]
+pub enum SpillDrop {
+    Jobs,
+    Timeout,
+    State,
+    Activity,
+    InvalidBlock,
+    Copy,
+    EngineNoSpace,
+    EngineError,
+    UnindexedAfterDrain,
+}
+impl SpillDrop {
+    pub const ALL: [Self; 9] = [
+        Self::Jobs,
+        Self::Timeout,
+        Self::State,
+        Self::Activity,
+        Self::InvalidBlock,
+        Self::Copy,
+        Self::EngineNoSpace,
+        Self::EngineError,
+        Self::UnindexedAfterDrain,
+    ];
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Jobs => "jobs",
+            Self::Timeout => "timeout",
+            Self::State => "state",
+            Self::Activity => "activity",
+            Self::InvalidBlock => "invalid_block",
+            Self::Copy => "copy",
+            Self::EngineNoSpace => "engine_no_space",
+            Self::EngineError => "engine_error",
+            Self::UnindexedAfterDrain => "unindexed_after_drain",
+        }
+    }
+    fn admission(reason: ReadFallback) -> Self {
+        match reason {
+            ReadFallback::Jobs => Self::Jobs,
+            ReadFallback::Activity => Self::Activity,
+            _ => Self::State,
+        }
+    }
+}
+
 /// Closed boundary vocabulary. Pipeline generation discards may follow an
 /// adapter hit; these are not all backend misses or mutually exclusive calls.
 #[derive(Clone, Copy, Debug)]
@@ -470,6 +517,7 @@ pub struct Stats {
     pub hits: u64,
     pub misses: u64,
     pub drops: u64,
+    pub spill_drops: [u64; SpillDrop::ALL.len()],
     pub errors: u64,
     pub managed_bytes: usize,
     pub io_read_bytes: u64,
@@ -498,6 +546,15 @@ pub struct Stats {
     pub opened_file_allocated_bytes: Option<u64>,
 }
 
+pub(crate) struct SpillDropEvent {
+    pub reason: SpillDrop,
+    pub total: u64,
+    pub active_jobs: usize,
+    pub copy_bytes: usize,
+    pub submission_bytes: usize,
+    pub index_entries: usize,
+}
+
 struct Inner {
     read_fallbacks: [AtomicU64; ReadFallback::ALL.len()],
     backend: Backend,
@@ -519,6 +576,8 @@ struct Inner {
     hits: AtomicU64,
     misses: AtomicU64,
     drops: AtomicU64,
+    spill_drops: [AtomicU64; SpillDrop::ALL.len()],
+    spill_observer: OnceLock<Arc<dyn Fn(SpillDropEvent) + Send + Sync>>,
     errors: AtomicU64,
     admitted_demotions: AtomicU64,
     engine_admitted_demotions: AtomicU64,
@@ -544,6 +603,17 @@ pub struct DiskCache(Arc<Handle>);
 struct Job {
     _permit: OwnedSemaphorePermit,
     _activity: OwnedRwLockReadGuard<()>,
+}
+
+/// Key-free admission: waiting never allocates a record identity or copy.
+pub struct SpillAdmission {
+    cache: DiskCache,
+    job: Job,
+}
+impl SpillAdmission {
+    pub fn demote(self, key: DiskKey, victim: Block) -> Demotion {
+        self.cache.submit_demote(key, victim, self.job)
+    }
 }
 
 struct Waiting<'a>(&'a AtomicU64);
@@ -618,6 +688,20 @@ impl ReadAdmission {
     }
 }
 impl Inner {
+    fn drop_spill(&self, reason: SpillDrop) {
+        let total = self.drops.fetch_add(1, Ordering::Relaxed) + 1;
+        self.spill_drops[reason as usize].fetch_add(1, Ordering::Relaxed);
+        if let Some(observer) = self.spill_observer.get() {
+            observer(SpillDropEvent {
+                reason,
+                total,
+                active_jobs: self.funding.spill_jobs - self.jobs.available_permits(),
+                copy_bytes: self.copies.used(),
+                submission_bytes: self.limits.bytes(),
+                index_entries: self.index.entries(),
+            });
+        }
+    }
     fn available(&self) -> std::result::Result<(), ReadFallback> {
         if self.status.state() != State::Ready {
             return Err(ReadFallback::State);
@@ -805,7 +889,7 @@ impl DiskCache {
         let limits = match limits {
             Some(limits) => limits,
             None => SubmissionLimits::new(
-                NonZeroUsize::new(funding.submission_bytes).unwrap(),
+                NonZeroUsize::new(funding.submission_bytes.min(POOL)).unwrap(),
                 NonZeroUsize::new(2 * JOBS + 4).unwrap(),
             )
             .map_err(engine)?,
@@ -867,6 +951,7 @@ impl DiskCache {
             .with_filter(|_: &DiskKey, _: &DiskValue| false)
             .build();
         let status = prepared.status();
+        let spill_jobs = funding.spill_jobs;
         let inner = Arc::new(Inner {
             read_fallbacks: std::array::from_fn(|_| AtomicU64::new(0)),
             backend,
@@ -876,7 +961,7 @@ impl DiskCache {
             copies: Budget::new(funding.copy_bytes)?,
             funding,
             _funding_owner: owner,
-            jobs: Arc::new(Semaphore::new(JOBS)),
+            jobs: Arc::new(Semaphore::new(spill_jobs)),
             read_jobs: Arc::new(Semaphore::new(JOBS)),
             queued_reads: AtomicU64::new(0),
             activity: Arc::new(RwLock::new(())),
@@ -889,6 +974,8 @@ impl DiskCache {
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             drops: AtomicU64::new(0),
+            spill_drops: std::array::from_fn(|_| AtomicU64::new(0)),
+            spill_observer: OnceLock::new(),
             errors: AtomicU64::new(0),
             admitted_demotions: AtomicU64::new(0),
             engine_admitted_demotions: AtomicU64::new(0),
@@ -917,13 +1004,15 @@ impl DiskCache {
         Stats {
             regions: i.recent.regions().snapshot(),
             active_read_jobs: JOBS - i.read_jobs.available_permits(),
-            active_spill_jobs: JOBS - i.jobs.available_permits(),
+            active_spill_jobs: i.funding.spill_jobs - i.jobs.available_permits(),
             queued_reads: i.queued_reads.load(Ordering::Relaxed),
             read_fallbacks: std::array::from_fn(|index| {
                 i.read_fallbacks[index].load(Ordering::Relaxed)
             }),
             state: i.status.state(),
-            active_jobs: 2 * JOBS - i.jobs.available_permits() - i.read_jobs.available_permits(),
+            active_jobs: JOBS + i.funding.spill_jobs
+                - i.jobs.available_permits()
+                - i.read_jobs.available_permits(),
             copied_bytes: i.copies.used(),
             submission_bytes: i.limits.bytes(),
             submission_items: i.limits.items(),
@@ -932,6 +1021,7 @@ impl DiskCache {
             hits: i.hits.load(Ordering::Relaxed),
             misses: i.misses.load(Ordering::Relaxed),
             drops: i.drops.load(Ordering::Relaxed),
+            spill_drops: std::array::from_fn(|index| i.spill_drops[index].load(Ordering::Relaxed)),
             errors: i.errors.load(Ordering::Relaxed),
             managed_bytes: i.funding.capacity,
             io_read_bytes: i.backend.statistics().disk_read_bytes() as u64,
@@ -955,35 +1045,72 @@ impl DiskCache {
     /// victim; loans are rejected. Only an admitted exact visible-range copy may
     /// cross the async boundary, never a clone of a larger sliced backing.
     pub fn try_demote(&self, key: DiskKey, victim: Block) -> Demotion {
+        let job = match self.inner().admit(false) {
+            Ok(job) => job,
+            Err(reason) => {
+                self.inner().drop_spill(SpillDrop::admission(reason));
+                return Demotion::Dropped;
+            }
+        };
+        self.submit_demote(key, victim, job)
+    }
+
+    pub(crate) fn dropped_spill(&self, reason: SpillDrop) {
+        self.inner().drop_spill(reason);
+    }
+
+    pub(crate) fn observe_spills(&self, observer: impl Fn(SpillDropEvent) + Send + Sync + 'static) {
+        let _ = self.inner().spill_observer.set(Arc::new(observer));
+    }
+
+    /// A required read may give a healthy writer a bounded chance to consume a
+    /// burst of victims. The deadline belongs to the entire reclamation sweep.
+    pub async fn spill_admission(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> std::result::Result<SpillAdmission, SpillDrop> {
+        let i = self.inner();
+        i.available().map_err(SpillDrop::admission)?;
+        let permit = tokio::time::timeout_at(deadline, i.jobs.clone().acquire_owned())
+            .await
+            .map_err(|_| SpillDrop::Timeout)?
+            .map_err(|_| SpillDrop::State)?;
+        Ok(SpillAdmission {
+            cache: self.clone(),
+            job: i.admitted(permit).map_err(SpillDrop::admission)?,
+        })
+    }
+
+    fn submit_demote(&self, key: DiskKey, victim: Block, job: Job) -> Demotion {
         let started = Instant::now();
         let i = self.inner();
         let outcome = (|| {
             if victim.is_loaned() || victim.as_slice().len() != key.covered_len() {
-                return None;
+                return Err(SpillDrop::InvalidBlock);
             }
-            let job = i.admit(false).ok()?;
             if i.backend.may_contains(&key) {
-                return Some(Demotion::IndexedHint);
+                return Ok(Demotion::IndexedHint);
             }
             let copy = i
                 .copies
                 .try_reserve(key.covered_len())
-                .ok()?
+                .map_err(|_| SpillDrop::Copy)?
                 .copy(victim.as_slice())
-                .ok()?;
+                .map_err(|_| SpillDrop::Copy)?;
             i.admitted_demotions.fetch_add(1, Ordering::Relaxed);
             let inner = i.clone();
             i.runtime.spawn(async move {
                 let _job = job;
-                let entry = inner.source.insert(key, DiskValue::Source(copy));
+                let entry = inner.source.insert(key.clone(), DiskValue::Source(copy));
                 let admitted = inner.backend.try_enqueue(entry.piece(), true);
                 drop(entry);
                 match admitted {
                     Err(error) => {
-                        inner.drops.fetch_add(1, Ordering::Relaxed);
                         if error.kind() == foyer::ErrorKind::NoSpace {
+                            inner.drop_spill(SpillDrop::EngineNoSpace);
                             inner.spill_no_space.fetch_add(1, Ordering::Relaxed);
                         } else {
+                            inner.drop_spill(SpillDrop::EngineError);
                             inner.spill_errors.fetch_add(1, Ordering::Relaxed);
                             inner.fail();
                         }
@@ -995,17 +1122,21 @@ impl DiskCache {
                         if inner.backend.wait_guarded().await.is_err() {
                             inner.spill_errors.fetch_add(1, Ordering::Relaxed);
                             inner.fail();
+                        } else if !inner.backend.may_contains(&key) {
+                            // A drain is not a publication receipt. Concurrent
+                            // eviction can also make a completed key absent.
+                            inner.drop_spill(SpillDrop::UnindexedAfterDrain);
                         }
                     }
                 }
                 inner.spill_operations.record(started);
             });
-            Some(Demotion::Admitted)
+            Ok(Demotion::Admitted)
         })();
         // victim is never captured by the spawned future.
         drop(victim);
-        outcome.unwrap_or_else(|| {
-            i.drops.fetch_add(1, Ordering::Relaxed);
+        outcome.unwrap_or_else(|reason| {
+            i.drop_spill(reason);
             Demotion::Dropped
         })
     }

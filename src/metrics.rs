@@ -25,11 +25,46 @@ use crate::{cache::CacheStats, filesystem::Filesystem};
 pub(crate) struct ReadMetrics {
     pub hits: Counter,
     pub misses: Counter,
-    pub hit_bytes: Counter,
-    pub miss_bytes: Counter,
+    pub overlay_reads: Counter,
+    pub source_bytes: [Counter; 4],
     pub fill_jobs: Counter,
     pub fill_errors: Counter,
     pub remote_bytes: Counter,
+}
+
+/// Requested bytes in one successful result, never its backing or prefetch span.
+#[derive(Default)]
+pub(crate) struct ReadBytes {
+    pub l1: u64,
+    pub l2: u64,
+    pub remote: u64,
+    pub overlay: u64,
+}
+
+impl ReadMetrics {
+    pub(crate) fn cache_hit(&self, length: usize) {
+        self.completed(ReadBytes {
+            l1: length as u64,
+            ..ReadBytes::default()
+        });
+    }
+
+    pub(crate) fn completed(&self, bytes: ReadBytes) {
+        let values = [bytes.l1, bytes.l2, bytes.remote, bytes.overlay];
+        if values.iter().all(|&value| value == 0) {
+            return;
+        }
+        if bytes.overlay > 0 {
+            self.overlay_reads.inc();
+        } else if bytes.remote > 0 {
+            self.misses.inc();
+        } else {
+            self.hits.inc();
+        }
+        for (counter, value) in self.source_bytes.iter().zip(values) {
+            counter.inc_by(value);
+        }
+    }
 }
 
 pub(crate) struct Snapshot {
@@ -202,26 +237,47 @@ fn independent_filesystem_metrics(registry: &mut Registry, snapshot: Snapshot) {
         "Configured byte admission by lane, not a process memory limit",
         limits,
     );
+    let sources = Family::<Vec<(&str, &str)>, Counter>::default();
+    for (source, metric) in ["l1", "l2", "s3", "overlay"]
+        .into_iter()
+        .zip(&snapshot.reads.source_bytes)
+    {
+        sources
+            .get_or_create(&vec![("source", source)])
+            .inc_by(metric.get());
+    }
+    registry.register(
+        "geesefs_read_delivered_bytes",
+        "Requested bytes in successful userspace results by delivery source; excludes prefetch, failed and cancelled results; overlay may include remote materialization",
+        sources,
+    );
+    counter(
+        registry,
+        "geesefs_read_cache_hit_bytes",
+        "Requested bytes served from L1 or validated L2 in successful results, including cached portions of mixed reads",
+        snapshot.reads.source_bytes[0].get() + snapshot.reads.source_bytes[1].get(),
+    );
+    counter(
+        registry,
+        "geesefs_read_cache_miss_bytes",
+        "Requested S3 bytes in successful clean read results; excludes prefetch and writer overlays",
+        snapshot.reads.source_bytes[2].get(),
+    );
     for (name, help, metric) in [
         (
             "geesefs_read_cache_hits",
-            "Nonempty caller reads served by the initial cache lookup",
+            "Successful nonempty reads served entirely from L1 or validated L2, including coalesced memory reuse",
             snapshot.reads.hits,
         ),
         (
             "geesefs_read_cache_misses",
-            "Nonempty caller reads missing initially; followers may reuse in-flight fills",
+            "Successful nonempty clean reads requiring any requested S3 bytes; mixed L2/S3 results count once",
             snapshot.reads.misses,
         ),
         (
-            "geesefs_read_cache_hit_bytes",
-            "Requested bytes served by an initial cache hit",
-            snapshot.reads.hit_bytes,
-        ),
-        (
-            "geesefs_read_cache_miss_bytes",
-            "Requested bytes missing initially, including overlapping followers",
-            snapshot.reads.miss_bytes,
+            "geesefs_read_overlay_reads",
+            "Successful nonempty writer-overlay results; excluded from clean cache hit/miss ratios",
+            snapshot.reads.overlay_reads,
         ),
         (
             "geesefs_read_fill_jobs",

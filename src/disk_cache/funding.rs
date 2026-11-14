@@ -21,6 +21,7 @@ pub struct Funding {
     pub fixed_bytes: usize,
     pub metadata_bytes: usize,
     pub copy_bytes: usize,
+    pub spill_jobs: usize,
     pub read_work_bytes: usize,
     pub submission_bytes: usize,
     pub required_bytes: usize,
@@ -52,6 +53,10 @@ impl Funding {
         let fixed_bytes = 2 * POOL + recovery_bytes + 1024 * 1024;
         let metadata_bytes = 384 * index_entries + 128 * recent_entries + 256 * regions;
         let copy_bytes = JOBS * MAX_PAYLOAD_BYTES;
+        // Concurrent encoded records, not raw payloads, must fit one flusher
+        // buffer. Keep the existing funding deduction and copy ceiling.
+        let spill_jobs =
+            JOBS.min(POOL / (RECORD_CAP + 2 * foyer::SubmissionLimits::METADATA_BYTES));
         // Each admitted read may own serialized buffer, decoded key/value, and
         // task bookkeeping simultaneously. Caller output is separately admitted.
         let read_work_bytes =
@@ -74,6 +79,7 @@ impl Funding {
             fixed_bytes,
             metadata_bytes,
             copy_bytes,
+            spill_jobs,
             read_work_bytes,
             submission_bytes,
             required_bytes,

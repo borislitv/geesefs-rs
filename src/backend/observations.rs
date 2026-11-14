@@ -27,16 +27,15 @@ fn operation(cfg: &ConfigBag) -> &'static str {
         Some("GetObject") => "get",
         Some("HeadObject" | "HeadBucket") => "head",
         Some("ListObjects" | "ListObjectsV2") => "list",
-        Some(
-            "PutObject"
-            | "CopyObject"
-            | "CreateMultipartUpload"
-            | "UploadPart"
-            | "UploadPartCopy"
-            | "CompleteMultipartUpload"
-            | "AbortMultipartUpload"
-            | "DeleteObject",
-        ) => "write",
+        Some("PutObject") => "put",
+        Some("CopyObject") => "copy",
+        Some("DeleteObject") => "delete",
+        Some("CreateMultipartUpload") => "multipart_create",
+        Some("UploadPart") => "multipart_upload",
+        Some("UploadPartCopy") => "multipart_copy",
+        Some("CompleteMultipartUpload") => "multipart_complete",
+        Some("AbortMultipartUpload") => "multipart_abort",
+        Some("ListMultipartUploads") => "multipart_list",
         _ => "other",
     }
 }

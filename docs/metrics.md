@@ -105,7 +105,7 @@ omitted, not fabricated zero occupancy or a successful Ready observation.
 | `geesefs_effective_l1_policy_bytes` | Remaining retention ceiling including revocable flush loans, not actual residency |
 | `geesefs_disk_cache_eligibility_decisions_total{reason}` | Sixteen fixed required-window decisions/observations; excludes optional touches/demotion. Contention can be followed by successful eligibility |
 | `geesefs_disk_cache_read_fallbacks_total{reason}` | Fourteen fixed admission/I/O/validation outcomes; not mutually exclusive S3 misses |
-| `geesefs_disk_cache_active_read_jobs` / `geesefs_disk_cache_active_spill_jobs` | Actual independently funded owners, at most four of each; includes work outliving its observer |
+| `geesefs_disk_cache_active_read_jobs` / `geesefs_disk_cache_active_spill_jobs` | Actual independently funded owners, at most four reads and three spills; includes work outliving its observer |
 | `geesefs_disk_cache_queued_reads` | Key-free FIFO waiters charged to their read windows |
 | `geesefs_disk_cache_admitted_demotions_total` / `geesefs_disk_cache_engine_admitted_demotions_total` | Admitted copy and accepted engine enqueue, respectively; neither is a durability acknowledgement |
 | `geesefs_disk_cache_read_operation_hits_total` / `geesefs_disk_cache_hits_total` | Worker-completed copies versus caller-delivered adapter results; a later generation check may still reject delivery |
@@ -121,6 +121,19 @@ omitted, not fabricated zero occupancy or a successful Ready observation.
 | `geesefs_disk_cache_opened_file_allocated_bytes` | Opening-time file allocation observation, not current physical occupancy |
 | `geesefs_disk_cache_io_read_bytes_total` / `geesefs_disk_cache_io_write_bytes_total` | Cumulative engine I/O, including record overhead; reset on restart, can exceed capacity after reuse |
 | `geesefs_disk_cache_dropped_total` / `geesefs_disk_cache_errors_total` | Best-effort demotion refusals versus adapter/storage/decode errors; drops are not capacity evictions |
+| `geesefs_disk_cache_spill_drops_total{reason}` | Closed demotion-refusal reasons; their sum equals `dropped_total` outside concurrent scrape skew |
+
+Spill reasons are `jobs`, `timeout`, `state`, `activity`, `invalid_block`, `copy`,
+`engine_no_space`, `engine_error`, and `unindexed_after_drain`. The last means the
+key was absent from the advisory index after a successful drain; concurrent
+eviction can also cause it. Index presence is not validated payload delivery.
+At diagnostic level `warn`, `l2_spill_drop` records the actual reason, cumulative
+drop count and current spill/copy/submission/index ownership. It uses the existing
+bounded nonblocking logger and warning rate limiter, including background errors
+outside a FUSE trace; no object keys or credentials are logged.
+Nonordinary `l2_read_fallback` warnings include timeout, integrity/identity,
+worker and backend failures with their request trace. Normal absent records stay
+debug-only; counters retain all reasons even when log records are rate-limited.
 
 Two different fullness limits must remain visible:
 
@@ -156,18 +169,34 @@ service time. Detailed debug runs are separate from performance measurements.
 
 | Metric | Meaning |
 | --- | --- |
-| `geesefs_read_cache_hits_total` / `geesefs_read_cache_misses_total` | Initial cache result for each nonempty admitted caller read |
-| `geesefs_read_cache_hit_bytes_total` / `geesefs_read_cache_miss_bytes_total` | EOF-clipped requested bytes in each initial result |
+| `geesefs_read_cache_hits_total` / `geesefs_read_cache_misses_total` | Successful nonempty clean results served entirely from L1/L2 versus results requiring any requested S3 bytes |
+| `geesefs_read_cache_hit_bytes_total` / `geesefs_read_cache_miss_bytes_total` | Requested bytes actually served from L1/L2 versus S3 in successful clean results; mixed results contribute to both byte counters |
+| `geesefs_read_delivered_bytes_total{source}` | Successful requested bytes by `l1`, `l2`, `s3`, or `overlay`; excludes alignment and read-ahead |
+| `geesefs_read_overlay_reads_total` | Successful nonempty writer-overlay materializations, excluded from clean hit/miss denominators |
 | `geesefs_read_fill_jobs_total` | Started read-window chunk jobs, including optional read-ahead and local overlays |
 | `geesefs_read_fill_errors_total` | Failed chunk jobs; includes optional read-ahead failures |
 | `geesefs_read_remote_bytes_total` | Validated clean-remote chunks consumed by read windows, including read-ahead |
 
-An initial miss remains a miss when it subsequently reuses another in-flight fill;
-internal rechecks are not additional requests. EOF/empty reads and requests rejected
-before cache admission are excluded. Remote bytes exclude overlays, SDK retry/wire
-overhead and metadata/list/write operations. Jobs are not HTTP attempts, completed
-HTTP responses or a universal S3 request counter. Cancellation is not fabricated
-as a backend error. Valid prefixes can remain counted after a late tail failure.
+The result boundary replaces the former initial-L1-lookup contract. A validated,
+current-generation L2 result is a hit. A follower served by an existing fill's
+published memory is an L1 hit, not another miss or GET. A mixed L2/S3 result counts
+once as a missed operation; its cached and source bytes remain separate. A pure
+L2 result contributes only its requested bytes even when a whole record or larger
+window was loaded. An adapter result rejected by generation validation is not a
+delivered cache hit.
+
+Only successful requested results enter these counters. Failed/cancelled reads,
+empty/EOF results and unrelated prefetch contribute no requested bytes. An early
+published reply is recorded once even if its caller-owned prefetch later fails or
+is cancelled. A read without early publication that returns an error contributes
+no requested bytes. FUSE reply and stage outcomes below retain failures and
+cancellations independently. Snapshots of independent counters are not atomic.
+
+`overlay` identifies writer materialization, which can combine local extents,
+zeros and remote data; it is not a claim that these bytes avoided S3. Remote-window
+bytes exclude overlays, SDK retry/wire overhead and metadata/list/write operations.
+They include read-ahead and may retain valid prefixes after a late tail failure.
+Jobs are not HTTP attempts, completed HTTP responses or a universal S3 request counter.
 
 These observe filesystem reads reaching userspace. Kernel page-cache and nginx
 cache hits can bypass this path; this is not an HTTP client hit ratio.
@@ -265,16 +294,39 @@ the histogram library uses an internal mutex, not lock-free recording.
 
 | Metric | Meaning |
 | --- | --- |
+| `geesefs_s3_requests_total{operation,transport}` | SDK executions/extension retry loops reaching their first transport attempt; excludes retries and presigning |
 | `geesefs_s3_attempts_total{operation,transport}` | SDK before-transmit or extension HTTP send attempts, including retries; excludes presigning |
 | `geesefs_s3_retries_total{operation,transport}` | Attempts after the first in an SDK execution or extension retry loop |
 | `geesefs_s3_body_bytes_total` | GET bytes yielded by the SDK, including later rejected/unused bytes; not wire bytes |
 
-Operations are `get`, `head`, `list`, `write`, `other`; transports are `sdk` and
-`extension` (currently extension LIST/PATCH). A transport attempt may fail before
+Operations are `get`, `head`, `list`, `put`, `copy`, `delete`, `patch`,
+`multipart_create`, `multipart_upload`, `multipart_copy`, `multipart_complete`,
+`multipart_abort`, `multipart_list`, and `other`; transports are `sdk` and
+`extension` (currently extension LIST/PATCH). `head` includes HeadBucket and
+HeadObject. Each LIST page is a separate execution; fallback between protocols
+can start another execution within one backend method. Requests plus retries
+equal attempts for each operation/transport over a complete execution; concurrent
+scrapes may straddle updates. A transport attempt may fail before
 sending a TCP byte and is not a confirmed S3 receipt. SDK metadata and body
 retries differ; the stream itself is not transparently replayed by these counters.
 Body bytes and validated `geesefs_read_remote_bytes_total` have different
 boundaries. Neither counts TLS framing, retransmissions or direct nginx S3 work.
+
+### Interpreting S3 offload
+
+L1 and L2 cache object contents; persistent records do not contain the live
+namespace or directory listings. Fresh metadata and directory pages are held in
+separate bounded memory caches under `stat-cache-ttl` and entry limits. Extended
+LIST metadata can satisfy file lookups without individual HEAD requests. Expiry,
+capacity eviction, changed paths and directory pagination can still require
+HEAD/LIST even when every requested payload byte is available in L2. A validated
+L2 hit does not issue an additional GET just to reauthorize downloaded contents.
+
+Evaluate requested L1/L2/S3 bytes separately from GET executions, attempts and
+body bytes. The same missing byte count can require different numbers of Range
+GETs; cached separators can split source ranges. Read-ahead changes transfer
+volume independently of requested bytes. Cache capacity or region occupancy alone
+does not establish useful working-set coverage or a particular request reduction.
 
 ### Bounded diagnostic records
 

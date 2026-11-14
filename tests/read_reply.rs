@@ -37,6 +37,37 @@ async fn finish(load: tokio::task::JoinHandle<Option<Error>>) -> Option<Error> {
 }
 
 #[tokio::test]
+async fn a_missing_prefix_does_not_refetch_its_already_cached_readahead_tail() {
+    let store = MemoryStore::new();
+    let expected = vec![0x39; 3 * MIB];
+    store.seed("file", &expected);
+    let mut config = MemoryStore::config(32);
+    config.read_ahead = 2048;
+    config.read_ahead_small = 2048;
+    config.read_ahead_large = 2048;
+    config.read_ahead_parallel = 2048;
+    let fs = Filesystem::new(config, store.clone()).unwrap();
+    let node = fs.lookup(1, "file").await.unwrap();
+    assert_eq!(
+        fs.read(node.ino, STEP as u64, STEP)
+            .await
+            .unwrap()
+            .as_slice(),
+        &expected[STEP..2 * STEP]
+    );
+    assert_eq!(
+        fs.read(node.ino, 0, STEP).await.unwrap().as_slice(),
+        &expected[..STEP]
+    );
+    assert_eq!(
+        *store.read_ranges.lock().unwrap(),
+        vec![(STEP as u64, 2 * MIB), (0, STEP)],
+        "a prefix miss must fetch only the missing prefix, not the cached following window"
+    );
+    fs.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn requested_reply_is_published_before_unrelated_prefetch_finishes() {
     let (store, fs, expected) = fixture();
     let node = fs.lookup(1, "file").await.unwrap();
@@ -136,10 +167,19 @@ async fn failure_after_successful_reply_remains_an_observable_prefetch_error() {
     tail.close();
     assert!(matches!(finish(load).await, Some(Error::Cancelled)));
     assert_eq!(block.as_slice(), &expected[..STEP]);
+    let text = geesefs_rs::metrics::render(&fs).unwrap();
+    assert!(
+        text.lines()
+            .any(|line| line == "geesefs_read_cache_misses_total 1")
+    );
+    assert!(
+        text.lines()
+            .any(|line| line == "geesefs_read_cache_miss_bytes_total 131072")
+    );
 }
 
 #[tokio::test]
-async fn a_follower_already_waiting_for_the_window_observes_its_completed_range() {
+async fn metrics_a_waiting_follower_counts_reuse_of_the_published_range() {
     use std::{future::Future, task::Poll};
     let (store, fs, expected) = fixture();
     let ino = fs.lookup(1, "file").await.unwrap().ino;
@@ -184,6 +224,23 @@ async fn a_follower_already_waiting_for_the_window_observes_its_completed_range(
     tail.add_permits(1);
     assert!(finish(load).await.is_none());
     assert_eq!(store.read_ranges.lock().unwrap().len(), 2);
+    let text = geesefs_rs::metrics::render(&fs).unwrap();
+    assert!(
+        text.lines()
+            .any(|line| line == "geesefs_read_cache_hits_total 1")
+    );
+    assert!(
+        text.lines()
+            .any(|line| line == "geesefs_read_cache_misses_total 1")
+    );
+    assert!(
+        text.lines()
+            .any(|line| line == "geesefs_read_cache_hit_bytes_total 4096")
+    );
+    assert!(
+        text.lines()
+            .any(|line| line == "geesefs_read_cache_miss_bytes_total 131072")
+    );
 }
 
 #[tokio::test]

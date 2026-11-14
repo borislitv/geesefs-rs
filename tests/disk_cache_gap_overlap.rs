@@ -102,6 +102,112 @@ async fn fixture_with_records(max_requests: usize, records: &[usize]) -> Fixture
     }
 }
 
+fn metric(text: &str, name: &str) -> u64 {
+    text.lines()
+        .find_map(|line| line.strip_prefix(&format!("{name} ")))
+        .unwrap_or_else(|| panic!("missing metric {name}"))
+        .parse()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn metrics_l2_hit_counts_requested_bytes_instead_of_the_prefetched_window() {
+    let f = fixture_with_records(1, &[0, 1, 2, 3, 4, 5, 6, 7]).await;
+    let block = tokio::time::timeout(DEADLINE, f.fs.read(f.ino, 11, 37))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(block.as_slice(), &f.bytes[11..48]);
+    let text = geesefs_rs::metrics::render(&f.fs).unwrap();
+    assert_eq!(f.store.read_calls.load(Ordering::Relaxed), 0);
+    f.fs.shutdown().await.unwrap();
+    assert_eq!(metric(&text, "geesefs_read_cache_hits_total"), 1);
+    assert_eq!(metric(&text, "geesefs_read_cache_misses_total"), 0);
+    assert_eq!(metric(&text, "geesefs_read_cache_hit_bytes_total"), 37);
+    assert_eq!(metric(&text, "geesefs_read_cache_miss_bytes_total"), 0);
+    assert_eq!(
+        metric(&text, "geesefs_read_delivered_bytes_total{source=\"l2\"}"),
+        37
+    );
+    assert_eq!(
+        metric(&text, "geesefs_read_delivered_bytes_total{source=\"s3\"}"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn metrics_mixed_l2_source_read_accounts_each_requested_byte_once() {
+    let f = fixture().await;
+    f.prefix.add_permits(1);
+    f.second.add_permits(1);
+    let block = tokio::time::timeout(DEADLINE, f.fs.read(f.ino, 0, MIB))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(block.as_slice(), f.bytes);
+    let text = geesefs_rs::metrics::render(&f.fs).unwrap();
+    assert_eq!(f.store.read_calls.load(Ordering::Relaxed), 2);
+    f.fs.shutdown().await.unwrap();
+    assert_eq!(metric(&text, "geesefs_read_cache_hits_total"), 0);
+    assert_eq!(metric(&text, "geesefs_read_cache_misses_total"), 1);
+    assert_eq!(
+        metric(&text, "geesefs_read_cache_hit_bytes_total"),
+        (4 * BLOCK) as u64
+    );
+    assert_eq!(
+        metric(&text, "geesefs_read_cache_miss_bytes_total"),
+        (4 * BLOCK) as u64
+    );
+    assert_eq!(
+        metric(&text, "geesefs_read_delivered_bytes_total{source=\"l2\"}"),
+        (4 * BLOCK) as u64
+    );
+    assert_eq!(
+        metric(&text, "geesefs_read_delivered_bytes_total{source=\"s3\"}"),
+        (4 * BLOCK) as u64
+    );
+}
+
+#[tokio::test]
+async fn metrics_published_l2_reply_stays_a_hit_after_unrelated_source_failure() {
+    let f = fixture_with_records(1, &[0, 1]).await;
+    let tail = Arc::new(tokio::sync::Semaphore::new(0));
+    *f.store.read_range_gates.lock().unwrap() =
+        [(((2 * BLOCK) as u64, 6 * BLOCK), tail.clone())].into();
+    let (ready, received) = tokio::sync::oneshot::channel();
+    let load = tokio::spawn({
+        let fs = f.fs.clone();
+        let ino = f.ino;
+        async move {
+            fs.read_reply(ino, 11, 37, move |result| {
+                let _ = ready.send(result);
+            })
+            .await
+        }
+    });
+    let block = tokio::time::timeout(DEADLINE, received)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(block.as_slice(), &f.bytes[11..48]);
+    assert!(!load.is_finished());
+    let before = geesefs_rs::metrics::render(&f.fs).unwrap();
+    tail.close();
+    assert!(matches!(
+        tokio::time::timeout(DEADLINE, load).await.unwrap().unwrap(),
+        Some(geesefs_rs::error::Error::Cancelled)
+    ));
+    let after = geesefs_rs::metrics::render(&f.fs).unwrap();
+    f.fs.shutdown().await.unwrap();
+    for text in [&before, &after] {
+        assert_eq!(metric(text, "geesefs_read_cache_hits_total"), 1);
+        assert_eq!(metric(text, "geesefs_read_cache_misses_total"), 0);
+        assert_eq!(metric(text, "geesefs_read_cache_hit_bytes_total"), 37);
+        assert_eq!(metric(text, "geesefs_read_cache_miss_bytes_total"), 0);
+    }
+}
+
 #[tokio::test]
 async fn pipeline_funding_is_limited_by_possible_tasks_not_the_configured_request_cap() {
     let f = fixture_with_records(4096, &[2, 3, 6, 7]).await;

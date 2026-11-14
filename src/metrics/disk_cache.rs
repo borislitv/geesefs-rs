@@ -127,6 +127,15 @@ fn adapter(registry: &mut Registry, stats: Option<&Stats>) {
     registry.register("geesefs_disk_cache_read_fallbacks",
         "Closed read-boundary reasons; generation discards may follow adapter hits and worker outcomes may finish after caller timeout; not mutually exclusive backend misses",
         fallbacks);
+    let drops = Family::<Vec<(&str, &str)>, Counter>::default();
+    for reason in crate::disk_cache::SpillDrop::ALL {
+        drops
+            .get_or_create(&vec![("reason", reason.label())])
+            .inc_by(stats.map_or(0, |stats| stats.spill_drops[reason as usize]));
+    }
+    registry.register("geesefs_disk_cache_spill_drops",
+        "Demotion refusals by closed reason; their sum equals dropped_total, not capacity evictions or durable-write failures",
+        drops);
     for (name, help, value) in [
         (
             "geesefs_disk_cache_active_read_jobs",

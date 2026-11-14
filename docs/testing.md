@@ -5,6 +5,58 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Optional-tail lookup work — 2026-11-14
+
+The cache's crate-visible gap API tests preserve an earlier long overlap behind a
+shorter span, inode/generation isolation, replacement, eviction, clear and saturated
+offsets. Invalid overlap-bound mutations make both tests fail; restored source
+passes. Existing `read_reply` missing-prefix and `read_refill` behavior checks must
+continue to preserve bytes and avoid fetching an already cached optional tail.
+
+Ignored evidence also contains a short public `Filesystem::read` work-count probe.
+Only its isolated source copy adds call/iterator counters: full-window and
+EOF-clipped requested reads perform no optional lookup, while a useful separator
+lookup does not traverse the distant retained prefix. Exact source/delta receipts
+preserve the assertion failures before correction and passing checks afterward.
+No instrumentation is compiled into the shipped package. Counted visits are not
+wall time, a production SLO or whole-filesystem performance acceptance.
+
+```bash
+timeout 60s cargo test --offline --locked --lib cache::tests::gap_
+timeout 120s cargo test --offline --locked --test read_reply --test read_refill --test cache_index
+```
+
+## Complete L2 eviction and requested metrics — 2026-11-13
+
+The single-pass `disk_cache_pressure` regression reads one selected 2-MiB window,
+applies ordinary byte pressure and reopens the same media with empty L1. Every
+record must return the independently seeded bytes without another source GET;
+per-record drains or repeated warming are not prerequisites. The gated adapter
+test separately checks stalled-worker ownership, timeout/cancellation and survival
+of every accepted record in a healthy encoded batch. Original assertion failures
+and source hashes remain in ignored evidence.
+
+`read_reply` also reproduces an aligned missing prefix followed by an already
+cached shifted read-ahead window. Its source-range oracle requires only the
+missing prefix, rather than a second overlapping full-window GET.
+
+The opt-in `disk_cache_serving` fixture uses disposable Linux FUSE, localhost S3
+with the actual SDK, persistent media and `rsync --checksum`. It checks full bytes,
+nonduplicated cold source requests, complete L2 reuse after remount, one required
+generation HEAD, no warm GET/HEAD/LIST, and metric conservation against actual HTTP
+requests. Two userspace passes deliver 4 MiB from L1+L2 while the first promotion
+consumes 2 MiB of validated L2 pipeline; those scopes must not be conflated.
+This small fixture is not full-inventory, traversal or performance acceptance.
+Cold GET ranges must cover each object exactly once without overlap or holes;
+their count may vary with a shifted optional refill. A separate public read-reply
+regression exercises free byte admission with a full L1 entry cap and verifies
+that optional population preserves resident records without acquiring spill slots.
+
+```bash
+timeout 180s cargo test --offline --locked --test disk_cache_pressure --test disk_cache --test disk_cache_metrics --test disk_cache_gap_overlap --test read_reply --test backend_contract --test metrics
+timeout 60s cargo test --offline --locked --test disk_cache_serving -- --ignored --nocapture
+```
+
 ## Metadata backing and live xattrs — 2026-11-13
 
 Six `fsync_xattrs` cases preserve uppercase/binary/ASCII values through same-inode

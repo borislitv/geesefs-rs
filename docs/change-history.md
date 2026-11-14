@@ -5,6 +5,18 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-14: prepare the authorized 0.1.14 delivery
+
+Release the reviewed complete-directory absence correction as a patch without
+changing dependencies, cache budgets or freshness policy. The independent focused
+post-fix review found no new confirmed defect in that correction; the previously
+reproduced concurrency and amplification findings remain open. The operator now
+prioritizes the full release and the existing scoped reader update, followed by
+filesystem-backed routing of its entire mirrors HTTP prefix. Disposable native
+checks, exact-source build provenance and guarded handoff verification are separate
+from broader compatibility and performance acceptance. Dashboard redesign follows
+the code/routing delivery.
+
 ## 2026-11-14: reuse complete metadata coverage and distinguish source reduction
 
 A complete fresh flat listing was retained for READDIR but ignored by LOOKUP.

@@ -703,23 +703,14 @@ async fn sliced_backing_is_released_and_stalled_spill_is_byte_and_job_bounded() 
 }
 
 #[tokio::test]
-async fn loaned_backing_is_discarded_not_queued_or_copied() {
+async fn mismatched_visible_coverage_is_discarded_not_queued_or_copied() {
     let dir = support::directory();
     let resources = Budget::new(32 * MIB).unwrap();
     let cache = open(dir.path(), &resources).await;
     let original_owner = Budget::new(100).unwrap();
-    let loans = Budget::new(100).unwrap();
-    let mut victim = block(b"abc").with_owner(original_owner.try_reserve(3).unwrap());
-    assert!(victim.try_loan(&loans));
+    let victim = block(b"abcd").with_owner(original_owner.try_reserve(4).unwrap());
     assert_eq!(cache.try_demote(key(0, 3), victim), Demotion::Dropped);
-    assert_eq!(
-        (
-            loans.used(),
-            original_owner.used(),
-            cache.stats().copied_bytes
-        ),
-        (0, 0, 0)
-    );
+    assert_eq!((original_owner.used(), cache.stats().copied_bytes), (0, 0));
     cache.close(DEADLINE).await.unwrap();
 }
 

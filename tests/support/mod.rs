@@ -136,6 +136,14 @@ impl MemoryStore {
     pub fn filesystem(self: &Arc<Self>, memory: usize) -> Arc<Filesystem> {
         Filesystem::new(Self::config(memory), self.clone()).unwrap()
     }
+    /// Read-ahead tests retain bytes in real Foyer media, never a hidden test RAM cache.
+    pub async fn disk_filesystem(
+        self: &Arc<Self>,
+        config: Config,
+    ) -> (Arc<Filesystem>, tempfile::TempDir) {
+        *self.cache_namespace.lock().unwrap() = Some([0x73; 32]);
+        disk_filesystem(config, self.clone()).await
+    }
     pub fn pause_put(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
         let (entered, seen) = oneshot::channel();
         let (release, wait) = oneshot::channel();
@@ -232,6 +240,41 @@ impl MemoryStore {
             .map(|object| object.bytes.clone());
         bytes.unwrap_or_else(|| panic!("backend object {key:?} is missing"))
     }
+}
+
+pub async fn disk_filesystem(
+    mut config: Config,
+    store: Arc<dyn Store>,
+) -> (Arc<Filesystem>, tempfile::TempDir) {
+    use geesefs_rs::disk_cache::{DiskCache, PreparedDiskCache};
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let mount = directory.path().join("mount");
+    std::fs::create_dir(&cache).unwrap();
+    std::fs::create_dir(&mount).unwrap();
+    std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700)).unwrap();
+    config.mountpoint = mount;
+    config.disk_cache_dir = Some(cache.clone());
+    config.disk_cache_max_size = Some(128 * 1024 * 1024);
+    config.disk_cache_regex = Some(".*".parse().unwrap());
+    // These fixtures qualify active read/reply behavior with a Ready tier.
+    // Fresh lazy startup has its own public-interface regression tests.
+    let resources = Budget::new(32 * 1024 * 1024).unwrap();
+    let disk = DiskCache::open(
+        PreparedDiskCache::prepare(&cache, config.disk_cache_max_size.unwrap()).unwrap(),
+        &resources,
+    )
+    .await
+    .unwrap();
+    disk.close(std::time::Duration::from_secs(10))
+        .await
+        .unwrap();
+    drop(disk);
+    let prepared = PreparedDiskCache::prepare(&cache, config.disk_cache_max_size.unwrap()).unwrap();
+    let fs = Filesystem::new(config, store).unwrap();
+    fs.attach_disk_cache(prepared).await.unwrap();
+    (fs, directory)
 }
 
 #[async_trait::async_trait]

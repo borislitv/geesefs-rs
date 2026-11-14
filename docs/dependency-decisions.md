@@ -327,6 +327,36 @@ owned flush gate, conditional reads and private-receipt recovery contract.
 
 ## Selected mechanisms
 
+### Removal of retained application payload cache — 2026-11-14
+
+Reuse the existing Apache-2.0 Foyer 0.22.6 public fork at
+[`d60dd0462c1de1e0853590791371208b659c90bf`](https://github.com/borislitv/foyer/tree/d60dd0462c1de1e0853590791371208b659c90bf)
+for persistent indexing, CLOCK/region eviction, recovery, record I/O, serialization
+and integrity. Its `FileDeviceBuilder` defaults to buffered I/O, and the selected
+`Store` defaults to Psync; backing-file page cache already participates. Retain
+the supported passive hybrid factory, reject-all `Piece` source and guarded
+`Store::{load,try_enqueue,wait_guarded}` APIs. A zero memory capacity is not a
+hard allocation bound or a no-retention API. Do not replace the storage engine or
+disable its integrity checks to remove the application's `ReadCache`.
+
+The exact-pin high-level hybrid writer uses legacy `enqueue`, which is forbidden
+with guarded submission limits. Memory `get_or_fetch` deduplicates exact keys,
+spawns its producer independently of caller cancellation, and only publishes its
+result at producer completion (`foyer-memory/src/raw.rs:1082-1105`). It cannot
+replace overlapping-range coordination while preserving early requested replies,
+caller-owned optional tails and cancellation. Keep the existing small per-inode
+active-range coordinator, using Tokio watch and charged immutable `Block` owners
+only until the active producer and its subscribed consumers finish. This is
+transient request state, without an idle LRU, eviction policy or cross-request
+retained payload index. Metadata and dirty writer ownership remain independent.
+
+Populate Foyer from validated clean source fills, rather than RAM capacity
+victims. Preserve its bounded copy/queue/read funding and optional-tier fallback.
+This changes cache admission, not S3 writeback durability. Fresh inventory startup
+must follow the first eligible fill. No latency, RSS or whole-cgroup improvement
+is implied without measurements; kernel file pages and client memory remain
+separate from daemon RSS.
+
 | Concern | Selection and reason |
 | --- | --- |
 | FUSE | [fuser 0.18.0](https://docs.rs/fuser/0.18.0/fuser/) (MIT): protocol, callbacks and replies; no custom syscall/protocol stack. |

@@ -5,6 +5,57 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Active reads and persistent fill population — 2026-11-14
+
+The retained application's payload cache has been removed. Its component-index,
+loan and cache-hit-refill suites were deleted with those mechanisms. Obsolete
+per-policy cases and duplicated failed-read metric checks were removed rather
+than converted into assertions of constant zero. Dated verification descriptions
+below remain historical evidence, not a claim that deleted APIs still exist.
+
+Current behavioral coverage includes:
+
+- `ram_cache_removed`: zero retained clean payload after reply release; exact
+  required-only GETs without L2; first validated fill starts/populates fresh L2;
+  independent rereads execute real Foyer I/O; active overlapping readers share work.
+- `read_windows`: bounded persistent read-ahead, adaptive sequential history,
+  disjoint/overlapping progress, cancellation cleanup and FIFO output admission.
+  A reproduced follower/older-large-reader cycle fails by timeout before the
+  output-admission correction and completes afterwards with independently checked bytes.
+- `read_reply`, `read_views`, `read_stream_history`, `backend_contract`: early
+  complete-prefix publication, borrowed backing/composition, checksums, If-Match,
+  failed/cancelled tails, local generation changes and independent open histories.
+- `disk_cache_reads`, `disk_cache_gap_overlap`, `disk_cache_lazy`,
+  `disk_cache_pressure`: real persistent records/recovery, exact missing source
+  ranges, namespace/generation validation, deferred startup and writer/fsync progress.
+- `metrics`, `disk_cache_metrics`, `fuse_deadline_review`: successful requested
+  byte attribution, absence of removed observations, scrape purity and actual
+  request ownership after early reply/deadline.
+- Opt-in `disk_cache_serving`, `fuse_admission`, `fuse_directory` and
+  `scripts/metrics_smoke.py`: real SDK/FUSE/rsync reuse, post-reply slot ownership,
+  mounted metadata/writer behavior and the complete HTTP exporter. The metrics
+  fixture reads independent source results without L2 and checks the default
+  executable allocator; it does not expect deleted retained-cache hits.
+
+Read-ahead fixtures attach real Foyer media instead of introducing a hidden RAM
+test cache. Explicit drain barriers establish persistent publication where required;
+cancelled optional population is not promised durable. The no-L2 fixtures remain
+separate. Byte-budget assertions distinguish fixed adapter funding, external
+published replies and active I/O from retained decoded payload.
+
+```bash
+timeout --kill-after=10s 600s cargo test --offline --locked --all-features --all-targets --no-fail-fast
+timeout --kill-after=10s 180s python3 -m unittest discover -s bench -p 'test_*.py'
+timeout --kill-after=10s 180s cargo clippy --offline --locked --all-features --all-targets -- -D warnings
+```
+
+These gates require meaningful semantic-fault sensitivity, disposable native
+FUSE/S3/rsync checks and independent WOOF correctness/architecture review before
+delivery. They do not establish performance superiority, full compatibility or
+inventory turnover. Benchmark manifests no longer accept the removed `l1_hot`
+state or expose nonexistent retention/loan metrics; old receipts retain their
+original schema and scope.
+
 ## Complete metadata coverage — 2026-11-14
 
 `metadata_coverage` exercises public lookup/list/read/write behavior and backend
@@ -1094,12 +1145,10 @@ faults in each boundary trigger the intended assertions and are restored before
 the passing suite. Native 8,192-name traversal requires 65 bounded LIST calls,
 including EOF, without larger directory buffers or inaccurate file types.
 
-Key read regressions live in `tests/read_windows.rs`, `read_reply.rs`,
-`read_refill.rs`, `read_stream_history.rs`, `cache_loans.rs`, `receive_ownership.rs` and
-`backend_contract.rs`. Keep FIFO progress, full backing charges, If-Match,
-generation, checksum, cancellation and caller-owned task lifetimes intact.
-The loan tests verify cache reuse without a higher total, owned reply isolation,
-writer/multipart progress, concurrent uploads, cancellation and failed-fsync retry.
+At that historical checkpoint, read/refill/cache-loan tests covered the former
+retained hierarchy. Current suites are listed at the beginning of this document.
+Keep FIFO progress, full backing charges, If-Match, generation, checksum,
+cancellation, writer/multipart progress and caller-owned lifetimes intact.
 Five deliberate semantic faults trigger the intended assertions, including the
 history-reset regression after explicit independent cache pressure. These checks
 are not a whole-repository mutation or coverage/CRAP result.

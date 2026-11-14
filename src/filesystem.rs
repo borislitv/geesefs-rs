@@ -26,7 +26,7 @@ use futures_util::{
     future::{BoxFuture, Either, Shared, ready},
     stream::FuturesUnordered,
 };
-use tokio::sync::{Notify, RwLock, Semaphore};
+use tokio::sync::Semaphore;
 
 pub struct Filesystem {
     pub config: Arc<Config>,
@@ -37,14 +37,11 @@ pub struct Filesystem {
     pub ingress: Budget,
     metadata: crate::metadata_budget::MetadataBudget,
     data: Budget,
-    cache: crate::cache::ReadCache,
     disk: Arc<Mutex<DiskTier>>,
     disk_funding_bytes: usize,
     disk_read_bytes: std::sync::atomic::AtomicU64,
     disk_decisions: Arc<[std::sync::atomic::AtomicU64; 16]>,
-    cache_published: Notify,
     flush_lane: Budget,
-    flush_activity: Arc<RwLock<()>>,
     flushers: Arc<Semaphore>,
     upload_admission: write::UploadAdmission,
     metadata_slots: Arc<Semaphore>,
@@ -381,18 +378,13 @@ impl Drop for OpenFile {
     }
 }
 
-/// Effective owner budgets, not RSS or allocator measurements. The cache shares
-/// the data lane and can borrow revocable, idle flush capacity for clean owners.
+/// Effective owner budgets, not RSS or allocator measurements. Clean payload
+/// lives only in active reads and their replies; the flush lane is writer-only.
 #[derive(Debug, serde::Serialize)]
 pub struct EffectiveBudgets {
     pub payload_limit_bytes: usize,
     pub data_shared_bytes: usize,
     pub disk_cache_funding_bytes: usize,
-    /// Upper bound including revocable idle flush loans. With Ready L2,
-    /// selected victims demote before loans, so selected residency may exclude
-    /// that lane even though this shared policy upper bound is unchanged.
-    pub read_cache_policy_bytes: usize,
-    pub read_cache_loaned_bytes: usize,
     pub ingress_bytes: usize,
     pub flush_bytes: usize,
     pub data_used_bytes: usize,
@@ -408,7 +400,6 @@ pub struct EffectiveBudgets {
     pub max_read_tasks_per_window: usize,
     pub max_request_tasks: usize,
     pub max_flush_operations: usize,
-    pub cache_entry_limit: u64,
     pub single_part_limit_bytes: u64,
     pub max_object_bytes: u64,
     pub negative_entries_per_directory: usize,
@@ -468,11 +459,9 @@ impl Filesystem {
                 ns.capacity_failures,
             )
         });
-        let cache = self.cache.try_stats();
         crate::metrics::Snapshot {
             namespace,
             kernel_lookup_entries: self.kernel_lookup_entries.load(Ordering::Relaxed),
-            cache,
             entry_limit: self.config.entry_limit,
             lanes: [
                 ("data", self.data.used(), self.data.limit()),
@@ -510,9 +499,6 @@ impl Filesystem {
             payload_limit_bytes: self.ingress.limit() + self.data.limit() + self.flush_lane.limit(),
             data_shared_bytes: self.data.limit(),
             disk_cache_funding_bytes: self.disk_funding_bytes,
-            read_cache_policy_bytes: self.data.limit() + self.flush_lane.limit()
-                - self.disk_funding_bytes,
-            read_cache_loaned_bytes: self.cache.loaned_bytes(),
             ingress_bytes: self.ingress.limit(),
             flush_bytes: self.flush_lane.limit(),
             data_used_bytes: self.data.used(),
@@ -534,7 +520,6 @@ impl Filesystem {
             max_read_tasks_per_window: self.config.max_requests,
             max_request_tasks: self.config.max_requests,
             max_flush_operations: self.config.max_flushers,
-            cache_entry_limit: self.config.entry_limit,
             single_part_limit_bytes: self.config.single_part.max(5) * 1024 * 1024,
             max_object_bytes: self.config.part_sizes.max_size(),
             negative_entries_per_directory: self.config.negative_lookup_cache_size,
@@ -575,7 +560,7 @@ impl Filesystem {
         self.disk_read_bytes.load(Ordering::Relaxed)
     }
 
-    /// Configured deduction from L1, including during recovery/bypass. Actual
+    /// Configured deduction from the data lane, including during recovery/bypass. Actual
     /// ownership is also visible in the shared data lane's used-byte counter.
     pub fn disk_cache_funding(&self) -> Option<crate::disk_cache::Funding> {
         if self.disk_funding_bytes == 0 {
@@ -690,7 +675,7 @@ impl Filesystem {
         startup
     }
 
-    fn start_disk_for_capacity(&self, node: &Inode, generation: u64) {
+    fn start_disk_for_fill(&self, node: &Inode, generation: u64) {
         let deferred = self.disk.lock().unwrap().deferred.is_some();
         if !deferred || !self.disk_eligible(node, generation) {
             return;
@@ -866,8 +851,7 @@ impl Filesystem {
         if self.is_closing() {
             return Err(read::DiskDecision::Closing);
         }
-        // Optional work never waits for namespace/inode ownership. In particular
-        // capacity eviction cannot hold up a FIFO reader or a writer's loan.
+        // Optional population never waits for namespace/inode ownership.
         let ns = self
             .namespace
             .try_lock()
@@ -944,31 +928,33 @@ impl Filesystem {
         Ok(())
     }
 
-    async fn demote_capacity(
+    async fn populate_disk(
         &self,
-        victim: crate::cache::CapacityVictim,
-        deadline: Option<tokio::time::Instant>,
+        node: &Inode,
+        generation: u64,
+        offset: u64,
+        block: &Block,
+        deadline: tokio::time::Instant,
     ) {
-        if victim.block.is_loaned() {
+        if block.is_disk_origin() || !self.disk_eligible(node, generation) {
             return;
         }
-        let Ok(node) = self.node(victim.inode) else {
+        self.start_disk_for_fill(node, generation);
+        let startup = self.disk.lock().unwrap().startup.clone();
+        if let Some(startup) = startup
+            && !matches!(tokio::time::timeout_at(deadline, startup).await, Ok(Ok(())))
+        {
             return;
-        };
-        self.start_disk_for_capacity(&node, victim.generation);
-        let Some(disk) = self.disk_read(&node, victim.generation) else {
+        }
+        let Some(disk) = self.disk_read(node, generation) else {
             return;
         };
         let mut relative = 0;
-        while relative < victim.block.as_slice().len() {
-            let at = victim.offset + relative as u64;
-            // A waiter retains only the already-funded victim, not a new key or
-            // copy. Revalidate inode/generation after this bounded wait.
-            let slot = if let Some(deadline) = deadline {
-                Some(disk.cache.spill_admission(deadline).await)
-            } else {
-                None
-            };
+        while relative < block.as_slice().len() {
+            let at = offset + relative as u64;
+            // Best-effort population uses existing guarded Foyer admission.
+            // Revalidate identity after waiting; never enqueue dirty/stale bytes.
+            let slot = disk.cache.spill_admission(deadline).await;
             let key = {
                 let Ok(state) = node.state.try_lock() else {
                     return;
@@ -976,7 +962,7 @@ impl Filesystem {
                 if state.deleted
                     || state.version != state.durable
                     || state.rename_target.is_some()
-                    || read::generation(state.version, state.remote.as_ref()) != victim.generation
+                    || read::generation(state.version, state.remote.as_ref()) != generation
                 {
                     return;
                 }
@@ -984,7 +970,7 @@ impl Filesystem {
                     return;
                 };
                 let amount = (read::block_end(at, state.size).saturating_sub(at) as usize)
-                    .min(victim.block.as_slice().len() - relative);
+                    .min(block.as_slice().len() - relative);
                 crate::disk_cache::DiskKey::new(
                     &disk.namespace,
                     state.key.as_bytes(),
@@ -1000,87 +986,19 @@ impl Filesystem {
             };
             let end = relative + key.covered_len();
             // No cache/inode/namespace lock and no await while copying. Adapter
-            // owns only its admitted visible copy, never this full L1 backing.
-            let block = victim.block.slice(relative..end);
+            // owns only its admitted visible copy, never this full source backing.
+            let part = block.slice(relative..end);
             match slot {
-                Some(Ok(slot)) => slot.demote(key, block),
-                Some(Err(reason)) => {
+                Ok(slot) => slot.demote(key, part),
+                Err(reason) => {
                     disk.cache.dropped_spill(reason);
                     crate::disk_cache::Demotion::Dropped
                 }
-                None => disk.cache.try_demote(key, block),
             };
             relative = end;
         }
     }
 
-    async fn evict_cache(&self, deadline: Option<tokio::time::Instant>) -> bool {
-        let Some(victim) = self.cache.capacity_victim() else {
-            return false;
-        };
-        self.demote_capacity(victim, deadline).await;
-        true
-    }
-
-    fn touch_disk_hit(&self, node: &Inode, generation: u64, offset: u64, length: usize) {
-        let Some(disk) = self.disk_read(node, generation) else {
-            return;
-        };
-        let mut next = offset;
-        while next < offset.saturating_add(length as u64) {
-            let Some((start, len)) = self.cache.span_at(node.ino, generation, next) else {
-                break;
-            };
-            let block_start = next / read::READ_BLOCK_BYTES as u64 * read::READ_BLOCK_BYTES as u64;
-            let at = block_start.max(start);
-            let (full, fragment) = {
-                let Ok(state) = node.state.try_lock() else {
-                    return;
-                };
-                let Some(head) = &state.remote else {
-                    return;
-                };
-                if read::generation(state.version, state.remote.as_ref()) != generation {
-                    return;
-                }
-                let end = read::block_end(at, state.size).min(start.saturating_add(len as u64));
-                let fragment = crate::disk_cache::DiskKey::new(
-                    &disk.namespace,
-                    state.key.as_bytes(),
-                    head.etag.as_bytes(),
-                    state.size,
-                    at,
-                    (end - at) as usize,
-                )
-                .ok();
-                let full_end = read::block_end(block_start, state.size);
-                let full = (at != block_start || end != full_end)
-                    .then(|| {
-                        crate::disk_cache::DiskKey::new(
-                            &disk.namespace,
-                            state.key.as_bytes(),
-                            head.etag.as_bytes(),
-                            state.size,
-                            block_start,
-                            (full_end - block_start) as usize,
-                        )
-                        .ok()
-                    })
-                    .flatten();
-                (full, fragment)
-            };
-            let Some(key) = fragment else {
-                return;
-            };
-            next = key.offset() + key.covered_len() as u64;
-            if !full
-                .as_ref()
-                .is_some_and(|full| disk.cache.touch_validated(full))
-            {
-                disk.cache.touch_validated(&key);
-            }
-        }
-    }
     pub(crate) fn charge_metadata(
         &self,
         bytes: usize,
@@ -1227,13 +1145,7 @@ impl Filesystem {
             disk_decisions: Arc::new(std::array::from_fn(|_| {
                 std::sync::atomic::AtomicU64::new(0)
             })),
-            cache: crate::cache::ReadCache::with_entry_limit(
-                (data_bytes + flush_bytes - disk_funding_bytes) as u64,
-                config.entry_limit as usize,
-            ),
-            cache_published: Notify::new(),
             flush_lane: Budget::new(flush_bytes)?,
-            flush_activity: Arc::new(RwLock::new(())),
             flushers: Arc::new(Semaphore::new(config.max_flushers)),
             upload_admission: write::UploadAdmission::new(&config),
             metadata_slots: Arc::new(Semaphore::new(config.max_requests)),
@@ -2096,152 +2008,10 @@ impl Filesystem {
             .read_inner(ino, offset, length, borrow_reply, pattern, &mut ready)
             .await;
         if let Some(ready) = ready {
-            let cached_length = result
-                .as_ref()
-                .ok()
-                .and_then(Option::as_ref)
-                .map_or(0, |block| block.as_slice().len());
             ready(result.map(|block| block.expect("unpublished read owns its result")));
-            if cached_length == 0 {
-                None
-            } else {
-                self.refill_after_hit(ino, offset + cached_length as u64, pattern)
-                    .await
-                    .err()
-            }
+            None
         } else {
             result.err()
-        }
-    }
-
-    /// Keep optional refill in the same admitted, cancellable reply future. Ready
-    /// bytes have already been published and no reply owner is held across admission.
-    async fn refill_after_hit(
-        &self,
-        ino: u64,
-        consumed: u64,
-        pattern: Option<&Mutex<read::Pattern>>,
-    ) -> Result<()> {
-        let node = self.node(ino)?;
-        let Some((size, generation, version)) = read::refill_state(&node, consumed) else {
-            return Ok(());
-        };
-        let budgets = self.effective_budgets();
-        let window = pattern
-            .unwrap_or(&node.pattern)
-            .lock()
-            .unwrap()
-            .window(&self.config)
-            .min(budgets.max_effective_window_bytes);
-        if window == 0 {
-            return Ok(());
-        }
-        let Some(range) = self.refill_range(&node, generation, consumed, size, window) else {
-            return Ok(());
-        };
-        let length = (range.end - range.start) as usize;
-        let read::FillAdmission::Leader(fill) =
-            read::start_fill(&node, generation, range.start, range.end)
-        else {
-            return Ok(());
-        };
-        // A concurrent fill may have published and relinquished its interval
-        // between planning and ownership. Retry speculation on a later read.
-        if self.cache.gap(ino, generation, range.clone()) != Some(range.clone()) {
-            return Ok(());
-        }
-        let admission = length
-            + if self.disk_funding_bytes > 0 {
-                read::disk_window_admission(range.start, range.end, size)
-                    + self.disk_gap_pipeline_bytes(read::disk_coverage(
-                        range.start,
-                        range.end,
-                        size,
-                    ))
-            } else {
-                0
-            };
-        let Some(charge) = self
-            .try_refill_admission(ino, generation, consumed, admission)
-            .await
-        else {
-            return Ok(());
-        };
-        let snapshot = read::snapshot(&node)?;
-        if snapshot.version != version
-            || read::generation(snapshot.version, snapshot.remote.as_ref()) != generation
-            || !write::remote_only(&snapshot, range.start, length)
-        {
-            return Ok(());
-        }
-        let start = range.start;
-        self.load_window(
-            read::Window {
-                snapshot: Arc::new(snapshot),
-                range,
-                charge,
-                single_buffer: true,
-                cache_key: Some((ino, generation)),
-                fill,
-            },
-            start,
-            0,
-            false,
-            &mut None::<fn(Result<Block>)>,
-        )
-        .await?;
-        Ok(())
-    }
-
-    fn refill_range(
-        &self,
-        node: &Inode,
-        generation: u64,
-        consumed: u64,
-        size: u64,
-        window: usize,
-    ) -> Option<std::ops::Range<u64>> {
-        let trigger = consumed.saturating_add((window / 2) as u64).min(size - 1);
-        if read::fill_covers(node, generation, trigger)
-            || self.cache.contains(node.ino, generation, trigger)
-        {
-            return None;
-        }
-        let mut cursor = consumed;
-        loop {
-            let gap = self.cache.gap(node.ino, generation, cursor..size)?;
-            cursor = gap.end;
-            if let Some(range) = read::unfilled(node, generation, gap) {
-                return Some(range.start..range.end.min(range.start.saturating_add(window as u64)));
-            }
-            if cursor == size {
-                return None;
-            }
-        }
-    }
-
-    async fn try_refill_admission(
-        &self,
-        ino: u64,
-        generation: u64,
-        consumed: u64,
-        length: usize,
-    ) -> Option<crate::budget::Reservation> {
-        // No waiting, flushing, or bypassing FIFO for speculative bytes. Reclaim
-        // old owners only while the still-needed current backing stays intact.
-        let cache = &self.cache;
-        loop {
-            if let Ok(charge) = self.data.try_reserve(length) {
-                return Some(charge);
-            }
-            // Speculation must not synchronously discard an eligible window's
-            // tail when all spill slots are busy. Leave owners in L1; the next
-            // required read performs the bounded reclamation sweep instead.
-            if self.disk_funding_bytes > 0 {
-                return None;
-            }
-            let victim = cache.consumed_victim(ino, generation, consumed)?;
-            self.demote_capacity(victim, None).await;
         }
     }
 
@@ -2302,35 +2072,17 @@ impl Filesystem {
         } else {
             0
         };
-        // Participate in pressure reclamation before borrowing a cache block:
-        // an earlier FIFO waiter may need bytes published after its eviction.
-        // One-block hits share their allocation; fragment spans use this output.
-        let reply = self.admit(length, true).await?;
         if !read::current(&node, generation) {
             return Err(self.again("read_generation_after_admission"));
         }
         if length == 0 {
-            return reply.copy(&[]).map(Some);
+            return self.admit(0).await?.copy(&[]).map(Some);
         }
-        let cached = {
-            let timer = self.diagnostics.stage(Stage::CacheRead);
-            let cached = self.cache.read(ino, generation, offset, length, reply);
-            timer.ok();
-            cached
-        };
-        self.diagnostics.debug("read_cache", || {
-            serde_json::json!({
-                "hit": cached.is_some(), "offset": offset, "bytes": length,
-            })
-        });
-        if let Some(block) = cached {
-            self.touch_disk_hit(&node, generation, offset, length);
-            self.read_metrics.cache_hit(length);
-            return Ok(Some(block));
-        }
-        // Miss admission reserves output and scratch atomically below.
+        // Without persistent eligibility, optional bytes have nowhere to live
+        // after this request. Do not download and discard a speculative tail.
+        let persistent = self.disk_funding_bytes > 0 && self.disk_eligible(&node, generation);
         let budgets = self.effective_budgets();
-        let mut start = if clean {
+        let mut start = if clean && persistent {
             offset / read::READ_BLOCK_BYTES as u64 * read::READ_BLOCK_BYTES as u64
         } else {
             offset
@@ -2344,7 +2096,7 @@ impl Filesystem {
             start = offset;
         }
         let relative = (offset - start) as usize;
-        let mut prefetch = if clean {
+        let mut prefetch = if clean && persistent {
             window
                 .max(relative + length)
                 .min(window_limit)
@@ -2359,21 +2111,18 @@ impl Filesystem {
         if clean && prefetch < window && start + (prefetch as u64) < size && prefetch >= chunk {
             prefetch = (prefetch / chunk * chunk).max(relative + length);
         }
+        if persistent {
+            prefetch = pattern
+                .unwrap_or(&node.pattern)
+                .lock()
+                .unwrap()
+                .persistent_window(generation, start, relative + length, prefetch);
+        }
         // FUSE may issue neighboring reads before the first window completes.
         // Waiting readers must not reserve another whole window and evict the
         // very fill they can reuse. Recheck after wakeup and after taking ownership.
         let fill = loop {
             let admission = read::start_fill(&node, generation, start, start + prefetch as u64);
-            let reply = self.admit(length, true).await?;
-            if !read::current(&node, generation) {
-                return Err(self.again("read_generation_after_fill_wait"));
-            }
-            let cached = self.cache.read(ino, generation, offset, length, reply);
-            if let Some(block) = cached {
-                self.touch_disk_hit(&node, generation, offset, length);
-                self.read_metrics.cache_hit(length);
-                return Ok(Some(block));
-            }
             match admission {
                 read::FillAdmission::Leader(owner) => {
                     self.diagnostics.debug("read_fill", || {
@@ -2383,37 +2132,49 @@ impl Filesystem {
                     });
                     break owner;
                 }
-                read::FillAdmission::Wait(mut done) => {
+                read::FillAdmission::Wait(mut waiting) => {
                     self.diagnostics.debug("read_fill", || {
                         serde_json::json!({
                             "role": "follower", "offset": start, "bytes": prefetch,
                         })
                     });
-                    // Subscribe before the cache check so a completed chunk
-                    // cannot be missed between lookup and waiting. Closing also
-                    // wakes followers after error or cancellation; retry normally.
-                    metrics::observe(&self.diagnostics, Stage::FillWait, async {
-                        let _ = tokio::time::timeout(self.config.request_timeout, done.changed())
+                    // Acquire output before retaining published owners across a
+                    // wait. Queueing behind an older large admission while
+                    // pinning its required bytes would deadlock the FIFO lane.
+                    let mut reply = match self.data.try_reserve(length) {
+                        Ok(reply) => reply,
+                        Err(Error::Fs(libc::ENOMEM)) => {
+                            drop(waiting);
+                            drop(self.admit(length).await?);
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    loop {
+                        if !read::current(&node, generation) {
+                            return Err(self.again("read_generation_after_fill_wait"));
+                        }
+                        if let Some(block) = waiting.read(offset, length, &mut reply) {
+                            self.read_metrics.cache_hit(length);
+                            return Ok(Some(block));
+                        }
+                        if *waiting.done.borrow() {
+                            break;
+                        }
+                        metrics::observe(&self.diagnostics, Stage::FillWait, async {
+                            let _ = tokio::time::timeout(
+                                self.config.request_timeout,
+                                waiting.done.changed(),
+                            )
                             .await
                             .map_err(|_| Error::Timeout("overlapping read fill"))?;
-                        Ok(())
-                    })
-                    .await?;
+                            Ok(())
+                        })
+                        .await?;
+                    }
                 }
             }
         };
-        // A neighboring fill can finish while this reader waits for a missing
-        // prefix. Its cached tail is not a reason to GET that tail again.
-        // Keep the entire requested range, but stop optional prefetch at the
-        // first already-covered span, before reserving another whole window.
-        if clean
-            && prefetch > relative + length
-            && let Some(gap) = self
-                .cache
-                .gap(ino, generation, start..start + prefetch as u64)
-        {
-            prefetch = (gap.end.max(offset + length as u64) - start) as usize;
-        }
         // Atomically admit all payload/GET/output buffers before the first
         // allocation; otherwise competing readers could each pin half a lane.
         let (charge, snapshot) = loop {
@@ -2431,7 +2192,6 @@ impl Filesystem {
                         } else {
                             0
                         },
-                    true,
                 )
                 .await?;
             // Capture payload owners only after admission. Pinning dirty extents
@@ -2498,6 +2258,7 @@ impl Filesystem {
             fill,
         } = window;
         let deadline = self.config.request_timeout.min(Duration::from_millis(250));
+        let mut population_wait = deadline;
         let disk = if let Some((_, generation)) = cache_key.filter(|_| {
             single_buffer
                 && self.disk_funding_bytes > 0
@@ -2710,37 +2471,22 @@ impl Filesystem {
                 self.read_metrics.completed(std::mem::take(&mut delivered));
                 ready(Ok(result.take().expect("completed requested result")));
             }
-            if let Some((ino, generation)) =
+            if let Some((_, generation)) =
                 cache_key.filter(|(_, generation)| read::current(fill.node(), *generation))
             {
-                // Publish into the cache followers inspect, including after
-                // pressure reclamation while the GET was in flight.
-                let cache = &self.cache;
-                // Delivery remains sliced above. Retain a validated disk record
-                // under its original coverage so later eviction does not create
-                // a different fragment identity for an already resident record.
-                let (block, prefix) = block.into_cache_backing();
-                let at = at - prefix as u64;
-                let mut block = Some(block);
-                let deadline = tokio::time::Instant::now()
-                    + self.config.request_timeout.min(Duration::from_millis(250));
-                // Explicit optional refill must not evict resident L2 candidates
-                // or acquire spill slots merely because the entry cap is full.
-                let evict = length > 0 || self.disk_funding_bytes == 0;
-                while let Some(victim) = cache.insert_step(ino, generation, at, &mut block, evict) {
-                    self.demote_capacity(victim, Some(deadline)).await;
-                }
-                if right > left {
-                    cache.consumed(
-                        ino,
-                        generation,
-                        at,
-                        (left - at) as usize,
-                        (right - left) as usize,
-                    );
-                }
-                fill.published();
-                self.cache_published.notify_waiters();
+                // Subscribed readers share only this active producer's validated
+                // immutable owners. The registry removes them at producer exit.
+                fill.publish(at, block.clone());
+                let started = tokio::time::Instant::now();
+                self.populate_disk(
+                    fill.node(),
+                    generation,
+                    at,
+                    &block,
+                    started + population_wait,
+                )
+                .await;
+                population_wait = population_wait.saturating_sub(started.elapsed());
             }
         }
         if let Some(error) = prefetch_error {
@@ -2752,14 +2498,14 @@ impl Filesystem {
         Ok(result)
     }
 
-    async fn admit(&self, size: usize, preserve_cache: bool) -> Result<crate::budget::Reservation> {
+    async fn admit(&self, size: usize) -> Result<crate::budget::Reservation> {
         match self.data.try_reserve(size) {
             Ok(reservation) => Ok(reservation),
             Err(Error::Fs(code)) if code == libc::ENOMEM => {
                 return metrics::observe(
                     &self.diagnostics,
                     Stage::PayloadAdmission,
-                    self.admit_pressured(size, preserve_cache),
+                    self.admit_pressured(size),
                 )
                 .await;
             }
@@ -2767,77 +2513,16 @@ impl Filesystem {
         }
     }
 
-    async fn admit_pressured(
-        &self,
-        size: usize,
-        preserve_cache: bool,
-    ) -> Result<crate::budget::Reservation> {
-        // Reclaim only as much old cache ownership as admission needs.
-        // Pinned borrowers retain their permits; FIFO waiters stay ahead.
-        let spill_deadline = preserve_cache.then(|| {
-            tokio::time::Instant::now()
-                + self.config.request_timeout.min(Duration::from_millis(250))
-        });
-        while self.reclaim_read_cache(spill_deadline).await {
-            if let Ok(reservation) = self.data.try_reserve(size) {
-                return Ok(reservation);
-            }
-        }
-        if let Ok(reservation) = self.data.try_reserve(size) {
-            return Ok(reservation);
-        }
+    async fn admit_pressured(&self, size: usize) -> Result<crate::budget::Reservation> {
         if self.config.use_enomem {
             return self.data.try_reserve(size);
         }
         self.flush_all().await?;
-        tokio::time::timeout(Duration::from_secs(30), async {
-            // Retain the same FIFO reservation while reclaiming owners
-            // published by fills that were in flight at the first sweep.
-            let reservation = self.data.reserve(size);
-            tokio::pin!(reservation);
-            loop {
-                let published = self.cache_published.notified();
-                // notify_waiters covers futures created before the
-                // cache check, including ones not yet polled.
-                tokio::select! {
-                    biased;
-                    result = &mut reservation => return result,
-                    _ = async {
-                        let reclaimed = self.reclaim_read_cache(spill_deadline).await;
-                        if !reclaimed {
-                            published.await;
-                        }
-                    } => {}
-                }
-            }
-        })
-        .await
-        .map_err(|_| Error::Timeout("payload admission"))?
-    }
-
-    async fn reclaim_read_cache(&self, deadline: Option<tokio::time::Instant>) -> bool {
-        // Loan-first reclamation permanently hides byte-pressure victims from
-        // L2: subsequent evictions remove loaned owners, which must not demote.
-        // Prefer an eligible capacity victim before transferring its charge.
-        if self.config.disk_cache_regex.is_some()
-            && let Some(key) = self.cache.loan_candidate()
-            && let Ok(node) = self.node(key.0)
-        {
-            self.start_disk_for_capacity(&node, key.1);
-            if let Some(disk) = self.disk_read(&node, key.1)
-                && disk.cache.status().state() == crate::disk_cache::State::Ready
-                && let Some(victim) = self.cache.unloaned_capacity_victim(key)
-            {
-                self.demote_capacity(victim, deadline).await;
-                return true;
-            }
-        }
-        // Never wait for optional capacity or lend while an upload/body owns it.
-        let loaned = self
-            .flush_activity
-            .try_write()
-            .is_ok_and(|_activity| self.cache.loan_lru(&self.flush_lane));
-        loaned || self.evict_cache(deadline).await
+        // Active readers and writer extents retain their actual owners. FIFO
+        // reservation wakes on their release; no cache eviction/loan sweep.
+        tokio::time::timeout(Duration::from_secs(30), self.data.reserve(size))
+            .await
+            .map_err(|_| Error::Timeout("payload admission"))?
     }
 
     pub async fn write(&self, ino: u64, offset: u64, bytes: &[u8]) -> Result<usize> {
@@ -2855,7 +2540,7 @@ impl Filesystem {
         if file_type(node.state.lock().unwrap().mode) != FileType::RegularFile {
             return Err(Error::Fs(libc::EINVAL));
         }
-        let reservation = self.admit(bytes.len(), false).await?;
+        let reservation = self.admit(bytes.len()).await?;
         let block = reservation.copy(bytes)?;
         let mut ns = self.lock_namespace();
         let mut state = node.state.lock().unwrap();
@@ -2946,16 +2631,10 @@ impl Filesystem {
             .acquire_owned()
             .await
             .map_err(|_| Error::Cancelled)?;
-        // Shared guards preserve independent flush concurrency. The budget carries
-        // activity into cloned SDK bodies and jobs, including cancellation cleanup.
-        let lane = self
-            .flush_lane
-            .with_activity(self.flush_activity.clone().read_owned().await);
-        self.cache.reclaim_loans();
         write::flush_locked_before(
             &self.store,
             node,
-            &lane,
+            &self.flush_lane,
             flusher,
             &self.config,
             &self.upload_admission,

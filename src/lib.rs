@@ -3,7 +3,6 @@
 
 pub mod backend;
 pub mod budget;
-pub mod cache;
 pub mod cache_policy;
 pub mod config;
 pub mod disk_cache;

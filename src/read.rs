@@ -5,13 +5,16 @@ use crate::{
     inode::Inode,
     write::{Snapshot, materialize},
 };
-use std::{ops::Range, sync::Arc};
+use std::{
+    ops::Range,
+    sync::{Arc, Mutex},
+};
 
 #[cfg(test)]
 #[path = "../tests/support/disk_cache_timeout_pipeline.rs"]
 mod timeout_pipeline;
 
-/// Logical payload unit shared by L1/L2 and streamed S3 delivery.
+/// Logical payload unit shared by L2 and streamed S3 delivery.
 pub const READ_BLOCK_BYTES: usize = 128 * 1024;
 const _: () = assert!(READ_BLOCK_BYTES == crate::disk_cache::MAX_PAYLOAD_BYTES);
 
@@ -100,37 +103,68 @@ pub(crate) fn generation(version: u64, remote: Option<&CachedRemote>) -> u64 {
     hash.finish()
 }
 
-pub(crate) fn refill_state(node: &Inode, consumed: u64) -> Option<(u64, u64, u64)> {
-    let state = node.state.lock().unwrap();
-    if state.deleted
-        || state.version != state.durable
-        || state.remote.is_none()
-        || !state.extents.is_empty()
-        || state.visible_remote_size < state.size
-        || consumed >= state.size
-    {
-        return None;
-    }
-    Some((
-        state.size,
-        generation(state.version, state.remote.as_ref()),
-        state.version,
-    ))
-}
-
 pub(crate) struct Fill {
     end: u64,
-    done: tokio::sync::watch::Sender<()>,
+    chunks: Arc<Mutex<Vec<(u64, Block)>>>,
+    done: tokio::sync::watch::Sender<bool>,
 }
 
 pub(crate) enum FillAdmission {
     Leader(FillGuard),
-    Wait(tokio::sync::watch::Receiver<()>),
+    Wait(FillWait),
 }
 
 pub(crate) struct FillGuard {
     node: Arc<Inode>,
     key: (u64, u64),
+    chunks: Arc<Mutex<Vec<(u64, Block)>>>,
+    done: tokio::sync::watch::Sender<bool>,
+}
+
+/// Only subscribed active consumers can retain a completed producer's chunks.
+/// No entry survives in the inode registry after its producer finishes.
+pub(crate) struct FillWait {
+    chunks: Arc<Mutex<Vec<(u64, Block)>>>,
+    pub done: tokio::sync::watch::Receiver<bool>,
+}
+
+impl FillWait {
+    pub(crate) fn read(
+        &self,
+        offset: u64,
+        length: usize,
+        reply: &mut Reservation,
+    ) -> Option<Block> {
+        let chunks = self.chunks.lock().unwrap();
+        let find = |at| {
+            chunks
+                .iter()
+                .find(|(start, block)| *start <= at && at - *start < block.as_slice().len() as u64)
+        };
+        // Verify complete coverage before allocating or exposing any bytes.
+        let end = offset + length as u64;
+        let mut at = offset;
+        while at < end {
+            let (start, block) = find(at)?;
+            at = end.min(*start + block.as_slice().len() as u64);
+        }
+        let (start, block) = find(offset)?;
+        let relative = (offset - *start) as usize;
+        if block.as_slice().len() - relative >= length {
+            return Some(block.slice(relative..relative + length));
+        }
+        let mut output = reply.split(length).zeroed();
+        let mut copied = 0;
+        while copied < length {
+            let (start, block) = find(offset + copied as u64)?;
+            let relative = (offset + copied as u64 - *start) as usize;
+            let amount = (length - copied).min(block.as_slice().len() - relative);
+            output.as_mut_slice()[copied..copied + amount]
+                .copy_from_slice(&block.as_slice()[relative..relative + amount]);
+            copied += amount;
+        }
+        Some(output)
+    }
 }
 
 /// Coalesce overlapping windows of one generation, without serializing disjoint
@@ -145,43 +179,38 @@ pub(crate) fn start_fill(
     let mut fills = node.read_fills.lock().unwrap();
     for (&(_, at), fill) in fills.range((generation, 0)..=(generation, u64::MAX)) {
         if at < end && start < fill.end {
-            return FillAdmission::Wait(fill.done.subscribe());
+            return FillAdmission::Wait(FillWait {
+                chunks: fill.chunks.clone(),
+                done: fill.done.subscribe(),
+            });
         }
     }
     let key = (generation, start);
-    let (done, _) = tokio::sync::watch::channel(());
-    fills.insert(key, Fill { end, done });
+    let (done, _) = tokio::sync::watch::channel(false);
+    let chunks = Arc::new(Mutex::new(Vec::new()));
+    fills.insert(
+        key,
+        Fill {
+            end,
+            chunks: chunks.clone(),
+            done: done.clone(),
+        },
+    );
     FillAdmission::Leader(FillGuard {
         node: node.clone(),
         key,
+        chunks,
+        done,
     })
-}
-
-pub(crate) fn fill_covers(node: &Inode, generation: u64, offset: u64) -> bool {
-    node.read_fills
-        .lock()
-        .unwrap()
-        .range((generation, 0)..=(generation, offset))
-        .next_back()
-        .is_some_and(|(_, fill)| offset < fill.end)
-}
-
-pub(crate) fn unfilled(node: &Inode, generation: u64, range: Range<u64>) -> Option<Range<u64>> {
-    let fills = node.read_fills.lock().unwrap();
-    let covered = fills
-        .range((generation, 0)..(generation, range.end))
-        .map(|(&(_, start), fill)| start..fill.end);
-    crate::cache::first_gap(range, covered)
 }
 
 impl FillGuard {
     pub(crate) fn node(&self) -> &Arc<Inode> {
         &self.node
     }
-    pub(crate) fn published(&self) {
-        if let Some(fill) = self.node.read_fills.lock().unwrap().get(&self.key) {
-            fill.done.send_replace(());
-        }
+    pub(crate) fn publish(&self, at: u64, block: Block) {
+        self.chunks.lock().unwrap().push((at, block));
+        self.done.send_replace(false);
     }
 }
 
@@ -442,6 +471,7 @@ pub(crate) async fn load_disk_range(
 impl Drop for FillGuard {
     fn drop(&mut self) {
         self.node.read_fills.lock().unwrap().remove(&self.key);
+        self.done.send_replace(true);
     }
 }
 
@@ -449,10 +479,30 @@ impl Drop for FillGuard {
 pub struct Pattern {
     end: u64,
     sequential: u64,
+    planned: Option<(u64, u64)>,
     /// Completed contiguous runs, not individual kernel/FUSE read sizes.
     recent: std::collections::VecDeque<u64>,
 }
 impl Pattern {
+    /// A scalar read-ahead hint, not evidence that bytes are cached. Required
+    /// bytes always consult Foyer/source. Avoid sliding a new speculative window
+    /// forward on every small read after a producer has already planned its tail.
+    pub(crate) fn persistent_window(
+        &mut self,
+        generation: u64,
+        start: u64,
+        required: usize,
+        planned: usize,
+    ) -> usize {
+        if self
+            .planned
+            .is_some_and(|(old, end)| old == generation && start < end)
+        {
+            return required;
+        }
+        self.planned = Some((generation, start.saturating_add(planned as u64)));
+        planned
+    }
     pub(crate) fn window(&self, config: &crate::config::Config) -> usize {
         let average = (u128::from(self.sequential)
             + self.recent.iter().copied().map(u128::from).sum::<u128>())

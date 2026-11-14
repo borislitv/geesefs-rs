@@ -8,7 +8,7 @@ pub(crate) const fn rounded(n: usize) -> usize {
     n.div_ceil(PAGE) * PAGE
 }
 
-/// Required deduction from effective L1 capacity, not an RSS/cgroup guarantee.
+/// Required deduction from active data capacity, not an RSS/cgroup guarantee.
 /// Index coefficient includes hash/order state: measured ~230 B/entry at 8M,
 /// conservatively funded at 384, plus separately bounded recent hints/regions.
 #[derive(Clone, Debug)]

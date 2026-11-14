@@ -11,21 +11,17 @@ The package continues to forbid unsafe code and uses safe dependency APIs only.
 | Domain | Ownership and retained synchronization | Correction / remaining cost |
 | --- | --- | --- |
 | `Namespace` | One name/transaction mutex; inode owners in a private Papaya weak index | Inode resolution does not acquire it. Flush/ancestor checks use dirty indexes. Directory scans seek children and yield every 128 steps. Rename scans only its source bindings. Eviction does not wait for an inode state acquired by a concurrent resolver. |
-| `ReadCache::state` | One mutex for LRU, range index, weights and loan ownership | Remove the redundant outer filesystem mutex. Resolve/touch/mark each cached read span in one metadata transaction; allocate and copy payload after releasing it. Loan revocation visits an explicit loan-key set, not the whole clean cache. |
-| `flush_activity` | Async shared guards owned by uploads/bodies; lending only tries an exclusive guard | Required to prevent new loans during uploads, including cancellation and retained retry bodies. Independent uploads share the guard; speculative lending never waits for it. |
+| Active fill chunks | Per-producer immutable owners under a short mutex | Only subscribed readers can share published chunks; registry ownership ends with the producer. Followers obtain output admission before waiting with these owners. If admission would queue, release the subscription first so it cannot pin bytes needed by an earlier FIFO request. |
 | FUSE file/directory registries | Separate short map transactions; clone owners before using them | File release drops its owner outside the registry. Directory open no longer waits for inode state or writes a reply while holding its registry. A shared file-handle lookup still takes a short registry lock. |
 | FUSE admission | Closing flag plus fast try-acquisition; a saturated fixed receiver waits on the existing semaphore after unlocking | At most one pending callback per receiver, with WRITE input still ingress-funded. The same absolute deadline covers admission and execution. Async owners retain permits through post-reply work; shutdown drains them even if not yet scheduled. |
 | FUSE handle admission | One owned semaphore for files and directories, bounded by `entry_limit` | Idle open handles do not consume request concurrency. Directory owners pin their inode and release its open count only on actual destruction; shutdown drains the registry after requests finish. Permits and byte charges follow the same owner. |
 | Metadata admission | One global semaphore for directory type resolution and expired-attribute refresh | READDIRPLUS admits before creating each borrowed future and polls at most `max_requests` futures per page in output order. One admission waiter per page; no detached per-entry tasks. Fresh attributes bypass the semaphore. Errors, full frames and deadlines release pending work and permits. |
 | Required L2 eligibility | Existing caller-funded FIFO read admission; at most four blocking workers | Namespace, inode and final namespace checks acquire guards sequentially, never nested. Final revalidation observes a parent move begun during inode contention. Guards are released before I/O. Timeout/cancellation leaves the actual worker's slot and credit owned until completion. |
-| Optional L2 touches/demotion | Immediate namespace/inode try-lock and bounded spill admission | Contention skips optional work; it does not wait behind required readers or hold up writer loan reclamation. Read and spill jobs have independent, already funded four-owner limits. |
+| Optional L2 population | Immediate namespace/inode eligibility checks and bounded guarded spill admission | Source fills share one cumulative admission-wait allowance. Revalidate generation after waiting; release inode state before copying/enqueueing. Actual read and spill jobs retain independent existing funding. |
 
-The read-cache outer mutex was not needed for payload correctness: a borrowed
-loaned backing is copied into admitted output synchronously and never exported
-or retained across an await. After revoking cache ownership, a flusher can briefly
-wait on byte admission for such an in-progress copy, not on a global copying
-mutex. All loans and in-flight allocations remain charged to the same limits.
-Writer input is also copied into its admitted block before acquiring namespace
+There is no retained clean-payload cache mutex, loan registry or upload/lending
+activity lock. Writers exclusively own the flush reserve. Writer input is copied
+into its admitted block before acquiring namespace
 and inode-state locks; validation and extent/generation publication stay atomic.
 
 ## Object-local and lifecycle locks
@@ -36,7 +32,7 @@ and inode-state locks; validation and extent/generation publication stay atomic.
 | `Inode::flush` | Async per-object commit/rename/delete gate, deliberately spans backend I/O | Serializes conflicting durability operations, not independent files. Multi-inode rename acquires gates in inode order. Removing it would weaken commit/delete ordering. |
 | `Inode::preload` | Async per-directory single-flight, spans LIST and yielding admission | The namespace mutex is released between bounded scan batches. Publication rechecks epoch/binding after each admission; same-directory waiters remain subject to the request deadline. |
 | `Inode::pattern`, `OpenFile::pattern` | Small adaptive-history updates, at most 64 samples | Per-handle policy in normal FUSE reads; legacy inode-only API has a per-inode pattern. No backend work or payload copy under the lock. |
-| `Inode::read_fills` | Register/query/retire bounded in-flight intervals; notify followers | Per-inode metadata only. Overlapping same-generation reads deliberately wait on a watch channel after unlocking; disjoint fills proceed independently. |
+| `Inode::read_fills` | Register/query/retire in-flight intervals; notify followers | Short per-inode registry transactions; published owners have a separate per-producer mutex. Overlapping same-generation reads wait after unlocking; disjoint fills proceed independently. No registry entry survives producer completion/error/cancellation. |
 | FUSE `Directory` cursor | Async per-open-handle pagination/cookie gate, spans LIST and bounded attribute refresh | Same-handle readdir is serialized to preserve cursor semantics; separate handles are independent. Attribute requests within a PLUS page overlap while replies retain cookie/name order. |
 | FUSE `notifier` | Clone configured sender before kernel notification | Actual potentially blocking notification runs on a separately admitted blocking worker without the mutex. |
 | FUSE `namespace_retirement_scan` | One finite high-water cursor, serialized with the existing notification slot | Inspect at most 128 nodes, try-lock state, retain only shared names. Release namespace/state/scan guards before notification. Never await a related parent invalidation from lookup/readdir; it can need the kernel lock held for that reply. |
@@ -63,14 +59,13 @@ Metrics use try-lock snapshots and return unavailable instead of joining a queue
 - Global tombstone expiry cleanup and some pending-prefix conflict checks still
   scale with their own registries. Local directory scan chunks no longer trigger
   whole-tombstone cleanup. Large move/delete transactions still cost their subtree.
-- The cache metadata mutex remains shared. Overlap searches, evicting many small
-  spans, lending past already loaned owners and releasing loan keys can extend
-  its hold time. Payload copies are outside it; sharding or lock-free replacement
-  would require preserving global byte admission, eviction and revocable loans.
+- A follower searches its active producer's published chunks and can compose a
+  fragmented result under that producer's mutex. It is not a global payload-cache
+  lock; profile large active windows and concurrent followers separately.
 - Namespace publication/preload/page validation can process a bounded backend
   page and acquire object-local state. Sustained writer/metadata pressure and
   same-inode fragmentation need target-environment hold/wait profiles.
 
 The [diagnostics](testing.md#namespace-progress--2026-11-06) test removed global
-serialization and retained writer/loan contracts. They do not prove zero tail
+serialization and preserved writer contracts. They do not prove zero tail
 latency, mounted performance acceptance or the absence of locks inside dependencies.

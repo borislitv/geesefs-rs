@@ -8,23 +8,28 @@ use support::MemoryStore;
 const MIB: usize = 1024 * 1024;
 const STEP: usize = 128 * 1024;
 
-fn fixture() -> (Arc<MemoryStore>, Arc<Filesystem>, Vec<u8>) {
+async fn fixture() -> (
+    Arc<MemoryStore>,
+    Arc<Filesystem>,
+    Vec<u8>,
+    tempfile::TempDir,
+) {
     let store = MemoryStore::new();
     let bytes: Vec<u8> = (0..8 * MIB).map(|at| (at / STEP) as u8).collect();
     store.seed("file", &bytes);
-    let mut config = MemoryStore::config(16);
+    let mut config = MemoryStore::config(64);
     config.read_ahead = MIB / 1024;
     config.read_ahead_small = MIB / 1024;
     config.read_ahead_large = 4 * MIB / 1024;
     config.read_ahead_parallel = 4 * MIB / 1024;
     config.large_read_cutoff = (MIB / 1024) as u64;
-    let fs = Filesystem::new(config, store.clone()).unwrap();
-    (store, fs, bytes)
+    let (fs, directory) = store.disk_filesystem(config).await;
+    (store, fs, bytes, directory)
 }
 
 #[tokio::test]
 async fn a_reopened_stream_does_not_inherit_the_previous_streams_large_window() {
-    let (store, fs, bytes) = fixture();
+    let (store, fs, bytes, _directory) = fixture().await;
     let ino = fs.lookup(1, "file").await.unwrap().ino;
     fs.open(ino, false).unwrap();
     for offset in (0..3 * MIB).step_by(STEP) {
@@ -46,11 +51,11 @@ async fn a_reopened_stream_does_not_inherit_the_previous_streams_large_window() 
     }
     let before = store.read_ranges.lock().unwrap().len();
     fs.open(ino, false).unwrap();
-    let first = fs.read(ino, 0, STEP).await.unwrap();
-    assert_eq!(first.as_slice(), &bytes[..STEP]);
+    let first = fs.read(ino, (6 * MIB) as u64, STEP).await.unwrap();
+    assert_eq!(first.as_slice(), &bytes[6 * MIB..6 * MIB + STEP]);
     assert_eq!(
         store.read_ranges.lock().unwrap()[before..],
-        [(0, MIB)],
+        [((6 * MIB) as u64, MIB)],
         "a new stream must start at the configured initial window, not the previous open's promoted window"
     );
     fs.release(ino);
@@ -58,7 +63,7 @@ async fn a_reopened_stream_does_not_inherit_the_previous_streams_large_window() 
 
 #[tokio::test]
 async fn opening_a_second_handle_preserves_the_active_streams_history() {
-    let (store, fs, bytes) = fixture();
+    let (store, fs, bytes, _directory) = fixture().await;
     let ino = fs.lookup(1, "file").await.unwrap().ino;
     fs.open(ino, false).unwrap();
     for offset in (0..3 * MIB).step_by(STEP) {
@@ -79,7 +84,7 @@ async fn opening_a_second_handle_preserves_the_active_streams_history() {
 
 #[tokio::test]
 async fn reopening_resets_history_without_discarding_cached_payload() {
-    let (store, fs, bytes) = fixture();
+    let (store, fs, bytes, _directory) = fixture().await;
     let ino = fs.lookup(1, "file").await.unwrap().ino;
     fs.open(ino, false).unwrap();
     drop(fs.read(ino, 0, STEP).await.unwrap());
@@ -97,7 +102,7 @@ async fn reopening_resets_history_without_discarding_cached_payload() {
 
 #[tokio::test]
 async fn interleaved_open_files_keep_independent_stream_histories_and_share_payload() {
-    let (store, fs, bytes) = fixture();
+    let (store, fs, bytes, _directory) = fixture().await;
     let ino = fs.lookup(1, "file").await.unwrap().ino;
     let sequential = fs.open_file(ino, false).unwrap();
     let random = fs.open_file(ino, false).unwrap();
@@ -120,7 +125,7 @@ async fn interleaved_open_files_keep_independent_stream_histories_and_share_payl
 
 #[tokio::test]
 async fn a_new_open_file_does_not_inherit_another_live_handles_promoted_window() {
-    let (store, fs, bytes) = fixture();
+    let (store, fs, bytes, _directory) = fixture().await;
     let ino = fs.lookup(1, "file").await.unwrap().ino;
     let sequential = fs.open_file(ino, false).unwrap();
     for offset in (0..3 * MIB).step_by(STEP) {
@@ -165,7 +170,7 @@ async fn the_last_open_owner_keeps_its_inode_live_and_then_permits_eviction() {
 
 #[tokio::test]
 async fn a_borrowed_fuse_reply_uses_its_own_open_history() {
-    let (store, fs, bytes) = fixture();
+    let (store, fs, bytes, _directory) = fixture().await;
     let ino = fs.lookup(1, "file").await.unwrap().ino;
     let sequential = fs.open_file(ino, false).unwrap();
     for offset in (0..3 * MIB).step_by(STEP) {

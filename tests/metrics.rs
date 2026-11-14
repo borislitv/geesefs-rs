@@ -2,8 +2,6 @@
 mod support;
 
 use geesefs_rs::{
-    budget::Budget,
-    cache::ReadCache,
     filesystem::Filesystem,
     metrics::{MetricsServer, render},
 };
@@ -44,7 +42,7 @@ fn fixture() -> (Arc<MemoryStore>, Arc<Filesystem>) {
 }
 
 #[tokio::test]
-async fn cold_miss_warm_hit_and_scrapes_have_distinct_accounting() {
+async fn independent_source_reads_and_scrapes_have_distinct_accounting() {
     let (store, fs) = fixture();
     let ino = fs.lookup(1, "private-object-name").await.unwrap().ino;
     assert_eq!(fs.read(ino, 0, 3).await.unwrap().as_slice(), b"abc");
@@ -53,15 +51,13 @@ async fn cold_miss_warm_hit_and_scrapes_have_distinct_accounting() {
     let before = fs.effective_budgets();
     let text = render(&fs).unwrap();
     for (name, expected) in [
-        ("geesefs_read_cache_hits_total", 1.),
-        ("geesefs_read_cache_misses_total", 1.),
-        ("geesefs_read_cache_hit_bytes_total", 5.),
-        ("geesefs_read_cache_miss_bytes_total", 3.),
+        ("geesefs_read_cache_hits_total", 0.),
+        ("geesefs_read_cache_misses_total", 2.),
+        ("geesefs_read_cache_hit_bytes_total", 0.),
+        ("geesefs_read_cache_miss_bytes_total", 8.),
         ("geesefs_read_remote_bytes_total", 8.),
-        ("geesefs_read_fill_jobs_total", 1.),
+        ("geesefs_read_fill_jobs_total", 2.),
         ("geesefs_read_fill_errors_total", 0.),
-        ("geesefs_read_cache_bytes", 8.),
-        ("geesefs_read_cache_entries", 1.),
         ("geesefs_namespace_entries", 2.),
     ] {
         assert_eq!(sample(&text, name), expected, "{name}");
@@ -80,31 +76,10 @@ async fn cold_miss_warm_hit_and_scrapes_have_distinct_accounting() {
     };
     assert!(sample(&text, allocated) > 0.);
     assert_eq!(sample(&text, "geesefs_diagnostics_enabled"), 1.);
-    assert_eq!(
-        sample(
-            &text,
-            "geesefs_stage_duration_seconds_count{stage=\"cache_read\"}"
-        ),
-        2.
-    );
-    assert_eq!(
-        sample(
-            &text,
-            "geesefs_stage_completions_total{stage=\"cache_read\",outcome=\"ok\"}"
-        ),
-        2.
-    );
-    assert_eq!(
-        sample(
-            &text,
-            "geesefs_stage_completions_total{stage=\"cache_read\",outcome=\"error\"}"
-        ),
-        0.
-    );
     assert!(sample(&text, "geesefs_process_cpu_seconds_total{mode=\"user\"}") >= 0.);
     assert!(sample(&text, "geesefs_process_cpu_seconds_total{mode=\"system\"}") >= 0.);
     render(&fs).unwrap();
-    assert_eq!(store.read_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(store.read_calls.load(Ordering::Relaxed), 2);
     assert_eq!(store.head_starts.load(Ordering::Relaxed), 1);
     assert_eq!(store.list_calls.load(Ordering::Relaxed), 0);
     assert_eq!(
@@ -115,103 +90,6 @@ async fn cold_miss_warm_hit_and_scrapes_have_distinct_accounting() {
         sample(&text, "geesefs_payload_used_bytes{lane=\"data\"}"),
         before.data_used_bytes as f64
     );
-}
-
-#[test]
-fn eviction_samples_do_not_claim_to_free_pinned_owners_or_count_replacement() {
-    let budget = Budget::new(32).unwrap();
-    let cache = ReadCache::with_entry_limit(8, 2);
-    for (offset, bytes) in [(0, b"aaaa"), (4, b"bbbb")] {
-        cache.insert(
-            1,
-            1,
-            offset,
-            budget.try_reserve(4).unwrap().copy(bytes).unwrap(),
-        );
-    }
-    let pinned = cache.get(1, 1, 0).unwrap();
-    // Make the pinned owner the eviction victim without releasing its charge.
-    drop(cache.get(1, 1, 4));
-    cache.insert(
-        1,
-        1,
-        8,
-        budget.try_reserve(4).unwrap().copy(b"cccc").unwrap(),
-    );
-    cache.insert(
-        1,
-        1,
-        8,
-        budget.try_reserve(4).unwrap().copy(b"dddd").unwrap(),
-    );
-    let stats = cache.try_stats().unwrap();
-    assert_eq!(
-        (
-            stats.entries,
-            stats.bytes,
-            stats.capacity,
-            stats.entry_limit
-        ),
-        (2, 8, 8, 2)
-    );
-    assert_eq!(
-        (
-            stats.evictions,
-            stats.evicted_bytes,
-            stats.replacements,
-            stats.insertions
-        ),
-        (1, 4, 1, 4)
-    );
-    assert_eq!(pinned.as_slice(), b"aaaa");
-    assert!(cache.get(1, 1, 0).is_none());
-    assert_eq!(budget.used(), 12);
-    cache.clear();
-    assert_eq!(budget.used(), 4);
-    let stats = cache.try_stats().unwrap();
-    assert_eq!((stats.bytes, stats.entries, stats.evictions), (0, 0, 1));
-    drop(pinned);
-    assert_eq!(budget.used(), 0);
-}
-
-#[test]
-fn entry_limit_and_oversized_insertions_are_not_mistaken_for_byte_capacity() {
-    let budget = Budget::new(32).unwrap();
-    let cache = ReadCache::with_entry_limit(16, 1);
-    cache.insert(1, 1, 0, budget.try_reserve(2).unwrap().copy(b"ab").unwrap());
-    cache.insert(1, 1, 2, budget.try_reserve(2).unwrap().copy(b"cd").unwrap());
-    let stats = cache.try_stats().unwrap();
-    assert_eq!(
-        (
-            stats.bytes,
-            stats.capacity,
-            stats.evictions,
-            stats.evicted_bytes
-        ),
-        (2, 16, 1, 2)
-    );
-    cache.insert(
-        1,
-        1,
-        2,
-        budget
-            .try_reserve(17)
-            .unwrap()
-            .copy(b"too big for cache")
-            .unwrap(),
-    );
-    let stats = cache.try_stats().unwrap();
-    assert_eq!(
-        (
-            stats.entries,
-            stats.bytes,
-            stats.oversized,
-            stats.replacements
-        ),
-        (0, 0, 1, 1)
-    );
-    assert_eq!(stats.insertions, 2);
-    assert_eq!(budget.used(), 0);
 }
 
 #[tokio::test]
@@ -278,7 +156,13 @@ async fn failed_remote_fill_counts_error_without_fabricating_bytes() {
     assert_eq!(sample(&text, "geesefs_read_fill_jobs_total"), 1.);
     assert_eq!(sample(&text, "geesefs_read_fill_errors_total"), 1.);
     assert_eq!(sample(&text, "geesefs_read_remote_bytes_total"), 0.);
-    assert_eq!(sample(&text, "geesefs_read_cache_bytes"), 0.);
+    assert_eq!(sample(&text, "geesefs_read_cache_misses_total"), 0.);
+    assert_eq!(sample(&text, "geesefs_read_cache_miss_bytes_total"), 0.);
+    assert!(
+        !text
+            .lines()
+            .any(|line| line.starts_with("geesefs_read_cache_bytes "))
+    );
     assert_eq!(
         sample(&text, "geesefs_payload_used_bytes{lane=\"data\"}"),
         0.
@@ -286,19 +170,7 @@ async fn failed_remote_fill_counts_error_without_fabricating_bytes() {
 }
 
 #[tokio::test]
-async fn metrics_failed_read_does_not_count_undelivered_bytes_as_a_cache_miss() {
-    let (store, fs) = fixture();
-    let ino = fs.lookup(1, "private-object-name").await.unwrap().ino;
-    store.objects.lock().unwrap().clear();
-    assert!(fs.read(ino, 0, 3).await.is_err());
-    let text = render(&fs).unwrap();
-    assert_eq!(sample(&text, "geesefs_read_fill_errors_total"), 1.);
-    assert_eq!(sample(&text, "geesefs_read_cache_misses_total"), 0.);
-    assert_eq!(sample(&text, "geesefs_read_cache_miss_bytes_total"), 0.);
-}
-
-#[tokio::test]
-async fn writer_overlay_is_not_reported_as_an_l1_l2_or_source_only_result() {
+async fn writer_overlay_is_not_reported_as_reuse_or_a_source_only_result() {
     let (_, fs) = fixture();
     let ino = fs.lookup(1, "private-object-name").await.unwrap().ino;
     fs.write(ino, 2, b"XY").await.unwrap();

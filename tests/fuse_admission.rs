@@ -67,7 +67,12 @@ impl Drop for ReleaseOnDrop {
     }
 }
 
-fn cached_read_waits_for_actual_owner(kind: ReadKind) {
+fn persistent_read_waits_for_actual_owner(kind: ReadKind) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
     let store = MemoryStore::new();
     let mut body = vec![0x19; 1024 * 1024];
     body[OFFSET as usize..OFFSET as usize + LENGTH].fill(0xa5);
@@ -86,7 +91,7 @@ fn cached_read_waits_for_actual_owner(kind: ReadKind) {
     config.request_timeout = Duration::from_secs(10);
     config.shutdown_timeout = Duration::from_secs(10);
     config.metrics_listen = Some("127.0.0.1:0".parse().unwrap());
-    let fs = Filesystem::new(config, store.clone()).unwrap();
+    let (fs, _cache) = runtime.block_on(store.disk_filesystem(config));
     mounted(fs.clone(), |path| {
         std::thread::scope(|scope| {
             let release = ReleaseOnDrop(tail);
@@ -132,7 +137,7 @@ fn cached_read_waits_for_actual_owner(kind: ReadKind) {
                 completed.unwrap_or_else(|| result.recv_timeout(Duration::from_secs(3)).unwrap());
             worker.join().unwrap();
             let actual = outcome.unwrap_or_else(|error| {
-                panic!("{kind:?}: capacity pressure broke a valid cached read: {error}")
+                panic!("{kind:?}: capacity pressure broke a valid persistent read: {error}")
             });
             assert_eq!(actual, [0xa5; LENGTH]);
             assert!(
@@ -153,11 +158,11 @@ fn cached_read_waits_for_actual_owner(kind: ReadKind) {
 #[test]
 #[ignore = "requires an explicitly authorized Linux FUSE fixture"]
 fn native_buffered_read_waits_for_post_reply_admission() {
-    cached_read_waits_for_actual_owner(ReadKind::Buffered);
+    persistent_read_waits_for_actual_owner(ReadKind::Buffered);
 }
 
 #[test]
 #[ignore = "requires an explicitly authorized Linux FUSE fixture"]
 fn native_sendfile_waits_for_post_reply_admission() {
-    cached_read_waits_for_actual_owner(ReadKind::Sendfile);
+    persistent_read_waits_for_actual_owner(ReadKind::Sendfile);
 }

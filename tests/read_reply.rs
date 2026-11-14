@@ -9,14 +9,19 @@ use tokio::sync::{Semaphore, oneshot};
 const MIB: usize = 1024 * 1024;
 const STEP: usize = 128 * 1024;
 
-fn fixture() -> (Arc<MemoryStore>, Arc<Filesystem>, Vec<u8>) {
+async fn fixture() -> (
+    Arc<MemoryStore>,
+    Arc<Filesystem>,
+    Vec<u8>,
+    tempfile::TempDir,
+) {
     let expected: Vec<u8> = (0..40 * MIB).map(|at| (at % 251) as u8).collect();
     let store = MemoryStore::new();
     store.seed("file", &expected);
-    let mut config = MemoryStore::config(64);
+    let mut config = MemoryStore::config(256);
     config.large_read_cutoff = 0;
-    let fs = Filesystem::new(config, store.clone()).unwrap();
-    (store, fs, expected)
+    let (fs, directory) = store.disk_filesystem(config).await;
+    (store, fs, expected, directory)
 }
 
 fn gate(store: &MemoryStore, offset: u64) -> Arc<Semaphore> {
@@ -46,7 +51,7 @@ async fn a_missing_prefix_does_not_refetch_its_already_cached_readahead_tail() {
     config.read_ahead_small = 2048;
     config.read_ahead_large = 2048;
     config.read_ahead_parallel = 2048;
-    let fs = Filesystem::new(config, store.clone()).unwrap();
+    let (fs, _directory) = store.disk_filesystem(config).await;
     let node = fs.lookup(1, "file").await.unwrap();
     assert_eq!(
         fs.read(node.ino, STEP as u64, STEP)
@@ -55,6 +60,7 @@ async fn a_missing_prefix_does_not_refetch_its_already_cached_readahead_tail() {
             .as_slice(),
         &expected[STEP..2 * STEP]
     );
+    fs.drain_disk_cache(Duration::from_secs(10)).await.unwrap();
     assert_eq!(
         fs.read(node.ino, 0, STEP).await.unwrap().as_slice(),
         &expected[..STEP]
@@ -69,7 +75,7 @@ async fn a_missing_prefix_does_not_refetch_its_already_cached_readahead_tail() {
 
 #[tokio::test]
 async fn requested_reply_is_published_before_unrelated_prefetch_finishes() {
-    let (store, fs, expected) = fixture();
+    let (store, fs, expected, _directory) = fixture().await;
     let node = fs.lookup(1, "file").await.unwrap();
     let ino = node.ino;
     let tail = gate(&store, 20 * MIB as u64);
@@ -108,13 +114,17 @@ async fn requested_reply_is_published_before_unrelated_prefetch_finishes() {
     );
     drop(block);
     drop(hit);
-    assert_eq!(fs.effective_budgets().data_used_bytes, 40 * MIB);
+    fs.drain_disk_cache(Duration::from_secs(10)).await.unwrap();
+    assert_eq!(
+        fs.effective_budgets().data_used_bytes,
+        fs.effective_budgets().disk_cache_funding_bytes
+    );
     assert_eq!(store.read_ranges.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
 async fn a_requested_dependency_failure_is_published_as_an_error() {
-    let (store, fs, _) = fixture();
+    let (store, fs, _, _directory) = fixture().await;
     let node = fs.lookup(1, "file").await.unwrap();
     let gate = Arc::new(Semaphore::new(0));
     gate.close();
@@ -137,12 +147,15 @@ async fn a_requested_dependency_failure_is_published_as_an_error() {
         Err(Error::Cancelled)
     ));
     assert!(finish(load).await.is_none());
-    assert_eq!(fs.effective_budgets().data_used_bytes, 0);
+    assert_eq!(
+        fs.effective_budgets().data_used_bytes,
+        fs.effective_budgets().disk_cache_funding_bytes
+    );
 }
 
 #[tokio::test]
 async fn failure_after_successful_reply_remains_an_observable_prefetch_error() {
-    let (store, fs, expected) = fixture();
+    let (store, fs, expected, _directory) = fixture().await;
     let node = fs.lookup(1, "file").await.unwrap();
     let tail = gate(&store, 20 * MIB as u64);
     let (ready, received) = oneshot::channel();
@@ -181,7 +194,7 @@ async fn failure_after_successful_reply_remains_an_observable_prefetch_error() {
 #[tokio::test]
 async fn metrics_a_waiting_follower_counts_reuse_of_the_published_range() {
     use std::{future::Future, task::Poll};
-    let (store, fs, expected) = fixture();
+    let (store, fs, expected, _directory) = fixture().await;
     let ino = fs.lookup(1, "file").await.unwrap().ino;
     let head = gate(&store, 0);
     let tail = gate(&store, 20 * MIB as u64);
@@ -245,7 +258,7 @@ async fn metrics_a_waiting_follower_counts_reuse_of_the_published_range() {
 
 #[tokio::test]
 async fn an_optional_tail_failure_cannot_cancel_a_still_loading_requested_range() {
-    let (store, fs, expected) = fixture();
+    let (store, fs, expected, _directory) = fixture().await;
     let ino = fs.lookup(1, "file").await.unwrap().ino;
     let head = gate(&store, 0);
     let tail = gate(&store, 20 * MIB as u64);
@@ -279,7 +292,7 @@ async fn an_optional_tail_failure_cannot_cancel_a_still_loading_requested_range(
 
 #[tokio::test]
 async fn cancelling_after_reply_releases_tail_owners_and_allows_a_following_fill() {
-    let (store, fs, expected) = fixture();
+    let (store, fs, expected, _directory) = fixture().await;
     let ino = fs.lookup(1, "file").await.unwrap().ino;
     let tail = gate(&store, 20 * MIB as u64);
     let (ready, received) = oneshot::channel();
@@ -306,7 +319,9 @@ async fn cancelling_after_reply_releases_tail_owners_and_allows_a_following_fill
             .is_cancelled()
     );
     tokio::time::timeout(Duration::from_secs(3), async {
-        while fs.effective_budgets().data_used_bytes != 20 * MIB + STEP {
+        while fs.effective_budgets().data_used_bytes
+            != fs.effective_budgets().disk_cache_funding_bytes + STEP
+        {
             tokio::task::yield_now().await;
         }
     })
@@ -327,7 +342,11 @@ async fn cancelling_after_reply_releases_tail_owners_and_allows_a_following_fill
     );
     drop(next);
     drop(block);
-    assert_eq!(fs.effective_budgets().data_used_bytes, 40 * MIB);
+    fs.drain_disk_cache(Duration::from_secs(10)).await.unwrap();
+    assert_eq!(
+        fs.effective_budgets().data_used_bytes,
+        fs.effective_budgets().disk_cache_funding_bytes
+    );
     assert_eq!(store.read_ranges.lock().unwrap().len(), 3);
 }
 
@@ -382,29 +401,29 @@ async fn validation_and_empty_reads_publish_exactly_one_result_without_backend_r
 
 #[tokio::test]
 async fn requested_bytes_across_parallel_chunks_are_complete_before_publication() {
-    let expected: Vec<u8> = (0..256 * 1024).map(|at| (at % 251) as u8).collect();
+    let expected: Vec<u8> = (0..512 * 1024).map(|at| (at % 251) as u8).collect();
     let store = MemoryStore::new();
     store.seed("file", &expected);
     let mut config = MemoryStore::config(32);
-    config.read_ahead = 256;
-    config.read_ahead_small = 256;
-    config.read_ahead_large = 256;
-    config.read_ahead_parallel = 64;
-    let fs = Filesystem::new(config, store.clone()).unwrap();
+    config.read_ahead = 512;
+    config.read_ahead_small = 512;
+    config.read_ahead_large = 512;
+    config.read_ahead_parallel = 128;
+    let (fs, _directory) = store.disk_filesystem(config).await;
     let ino = fs.lookup(1, "file").await.unwrap().ino;
     let tail = Arc::new(Semaphore::new(0));
-    for offset in [64 * 1024, 128 * 1024, 192 * 1024] {
+    for offset in [128 * 1024, 256 * 1024, 384 * 1024] {
         store
             .read_range_gates
             .lock()
             .unwrap()
-            .insert((offset, 64 * 1024), tail.clone());
+            .insert((offset, 128 * 1024), tail.clone());
     }
     let (ready, received) = oneshot::channel();
     let load = tokio::spawn({
         let fs = fs.clone();
         async move {
-            fs.read_reply(ino, 63 * 1024, 4096, move |result| {
+            fs.read_reply(ino, 127 * 1024, 4096, move |result| {
                 let _ = ready.send(result);
             })
             .await
@@ -423,13 +442,13 @@ async fn requested_bytes_across_parallel_chunks_are_complete_before_publication(
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(block.as_slice(), &expected[63 * 1024..63 * 1024 + 4096]);
+    assert_eq!(block.as_slice(), &expected[127 * 1024..127 * 1024 + 4096]);
     assert!(finish(load).await.is_none());
 }
 
 #[tokio::test]
 async fn a_write_and_fsync_during_tail_loading_cannot_publish_stale_bytes_to_a_new_read() {
-    let (store, fs, expected) = fixture();
+    let (store, fs, expected, _directory) = fixture().await;
     let ino = fs.lookup(1, "file").await.unwrap().ino;
     let tail = gate(&store, 20 * MIB as u64);
     let (ready, received) = oneshot::channel();

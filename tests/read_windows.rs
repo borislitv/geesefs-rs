@@ -105,6 +105,47 @@ async fn small_seeks_reduce_persistent_windows_but_one_sample_disables_history()
 }
 
 #[tokio::test]
+async fn seeks_outside_a_planned_interval_keep_persistent_read_ahead_in_both_directions() {
+    for (first, next) in [(6 * MIB, 0), (0, 6 * MIB)] {
+        let bytes: Vec<u8> = (0..8 * MIB).map(|at| (at % 251) as u8).collect();
+        let store = MemoryStore::new();
+        store.seed("file", &bytes);
+        let mut config = MemoryStore::config(64);
+        config.read_ahead = 1024;
+        config.read_ahead_small = 1024;
+        config.read_ahead_large = 1024;
+        let (fs, _directory) = store.disk_filesystem(config).await;
+        let ino = fs.lookup(1, "file").await.unwrap().ino;
+        let file = fs.open_file(ino, false).unwrap();
+        assert_eq!(
+            file.read(first as u64, READ_BLOCK_BYTES)
+                .await
+                .unwrap()
+                .as_slice(),
+            &bytes[first..first + READ_BLOCK_BYTES]
+        );
+        fs.drain_disk_cache(DEADLINE).await.unwrap();
+        for offset in (next..next + MIB).step_by(READ_BLOCK_BYTES) {
+            assert_eq!(
+                file.read(offset as u64, READ_BLOCK_BYTES)
+                    .await
+                    .unwrap()
+                    .as_slice(),
+                &bytes[offset..offset + READ_BLOCK_BYTES]
+            );
+            fs.drain_disk_cache(DEADLINE).await.unwrap();
+        }
+        assert_eq!(
+            *store.read_ranges.lock().unwrap(),
+            [(first as u64, MIB), (next as u64, MIB)],
+            "a seek outside either end must plan a new window without sliding its tail"
+        );
+        drop(file);
+        fs.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn oversized_requested_prefetch_is_bounded_and_uses_whole_parallel_chunks() {
     let store = MemoryStore::new();
     store.seed("file", &vec![b'x'; 128 * MIB]);
@@ -328,6 +369,58 @@ async fn a_fill_follower_cannot_pin_payload_while_queueing_output_behind_an_olde
     })
     .await
     .expect("a follower must not retain the bytes needed by the older FIFO admission");
+    drop(pins);
+    fs.shutdown().await.unwrap();
+    assert_eq!(fs.effective_budgets().data_used_bytes, 0);
+}
+
+#[tokio::test]
+async fn a_fill_follower_cannot_take_the_output_permits_needed_to_admit_its_producer() {
+    let store = MemoryStore::new();
+    for name in ["pin-a", "pin-b", "pin-c", "dirty", "file"] {
+        store.seed(name, &vec![b'x'; MIB]);
+    }
+    let fs = store.filesystem(16);
+    let mut pins = Vec::new();
+    for name in ["pin-a", "pin-b", "pin-c"] {
+        let ino = fs.lookup(1, name).await.unwrap().ino;
+        pins.push(fs.read(ino, 0, MIB).await.unwrap());
+    }
+    let dirty = fs.lookup(1, "dirty").await.unwrap().ino;
+    fs.write(dirty, 0, &vec![b'N'; MIB]).await.unwrap();
+    let ino = fs.lookup(1, "file").await.unwrap().ino;
+    assert_eq!(fs.effective_budgets().data_shared_bytes, 5 * MIB);
+    assert_eq!(fs.effective_budgets().data_used_bytes, 4 * MIB);
+    let (entered, release) = store.pause_put();
+    let leader = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.read(ino, 0, MIB).await }
+    });
+    tokio::time::timeout(DEADLINE, entered)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut follower = Box::pin(fs.read(ino, 0, MIB));
+    pending(follower.as_mut()).await;
+    assert_eq!(store.read_calls.load(Ordering::Relaxed), 3);
+    release.send(()).unwrap();
+    tokio::time::timeout(DEADLINE, fs.fsync(dirty))
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let producer = async {
+            let reply = leader.await.unwrap().unwrap();
+            assert_eq!(reply.as_slice(), &vec![b'x'; MIB]);
+        };
+        let subscriber = async {
+            let reply = follower.await.unwrap();
+            assert_eq!(reply.as_slice(), &vec![b'x'; MIB]);
+        };
+        tokio::join!(producer, subscriber);
+    })
+    .await
+    .expect("a successful flush must let producer and follower finish without cancelling either");
     drop(pins);
     fs.shutdown().await.unwrap();
     assert_eq!(fs.effective_budgets().data_used_bytes, 0);

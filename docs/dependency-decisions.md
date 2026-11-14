@@ -364,7 +364,7 @@ separate from daemon RSS.
 | Runtime/admission | [Tokio 1.54.1](https://docs.rs/tokio/1.54.1/tokio/) (MIT): owned semaphores, JoinSet, watch/mpsc, runtime and I/O; no custom executor. |
 | Upload provenance | [getrandom 0.4.3](https://docs.rs/getrandom/0.4.3/getrandom/) (MIT OR Apache-2.0), already locked transitively: safe OS randomness for 128-bit per-upload receipts; no custom entropy or cryptography. |
 | Metadata cache | [Moka 0.12.16](https://docs.rs/moka/0.12.16/moka/) (MIT OR Apache-2.0): bounded weighted directory/preload caches with namespace/TTL validation. |
-| Payload cache | [lru 0.19.0](https://docs.rs/lru/0.19.0/lru/) (MIT): synchronous `pop_lru` releases backing before required admission. Moka maintenance/policy changes cannot provide that boundary. |
+| Persistent region recency | [lru 0.19.0](https://docs.rs/lru/0.19.0/lru/) (MIT): bounded region-recency bookkeeping in the disk-cache policy; it does not retain clean RAM payload. |
 | Streaming/owners | bytes 1.12.1, futures-util 0.3.34, tokio-util 0.7.20 (MIT OR Apache-2.0): immutable owners and maintained stream/I/O adapters. Small charged Block views retain complete backing permits. |
 | Parsing/configuration | quick-xml 0.42.0 (MIT), clap/serde/serde_json/percent-encoding/thiserror (MIT OR Apache-2.0): bounded schema and compatibility adapters, not new parsers. |
 | OS/allocator | rustix 1.1.5 (Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT) safe process APIs; tikv jemalloc 0.7 (MIT OR Apache-2.0) default allocator/statistics. No local unsafe/FFI. |

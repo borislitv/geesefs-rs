@@ -2121,7 +2121,7 @@ impl Filesystem {
         // FUSE may issue neighboring reads before the first window completes.
         // Waiting readers must not reserve another whole window and evict the
         // very fill they can reuse. Recheck after wakeup and after taking ownership.
-        let fill = loop {
+        let fill = 'fill: loop {
             let admission = read::start_fill(&node, generation, start, start + prefetch as u64);
             match admission {
                 read::FillAdmission::Leader(owner) => {
@@ -2138,33 +2138,42 @@ impl Filesystem {
                             "role": "follower", "offset": start, "bytes": prefetch,
                         })
                     });
-                    // Acquire output before retaining published owners across a
-                    // wait. Queueing behind an older large admission while
-                    // pinning its required bytes would deadlock the FIFO lane.
-                    let mut reply = match self.data.try_reserve(length) {
-                        Ok(reply) => reply,
-                        Err(Error::Fs(libc::ENOMEM)) => {
-                            drop(waiting);
-                            drop(self.admit(length).await?);
-                            continue;
-                        }
-                        Err(error) => return Err(error),
-                    };
+                    let mut reply = None;
                     loop {
                         if !read::current(&node, generation) {
                             return Err(self.again("read_generation_after_fill_wait"));
                         }
-                        if let Some(block) = waiting.read(offset, length, &mut reply) {
-                            self.read_metrics.cache_hit(length);
-                            return Ok(Some(block));
+                        let progress = *waiting.progress.borrow();
+                        // A follower must not take permits needed by a producer
+                        // still flushing/admitting. Once fully admitted, retain
+                        // output credit so published chunks cannot pin an older
+                        // FIFO waiter while this follower queues for output.
+                        if progress != read::FillProgress::Admitting {
+                            if reply.is_none() {
+                                reply = Some(match self.data.try_reserve(length) {
+                                    Ok(reply) => reply,
+                                    Err(Error::Fs(libc::ENOMEM)) => {
+                                        drop(waiting);
+                                        drop(self.admit(length).await?);
+                                        continue 'fill;
+                                    }
+                                    Err(error) => return Err(error),
+                                });
+                            }
+                            if let Some(block) =
+                                waiting.read(offset, length, reply.as_mut().unwrap())
+                            {
+                                self.read_metrics.cache_hit(length);
+                                return Ok(Some(block));
+                            }
                         }
-                        if *waiting.done.borrow() {
+                        if progress == read::FillProgress::Done {
                             break;
                         }
                         metrics::observe(&self.diagnostics, Stage::FillWait, async {
                             let _ = tokio::time::timeout(
                                 self.config.request_timeout,
-                                waiting.done.changed(),
+                                waiting.progress.changed(),
                             )
                             .await
                             .map_err(|_| Error::Timeout("overlapping read fill"))?;
@@ -2221,6 +2230,7 @@ impl Filesystem {
             }
             break (charge, Arc::new(snapshot));
         };
+        fill.admitted();
         let cacheable = clean
             && snapshot.version == version
             && snapshot.remote.as_ref().map(|head| head.etag.clone()) == etag;

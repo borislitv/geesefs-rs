@@ -58,13 +58,17 @@ disjoint ranges can progress independently. Followers reserve output before
 waiting with published owners. If that reservation would queue, release the
 subscription before waiting: retaining its payload behind an older large FIFO
 request can deadlock that request. Generation checks still apply before reuse.
+While the producer is still admitting its complete window, followers instead wait
+without output permits so they cannot consume the producer's required capacity.
 
-Read-ahead remains bounded by the existing byte/task budget. A per-handle scalar
-planned-end hint avoids sliding an entire speculative window on every small
+Read-ahead remains bounded by the existing byte/task budget. A per-handle bounded
+planned-interval hint avoids sliding an entire speculative window on every small
 sequential read. It is not proof of cache coverage: required bytes always consult
 Foyer/source, including after cancellation or a dropped population. Without an
 eligible funded persistent tier, fetch only the required span. Metadata and
 writer overlays must not trigger speculative clean-payload retention.
+Seeks outside either boundary retain adaptive read-ahead rather than treating the
+entire earlier file prefix as already planned.
 
 ## Population and fallback
 

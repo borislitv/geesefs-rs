@@ -227,14 +227,17 @@ fills remain concurrent. The fill guard removes the interval on success, error
 or cancellation. Followers recheck the current generation and reuse validated
 active owners. Before retaining those owners across a wait, obtain reply admission;
 otherwise release the subscription before queueing so it cannot self-pin an older
-FIFO reader. A covering immutable owner supplies a view; fragmented results use
+FIFO reader. An admitting producer must first obtain its complete window budget;
+followers wait for its reading phase without reserving dependent output permits.
+A covering immutable owner supplies a view; fragmented results use
 their admitted composition output. Independent reads consult Foyer/source again.
 
 Each FUSE `OpenFile` owns its adaptive `Pattern`, matching the reference handle
 lifetime. Concurrent and reopened handles share persistent payload/active fills
 but not stream history. Legacy inode-only APIs retain their separate inode
-pattern. Every caller read advances history. A scalar planned-end hint prevents
+pattern. Every caller read advances history. A bounded planned-interval hint prevents
 sliding redundant speculative windows, without claiming persistent coverage.
+Seeking outside either boundary plans a new window.
 Without an eligible funded L2, fetch required bytes only. Read-ahead remains in
 the same caller-owned future, request slot and deadline; there is no hit-triggered
 retained-RAM refill.

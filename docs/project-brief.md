@@ -102,6 +102,17 @@ development task requires a draft PR; the previous release's serving authorizati
 does not automatically deploy this redesign. Performance and full compatibility
 remain separate, unaccepted gates.
 
+### Subsequent release authorization — 2026-11-14
+
+The operator subsequently requested completion of the rewrite, short local
+functional checks, a new full release and an update of the existing MOW reader.
+Complete the identified correctness/progress repairs and verify the actual release
+binary before that guarded handoff. Preserve the persistent inventory, metadata
+freshness, writer durability, resource settings and rollback. This authorizes the
+existing scoped reader only; it does not close the separate full-compatibility,
+sustained-performance or inventory-turnover gates. Coordinate the dashboard source
+schema with the new exporter and keep any transition's partial coverage explicit.
+
 ## Target and reference
 
 - Initial target: Linux, S3-compatible storage, and the extended metadata used by

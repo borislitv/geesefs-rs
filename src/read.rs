@@ -106,7 +106,14 @@ pub(crate) fn generation(version: u64, remote: Option<&CachedRemote>) -> u64 {
 pub(crate) struct Fill {
     end: u64,
     chunks: Arc<Mutex<Vec<(u64, Block)>>>,
-    done: tokio::sync::watch::Sender<bool>,
+    progress: tokio::sync::watch::Sender<FillProgress>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FillProgress {
+    Admitting,
+    Reading,
+    Done,
 }
 
 pub(crate) enum FillAdmission {
@@ -118,14 +125,14 @@ pub(crate) struct FillGuard {
     node: Arc<Inode>,
     key: (u64, u64),
     chunks: Arc<Mutex<Vec<(u64, Block)>>>,
-    done: tokio::sync::watch::Sender<bool>,
+    progress: tokio::sync::watch::Sender<FillProgress>,
 }
 
 /// Only subscribed active consumers can retain a completed producer's chunks.
 /// No entry survives in the inode registry after its producer finishes.
 pub(crate) struct FillWait {
     chunks: Arc<Mutex<Vec<(u64, Block)>>>,
-    pub done: tokio::sync::watch::Receiver<bool>,
+    pub progress: tokio::sync::watch::Receiver<FillProgress>,
 }
 
 impl FillWait {
@@ -181,26 +188,26 @@ pub(crate) fn start_fill(
         if at < end && start < fill.end {
             return FillAdmission::Wait(FillWait {
                 chunks: fill.chunks.clone(),
-                done: fill.done.subscribe(),
+                progress: fill.progress.subscribe(),
             });
         }
     }
     let key = (generation, start);
-    let (done, _) = tokio::sync::watch::channel(false);
+    let (progress, _) = tokio::sync::watch::channel(FillProgress::Admitting);
     let chunks = Arc::new(Mutex::new(Vec::new()));
     fills.insert(
         key,
         Fill {
             end,
             chunks: chunks.clone(),
-            done: done.clone(),
+            progress: progress.clone(),
         },
     );
     FillAdmission::Leader(FillGuard {
         node: node.clone(),
         key,
         chunks,
-        done,
+        progress,
     })
 }
 
@@ -208,9 +215,12 @@ impl FillGuard {
     pub(crate) fn node(&self) -> &Arc<Inode> {
         &self.node
     }
+    pub(crate) fn admitted(&self) {
+        self.progress.send_replace(FillProgress::Reading);
+    }
     pub(crate) fn publish(&self, at: u64, block: Block) {
         self.chunks.lock().unwrap().push((at, block));
-        self.done.send_replace(false);
+        self.progress.send_replace(FillProgress::Reading);
     }
 }
 
@@ -471,7 +481,7 @@ pub(crate) async fn load_disk_range(
 impl Drop for FillGuard {
     fn drop(&mut self) {
         self.node.read_fills.lock().unwrap().remove(&self.key);
-        self.done.send_replace(true);
+        self.progress.send_replace(FillProgress::Done);
     }
 }
 
@@ -479,12 +489,12 @@ impl Drop for FillGuard {
 pub struct Pattern {
     end: u64,
     sequential: u64,
-    planned: Option<(u64, u64)>,
+    planned: Option<(u64, u64, u64)>,
     /// Completed contiguous runs, not individual kernel/FUSE read sizes.
     recent: std::collections::VecDeque<u64>,
 }
 impl Pattern {
-    /// A scalar read-ahead hint, not evidence that bytes are cached. Required
+    /// A bounded interval hint, not evidence that bytes are cached. Required
     /// bytes always consult Foyer/source. Avoid sliding a new speculative window
     /// forward on every small read after a producer has already planned its tail.
     pub(crate) fn persistent_window(
@@ -496,11 +506,11 @@ impl Pattern {
     ) -> usize {
         if self
             .planned
-            .is_some_and(|(old, end)| old == generation && start < end)
+            .is_some_and(|(old, begin, end)| old == generation && begin <= start && start < end)
         {
             return required;
         }
-        self.planned = Some((generation, start.saturating_add(planned as u64)));
+        self.planned = Some((generation, start, start.saturating_add(planned as u64)));
         planned
     }
     pub(crate) fn window(&self, config: &crate::config::Config) -> usize {

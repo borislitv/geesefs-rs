@@ -5,6 +5,31 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-14: remove retained payload and repair reviewed progress/window gaps
+
+Remove the application's idle clean-payload cache, flush loans and hit-refill
+orchestration. Active producers, subscribed readers and replies retain charged
+owners; independent reuse goes through Foyer or the source. Eligible validated
+fills populate the existing guarded persistent tier without RAM eviction; without
+an eligible tier, download required bytes only. Export active reuse as `inflight`,
+remove obsolete retention observations and align benchmark contracts.
+
+Independent five-area review plus falsification reproduced two missing cases:
+an end-only planned hint suppressed read-ahead after a backward seek, and follower
+output permits could prevent admission of the producer they awaited. Track both
+interval boundaries and distinguish admitting/reading/terminal fill progress on
+the existing watch channel. Preserve the separate protection that releases a
+published subscription before queueing behind an older FIFO reader. Public
+regressions fail on both original cases before these corrections and pass with
+them; broad and native checks remain separately scoped evidence.
+
+The operator subsequently authorized short local functional checks, a full release
+and the existing MOW reader update. Verify the actual release binary and preserve
+inventory, budgets, freshness, durability and rollback. The dashboard consumer
+must move to the new source vocabulary with explicit partial-transition coverage.
+Hardlink/flat-directory compatibility gaps and sustained-performance/turnover
+acceptance remain open; this delivery does not close them.
+
 ## 2026-11-14: prepare the authorized 0.1.14 delivery
 
 Release the reviewed complete-directory absence correction as a patch without

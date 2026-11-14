@@ -5,6 +5,28 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Complete metadata coverage — 2026-11-14
+
+`metadata_coverage` exercises public lookup/list/read/write behavior and backend
+side effects. Root and descendant absence tests first fail without coverage reuse;
+the root fixture makes 68 LIST calls instead of one after 66 distinct absent names.
+The corrected path requires no additional HEAD/LIST/GET. Boundary fixtures preserve
+unemitted objects, markers, implicit directories, truncated roots, local mutation,
+failed/cancelled LIST, disabled negative caching, zero TTL and responses that
+consumed their original TTL. The last test waits for the actual std-clock freshness
+deadline because Tokio's virtual clock cannot advance `std::time::Instant`.
+
+```bash
+timeout 180s cargo test --offline --locked --test metadata_coverage --test lookup_preload --test subtree_listing --test directory_pages --test directory_resolution --test directory_page_expiry --test attribute_freshness --test metadata_review_regressions --test rename_backing_refresh
+```
+
+These are deterministic store-boundary controls, not wire retry counts or proof
+that every natural metadata request is avoidable. Separate released-source probes
+reproduce concurrent cold lookup EAGAIN and duplicate directory LIST. They remain
+open; complete-coverage reuse does not establish per-name/per-inode singleflight.
+The public Go comparison also preserves Rust's stronger permission/getattr
+freshness instead of copying stale reference behavior.
+
 ## Optional-tail lookup work — 2026-11-14
 
 The cache's crate-visible gap API tests preserve an earlier long overlap behind a

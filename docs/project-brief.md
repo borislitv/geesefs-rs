@@ -48,6 +48,22 @@ rollout or source-data writes; unresolved compatibility and
 functional failures remain explicit. Earlier statistical gates below are retained
 as the historical measurement contract, not prerequisites for this current task.
 
+### Follow-up scope — 2026-11-14
+
+The previous metrics release and scoped reader update are complete. The next task
+prioritizes total successful userspace delivery against actual consumed S3 GET
+body bytes, with requested L1/L2 breakdowns as secondary views. These descriptive
+ratios must preserve missing/reset/zero/negative cases and must not be labelled a
+causal benefit of L2. Reorganize the existing dashboard using the current exporter
+schema; a dashboard update does not authorize another reader rollout.
+
+Independently compare metadata request paths with public Go 0.43.9 source and
+reproduce concrete excess HEAD/LIST work. Preserve authoritative RAM metadata,
+bounded negative caching and the existing TTL. Reuse already proven complete
+listing coverage without treating a speculative attempt or partial page as
+authoritative absence. Source-confirmed or reproduced remaining findings remain
+explicit; identifying one does not imply that every finding is repaired.
+
 ## Target and reference
 
 - Initial target: Linux, S3-compatible storage, and the extended metadata used by

@@ -201,6 +201,50 @@ Jobs are not HTTP attempts, completed HTTP responses or a universal S3 request c
 These observe filesystem reads reaching userspace. Kernel page-cache and nginx
 cache hits can bypass this path; this is not an HTTP client hit ratio.
 
+### Total delivery versus consumed source bytes
+
+For the same reader/process lifecycle and aligned interval, define:
+
+- `T = sum_source(delta(geesefs_read_delivered_bytes_total{source}))` over all
+  four sources, including `overlay`.
+- `S = delta(geesefs_s3_body_bytes_total)`, the SDK-consumed GET body boundary.
+- Observed source reduction: `100 * (1 - S / T)` when `T > 0`.
+- Delivered/source factor: `T / S` when `S > 0`.
+
+Show `T / elapsed_seconds` and `S / elapsed_seconds` together in bytes/second
+before the requested L1/L2 breakdown. Do not add hit/miss byte counters to `T`:
+they account for the same delivery again. A subsequent reuse after L2 promotion
+is L1 delivery, but still contributes once to `T`.
+
+This is descriptive source consumption, not a causal estimate of bytes or requests
+saved specifically by L2. `S` includes alignment/read-ahead and consumed prefixes
+that may later be rejected, cancelled or fail validation. It excludes TCP/TLS,
+HEAD/LIST bodies and unconsumed bytes; executions can occur without any consumed
+body. Overlay delivery can involve source materialization and is not proof of
+clean-cache offload. Neither boundary includes all client HTTP traffic.
+
+An interval can consume prefetched bytes before they are requested, or deliver
+bytes fetched before the interval. Reduction may therefore be negative: `T=100`,
+`S=200` gives `-100%`, not a clamped zero. Explicit `T>0,S=0` gives `100%` reduction
+but no finite delivered/source factor. At `T=0`, reduction is undefined even when
+`S=0`; retain the individual rates and show the ratio as NoData. Missing body or
+delivery observations are not explicit zeros.
+
+Derive reset-aware rates for each monotonic series before aggregating sources or
+readers. All four delivered-source series and the body observation must be present
+and finite, with detailed diagnostics enabled, for a reader to enter a matched
+summary point; show matched-reader coverage beside the summary. A reset or missing
+source excludes both operands for that reader, not just the inconvenient one.
+Use the same matched cohort for sums,
+then calculate `(sum(T)-sum(S))/sum(T)`, never an average of reader percentages.
+Label partial coverage explicitly. Endpoint totals across a restart require
+verified lifecycle segments rather than subtracting unrelated generations.
+
+The dashboard aligns host domains explicitly before arithmetic: native Monium
+can broadcast a singleton series across other readers. Structural zero entries
+only establish those identities and observation counts; they do not make missing
+traffic valid. A reader without complete measurements contributes neither operand.
+
 ### Namespace and process memory
 
 | Metric | Meaning |

@@ -5,6 +5,21 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-15: admit aggregate L2 funding beyond one semaphore request
+
+The 1.5-TB cold-start gate exposed a missing boundary in the index-scaling checks:
+4,431,857,280 bytes of engine funding fit the data lane, but exceed Tokio's
+`u32` single-request permit limit. Version 0.1.16 therefore bypassed L2 before
+creating its data file. Funding arithmetic and small-device controls alone did
+not exercise actual admission at that capacity; the handoff remained withdrawn.
+
+Reserve the aggregate engine credit through bounded nonblocking requests and
+merge their existing RAII reservations. Failed partial admission releases all
+new credit; close releases the complete owner. Keep the single-payload limit,
+configured data allowance and index capacity unchanged. Public prepared-cache
+regressions reproduce the actual funding rejection and occupied-lane boundary
+without allocating a multi-terabyte file or multi-gigabyte payload.
+
 ## 2026-11-15: scale funded L2 indexes and keep expected timeouts out of warn
 
 The capacity-derived index was additionally capped at 8,388,608 slots even when

@@ -1755,6 +1755,129 @@ fn debug_records_correlate_successful_request_lifecycle_and_phase_scopes() {
 }
 
 #[test]
+fn l2_timeout_fallback_is_debug_only_and_keeps_error_replies_visible() {
+    const CHILD: &str = "GEESEFS_L2_TIMEOUT_LOG_CHILD";
+    if let Ok(mode) = std::env::var(CHILD) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let store = support::MemoryStore::new();
+        let expected = vec![73; 16 * 1024];
+        store.seed("private-file.rpm", &expected);
+        let mut config = support::MemoryStore::config(64);
+        config.request_timeout = Duration::from_secs(5);
+        config.metrics_listen = Some("127.0.0.1:0".parse().unwrap());
+        config.diagnostic_log_level = if mode == "debug" {
+            geesefs_rs::config::DiagnosticLogLevel::Debug
+        } else {
+            geesefs_rs::config::DiagnosticLogLevel::Warn
+        };
+        let (fs, _directory) = runtime.block_on(store.disk_filesystem(config));
+        let ino = runtime
+            .block_on(fs.lookup(1, "private-file.rpm"))
+            .unwrap()
+            .ino;
+        let mut session = Session::new(fs.clone(), &runtime);
+        let handle = open(&mut session, ino);
+        // A contended real namespace outlives the optional L2 deadline. Source
+        // delivery must succeed while that qualification worker still owns it.
+        let (ready, held) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let blocker = std::thread::spawn({
+            let fs = fs.clone();
+            move || {
+                let _guard = fs.namespace.lock().unwrap();
+                ready.send(()).unwrap();
+                wait.recv_timeout(Duration::from_secs(10)).unwrap();
+            }
+        });
+        held.recv_timeout(Duration::from_secs(3)).unwrap();
+        let request = read_range(&mut session, ino, handle, 0, expected.len() as u32);
+        let reply = session.receive();
+        let timeouts = fs.disk_cache_stats().unwrap().read_fallbacks
+            [geesefs_rs::disk_cache::ReadFallback::Timeout as usize];
+        release.send(()).unwrap();
+        blocker.join().unwrap();
+        assert_eq!((unique(&reply), errno(&reply)), (request, 0));
+        assert_eq!(&reply[16..], expected.as_slice());
+        assert!(
+            timeouts > 0,
+            "the fixture must actually take the L2 timeout fallback"
+        );
+        store
+            .fail_head_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        session.send(1, 1, b"private-failing-lookup\0");
+        assert_eq!(errno(&session.receive()), -libc::EIO);
+        session.close();
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for mode in ["warn", "debug"] {
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "l2_timeout_fallback_is_debug_only_and_keeps_error_replies_visible",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env(CHILD, mode)
+            .kill_on_drop(true);
+        let output = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(15), child.output())
+                .await
+                .unwrap()
+                .unwrap()
+        });
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{mode}: {stderr}");
+        let records: Vec<serde_json::Value> = stderr
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(
+            records.iter().any(|record| record["event"] == "fuse_reply"
+                && record["level"] == "error"
+                && record["errno"] == libc::EIO),
+            "{stderr}"
+        );
+        let fallbacks: Vec<_> = records
+            .iter()
+            .filter(|record| record["event"] == "l2_read_fallback")
+            .collect();
+        if mode == "warn" {
+            assert!(
+                fallbacks.is_empty(),
+                "successful fallback must not produce a warning: {stderr}"
+            );
+        } else {
+            assert!(
+                !fallbacks.is_empty(),
+                "debug must retain fallback diagnostics: {stderr}"
+            );
+            assert!(
+                fallbacks.iter().all(|record| record["level"] == "debug"),
+                "{stderr}"
+            );
+            assert!(
+                fallbacks
+                    .iter()
+                    .any(|record| record["details"]["reason"] == "timeout"),
+                "{stderr}"
+            );
+        }
+        assert!(!stderr.contains("private-file.rpm"));
+        assert!(!stderr.contains("private-failing-lookup"));
+    }
+}
+
+#[test]
 fn diagnostic_logs_are_bounded_attributed_and_exclude_paths_and_backend_text() {
     const CHILD: &str = "GEESEFS_DIAGNOSTIC_LOG_CHILD";
     if let Ok(mode) = std::env::var(CHILD) {

@@ -1342,7 +1342,7 @@ dependencies = [
 
 [[package]]
 name = "geesefs-rs"
-version = "0.1.15"
+version = "0.1.17"
 dependencies = [
  "async-trait",
  "aws-config",

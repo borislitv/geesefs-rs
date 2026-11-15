@@ -315,7 +315,14 @@ impl PreparedDiskCache {
         let started = Instant::now();
         let result = (|| {
             let funding = self.funding(resources.limit())?;
-            let owner = resources.try_reserve(funding.required_bytes)?;
+            // Aggregate engine funding is not one payload allocation. Tokio's
+            // per-request u32 limit must not cap the whole shared-lane credit.
+            let mut owner = resources.try_reserve(funding.required_bytes.min(u32::MAX as usize))?;
+            while owner.size() < funding.required_bytes {
+                let bytes = (funding.required_bytes - owner.size()).min(u32::MAX as usize);
+                // Nonblocking admission: an error drops every acquired credit.
+                owner.merge(resources.try_reserve(bytes)?);
+            }
             Ok((funding, owner))
         })();
         match result {

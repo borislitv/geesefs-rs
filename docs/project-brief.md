@@ -113,6 +113,18 @@ existing scoped reader only; it does not close the separate full-compatibility,
 sustained-performance or inventory-turnover gates. Coordinate the dashboard source
 schema with the new exporter and keep any transition's partial coverage explicit.
 
+### Cold-cache storage follow-up — 2026-11-15
+
+The operator authorized replacing the existing scoped reader's active L2 with a
+cold approximately 1.5-TB cache on its NVMe cache filesystem, deleting the old
+active cache and reducing nginx's disk-cache allowance to approximately 1 TB.
+Complete the index-sizing, other-cache/memory-pressure and current-log analysis
+before restarting. Qualify automatic index scaling and expected-fallback log
+levels through public behavior, preserve real errors and verify the exact build
+before the guarded handoff. Separate application-managed cache directories and
+verify actual free space after nginx's reduction. This does not authorize other
+reader/writer changes or close broader compatibility/performance acceptance.
+
 ## Target and reference
 
 - Initial target: Linux, S3-compatible storage, and the extended metadata used by

@@ -536,6 +536,76 @@ fn bounded_identity_range_and_scaled_funding() {
     assert!(Funding::derive((16 * MIB) as u64, MIB).is_err());
 }
 
+#[test]
+fn large_cache_index_scales_with_disk_capacity_and_available_memory() {
+    // Explicit full-record counts, including capacities beyond the old 8M cap.
+    for (capacity, entries) in [
+        (1_000_000_000_000, 7_629_394),
+        (1_499_999_997_952, 11_444_091),
+        (2_199_023_255_552, 16_777_216),
+    ] {
+        let funding = Funding::derive(capacity, 64 * 1024 * MIB).unwrap();
+        assert_eq!(funding.index_entries, entries, "capacity={capacity}");
+        assert!(funding.required_bytes <= 64 * 1024 * MIB);
+        assert_eq!(funding.recent_entries, 65_536);
+    }
+    let constrained = Funding::derive(2_199_023_255_552, 1024 * MIB).unwrap();
+    assert_eq!(constrained.index_entries, 524_288);
+    assert!(constrained.required_bytes <= 1024 * MIB);
+}
+
+#[test]
+#[cfg(target_pointer_width = "64")]
+fn large_cache_funding_owns_more_than_one_semaphore_request_without_allocating_media() {
+    let dir = support::directory();
+    let resources = Budget::new(37_308_661_760).unwrap();
+    let prepared = PreparedDiskCache::prepare(dir.path(), 1_499_999_997_952).unwrap();
+    let status = prepared.status();
+    let funded = prepared
+        .fund(&resources)
+        .expect("the data lane funds the complete 1.5-TB index");
+    assert_eq!(resources.used(), 4_431_857_280);
+    assert_eq!(status.state(), State::Prepared);
+    assert!(!dir.path().join("payload-v1.cache").exists());
+    funded.close();
+    assert_eq!(status.state(), State::Closed);
+    assert_eq!(resources.used(), 0);
+    assert!(PreparedDiskCache::prepare(dir.path(), 1_499_999_997_952).is_ok());
+}
+
+#[test]
+#[cfg(target_pointer_width = "64")]
+fn large_cache_funding_rolls_back_partial_admission_when_other_owners_exhaust_the_lane() {
+    let dir = support::directory();
+    let resources = Budget::new(24 * 1024 * MIB).unwrap();
+    // Leave 4 GiB + 10 bytes: the first request fits, the full funding does not.
+    let held: Vec<_> = (0..5)
+        .map(|_| resources.try_reserve(u32::MAX as usize - 1).unwrap())
+        .collect();
+    let prepared = PreparedDiskCache::prepare(dir.path(), 1_499_999_997_952).unwrap();
+    let status = prepared.status();
+    assert!(matches!(
+        prepared.fund(&resources),
+        Err(error::Error::Fs(libc::ENOMEM))
+    ));
+    assert_eq!(status.state(), State::Bypass);
+    assert_eq!(
+        resources.used(),
+        21_474_836_470,
+        "failed funding must release every partial credit"
+    );
+    assert!(!dir.path().join("payload-v1.cache").exists());
+    drop(held);
+    assert_eq!(resources.used(), 0);
+    let funded = PreparedDiskCache::prepare(dir.path(), 1_499_999_997_952)
+        .unwrap()
+        .fund(&resources)
+        .unwrap();
+    assert_eq!(resources.used(), 4_431_857_280);
+    funded.close();
+    assert_eq!(resources.used(), 0);
+}
+
 #[tokio::test]
 async fn output_budget_and_wrong_coverage_fail_without_allocation_or_data() {
     use disk_cache::{READ_WAIT_BYTES, ReadFallback};

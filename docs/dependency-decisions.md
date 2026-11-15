@@ -7,6 +7,17 @@ translated, vendored or linked. This package forbids unsafe code in every target
 License declarations are checked; the complete binary-distribution notice audit
 remains outstanding. See LICENSE and NOTICE for source attribution.
 
+## Aggregate disk-cache funding — 2026-11-15
+
+Retain MIT-licensed Tokio 1.54.1 and the existing `Reservation::merge` adapter over
+[`OwnedSemaphorePermit::merge`](https://docs.rs/tokio/1.54.1/tokio/sync/struct.OwnedSemaphorePermit.html#method.merge).
+The semaphore's total capacity and merged owner use `usize`; one acquire request
+uses `u32`. Fund a large engine with bounded nonblocking acquisitions from the
+same semaphore and one merged RAII owner. Failure drops partial credit without
+waiting while holding it. This is aggregate bookkeeping, not a giant payload
+allocation; individual payload limits and asynchronous admission are unchanged.
+No new semaphore, allocator, dependency, custom permit owner or format is needed.
+
 ## Compact metadata owners and fetched-time page expiry — 2026-11-13
 
 Retain the standard library's `Arc`, `Option<Box<_>>` and existing independent

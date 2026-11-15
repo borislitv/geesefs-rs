@@ -171,13 +171,23 @@ impl Code for DiskValue {
         if &header[..4] != VALUE_MAGIC || len == 0 || len > MAX_PAYLOAD_BYTES {
             return Err(invalid("invalid disk payload envelope"));
         }
-        let mut bytes = vec![0; len].into_boxed_slice();
-        r.read_exact(&mut bytes).map_err(foyer::Error::io_error)?;
+        // The slice reader used by Foyer can fill spare Vec capacity without
+        // zeroing the payload first. Bound generic readers too, and retain
+        // read_exact's truncation rejection before checking the CRC.
+        let mut bytes = Vec::with_capacity(len);
+        r.take(len as u64)
+            .read_to_end(&mut bytes)
+            .map_err(foyer::Error::io_error)?;
+        if bytes.len() != len {
+            return Err(foyer::Error::io_error(
+                std::io::ErrorKind::UnexpectedEof.into(),
+            ));
+        }
         if crc32fast::hash(&bytes) != u32::from_le_bytes(header[8..12].try_into().unwrap()) {
             return Err(invalid("disk payload CRC mismatch"));
         }
         end_of_record(r)?;
-        Ok(Self::Decoded(bytes))
+        Ok(Self::Decoded(bytes.into_boxed_slice()))
     }
     fn estimated_size(&self) -> usize {
         12 + self.bytes().len()
@@ -275,5 +285,87 @@ mod tests {
         assert!(
             matches!(DiskValue::decode(&mut bytes.as_slice()), Err(e) if e.kind() == foyer::ErrorKind::OutOfRange)
         );
+    }
+
+    #[test]
+    fn payload_decode_requires_the_declared_length_even_with_a_valid_short_crc() {
+        // CRC-valid prefix must not turn a truncated record into a valid value.
+        let mut record = b"GLV1\x09\x00\x00\x00".to_vec();
+        record.extend_from_slice(&crc32fast::hash(b"1234").to_le_bytes());
+        record.extend_from_slice(b"1234");
+        assert!(DiskValue::decode(&mut record.as_slice()).is_err());
+
+        let record = b"GLV1\x09\x00\x00\x00\x26\x39\xf4\xcb123456789";
+        for end in 0..record.len() {
+            assert!(
+                DiskValue::decode(&mut &record[..end]).is_err(),
+                "accepted record truncated at {end}"
+            );
+        }
+    }
+
+    #[test]
+    fn payload_decode_handles_short_reads_interruptions_and_io_failure() {
+        struct Chunks<'a> {
+            bytes: &'a [u8],
+            interrupt: bool,
+            fail_at_end: bool,
+        }
+        impl Read for Chunks<'_> {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                if self.interrupt {
+                    self.interrupt = false;
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                if self.bytes.is_empty() && self.fail_at_end {
+                    return Err(std::io::ErrorKind::Other.into());
+                }
+                let len = out.len().min(7);
+                self.bytes.read(&mut out[..len])
+            }
+        }
+        let record = b"GLV1\x09\x00\x00\x00\x26\x39\xf4\xcb123456789";
+        let mut reader = Chunks {
+            bytes: record,
+            interrupt: true,
+            fail_at_end: false,
+        };
+        assert_eq!(
+            DiskValue::decode(&mut reader).unwrap().bytes(),
+            b"123456789"
+        );
+        for end in [16, record.len()] {
+            let mut reader = Chunks {
+                bytes: &record[..end],
+                interrupt: false,
+                fail_at_end: true,
+            };
+            assert!(DiskValue::decode(&mut reader).is_err());
+        }
+    }
+
+    #[test]
+    fn payload_decode_accepts_exact_bounds_and_rejects_trailing_bytes() {
+        for len in [1, MAX_PAYLOAD_BYTES] {
+            let payload: Vec<_> = (0..len).map(|i| (i % 251) as u8).collect();
+            let mut record = VALUE_MAGIC.to_vec();
+            record.extend_from_slice(&(len as u32).to_le_bytes());
+            record.extend_from_slice(&crc32fast::hash(&payload).to_le_bytes());
+            record.extend_from_slice(&payload);
+            let value = DiskValue::decode(&mut record.as_slice()).unwrap();
+            assert_eq!(value.bytes(), payload);
+            assert_eq!(value.estimated_size(), 12 + len);
+            record.push(0);
+            assert!(DiskValue::decode(&mut record.as_slice()).is_err());
+        }
+    }
+
+    #[test]
+    fn payload_decode_does_not_consume_an_unbounded_trailing_body() {
+        let mut bytes = b"GLV1\x09\x00\x00\x00\x26\x39\xf4\xcb123456789".to_vec();
+        bytes.extend_from_slice(&[0; 4096]);
+        let mut reader = std::io::Cursor::new(bytes);
+        assert!(DiskValue::decode(&mut reader).is_err());
+        assert_eq!(reader.position(), 12 + 9 + 1);
     }
 }

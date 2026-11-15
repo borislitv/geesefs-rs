@@ -222,6 +222,9 @@ impl FillGuard {
         self.chunks.lock().unwrap().push((at, block));
         self.progress.send_replace(FillProgress::Reading);
     }
+    pub(crate) fn published_chunk(&self, index: usize) -> Option<(u64, Block)> {
+        self.chunks.lock().unwrap().get(index).cloned()
+    }
 }
 
 #[derive(Clone)]

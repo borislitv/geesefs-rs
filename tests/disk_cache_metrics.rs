@@ -519,9 +519,9 @@ async fn real_fill_recovery_and_independent_l2_reads_have_exact_count_and_byte_m
             1.
         );
     }
-    // Requested 11..48 is planned as 0..48: report validated pipeline bytes,
-    // not a fabricated count of the 37 user-visible bytes.
-    assert_eq!(sample(&text, "geesefs_disk_cache_hit_bytes_total"), 48.);
+    // The required-only plan delivers exactly 11..48 from the validated record,
+    // without including an aligned prefix in pipeline delivery metrics.
+    assert_eq!(sample(&text, "geesefs_disk_cache_hit_bytes_total"), 37.);
     // Cross-language contract: every concrete benchmark metric is exported by
     // the real renderer, and missing observations remain explicitly unavailable.
     let python = std::env::var_os("GEESEFS_TEST_PYTHON").unwrap_or_else(|| {
@@ -661,7 +661,7 @@ async fn real_fill_recovery_and_independent_l2_reads_have_exact_count_and_byte_m
         sample(&again, "geesefs_disk_cache_read_operations_total"),
         2.
     );
-    assert_eq!(sample(&again, "geesefs_disk_cache_hit_bytes_total"), 96.);
+    assert_eq!(sample(&again, "geesefs_disk_cache_hit_bytes_total"), 74.);
     assert_eq!(
         fs.effective_budgets().data_used_bytes,
         budgets.data_used_bytes
@@ -680,5 +680,5 @@ async fn real_fill_recovery_and_independent_l2_reads_have_exact_count_and_byte_m
         sample(&text, "geesefs_disk_cache_state{state=\"closed\"}"),
         1.
     );
-    assert_eq!(sample(&text, "geesefs_disk_cache_hit_bytes_total"), 96.);
+    assert_eq!(sample(&text, "geesefs_disk_cache_hit_bytes_total"), 74.);
 }

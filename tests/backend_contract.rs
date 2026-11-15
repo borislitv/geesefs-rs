@@ -1373,6 +1373,91 @@ async fn closing_delivery_after_a_prefix_cancels_the_get_without_losing_its_pinn
 }
 
 #[tokio::test]
+async fn a_streamed_multichunk_reply_precedes_optional_population_waits() {
+    const CHUNK: usize = 128 * 1024;
+    let expected: Vec<u8> = (0..2 * CHUNK).map(|at| (at % 251) as u8).collect();
+    let (entered, source_started) = tokio::sync::oneshot::channel();
+    let (send_body, body_allowed) = std::sync::mpsc::channel();
+    let body = GatedBody {
+        prefix: Cursor::new(Vec::new()),
+        tail: Cursor::new(expected.clone()),
+        entered: Some(entered),
+        release: Some(body_allowed),
+    };
+    let (store, server) = file_server(body, expected.len());
+    let (fs, _directory) = filesystem(store).await;
+    let ino = fs.lookup(1, "file").await.unwrap().ino;
+    let (ready, received) = tokio::sync::oneshot::channel();
+    let load = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.read_reply_data(ino, 0, 2 * CHUNK, |result| {
+                ready
+                    .send((
+                        result.map(<[u8]>::to_vec),
+                        fs.disk_read_decisions()
+                            [geesefs_rs::read::DiskDecision::NamespaceContended as usize],
+                    ))
+                    .unwrap();
+            })
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), source_started)
+        .await
+        .unwrap()
+        .unwrap();
+    let (locked, lock_ready) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let locker = std::thread::spawn({
+        let fs = fs.clone();
+        move || {
+            let _namespace = fs.namespace.lock().unwrap();
+            locked.send(()).unwrap();
+            released.recv_timeout(Duration::from_secs(3)).unwrap();
+        }
+    });
+    lock_ready.recv_timeout(Duration::from_secs(2)).unwrap();
+    send_body.send(()).unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(2), received).await;
+    let observed = tokio::time::timeout(Duration::from_secs(2), async {
+        while !load.is_finished()
+            && fs.disk_read_decisions()[geesefs_rs::read::DiskDecision::NamespaceContended as usize]
+                == 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    release.send(()).unwrap();
+    locker.join().unwrap();
+    observed.unwrap();
+    let (bytes, population_waits) = reply.unwrap().unwrap();
+    assert_eq!(bytes.unwrap(), expected);
+    assert_eq!(
+        population_waits, 0,
+        "a single GET's later required chunks must be delivered before optional population can wait"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), load)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    let captured = server.join().unwrap();
+    assert_eq!(captured.method, "GET");
+    assert_eq!(captured.headers["range"], "bytes=0-262143");
+    fs.drain_disk_cache(Duration::from_secs(3)).await.unwrap();
+    // The only source server has exited. A hole/refetch cannot accidentally
+    // pass by obtaining the same bytes from a second source exchange.
+    assert_eq!(
+        fs.read(ino, 0, expected.len()).await.unwrap().as_slice(),
+        expected
+    );
+}
+
+#[tokio::test]
 async fn filesystem_keeps_a_valid_prefix_after_tail_failure_or_cancellation() {
     const CHUNK: usize = 128 * 1024;
     let expected: Vec<u8> = (0..4 * CHUNK).map(|at| (at % 251) as u8).collect();

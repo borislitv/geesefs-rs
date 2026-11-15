@@ -55,6 +55,216 @@ fn scoped_store() -> Arc<MemoryStore> {
 }
 
 #[tokio::test]
+async fn source_population_survives_brief_namespace_contention() {
+    for recovered in [false, true] {
+        population_with_namespace_contention(recovered, "release").await;
+    }
+}
+
+#[tokio::test]
+async fn multichunk_source_reply_does_not_wait_for_contended_population() {
+    let dir = tempfile::tempdir().unwrap();
+    let mount = tempfile::tempdir().unwrap();
+    let store = scoped_store();
+    let bytes: Vec<_> = (0..2 * READ_BLOCK_BYTES).map(|i| (i % 251) as u8).collect();
+    store.seed("package.rpm", &bytes);
+    let mut config = configured(dir.path(), mount.path());
+    config.read_ahead = 256;
+    config.read_ahead_small = 256;
+    config.read_ahead_large = 256;
+    config.read_ahead_parallel = 128;
+    let fs = attach(config, store.clone()).await;
+    let ino = fs.lookup(1, "package.rpm").await.unwrap().ino;
+    let source = Arc::new(tokio::sync::Semaphore::new(0));
+    *store.read_gate.lock().unwrap() = Some(source.clone());
+    let (delivered, delivery) = tokio::sync::oneshot::channel();
+    let mut reader = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            let observer = fs.clone();
+            fs.read_reply_data(ino, 0, 2 * READ_BLOCK_BYTES, move |result| {
+                delivered
+                    .send((
+                        result.unwrap().to_vec(),
+                        observer.disk_read_decisions()
+                            [geesefs_rs::read::DiskDecision::NamespaceContended as usize],
+                    ))
+                    .unwrap();
+            })
+            .await
+        }
+    });
+    // Both independent source producers have passed required-read qualification,
+    // but neither can deliver its requested chunk until the source gate opens.
+    tokio::time::timeout(DEADLINE, async {
+        while store.read_calls.load(Ordering::Relaxed) != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let (locked, lock_ready) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let locker = std::thread::spawn({
+        let fs = fs.clone();
+        move || {
+            let _namespace = fs.namespace.lock().unwrap();
+            locked.send(()).unwrap();
+            released.recv_timeout(DEADLINE).unwrap();
+        }
+    });
+    lock_ready.recv_timeout(DEADLINE).unwrap();
+    source.add_permits(2);
+    let delivery = tokio::time::timeout(DEADLINE, delivery).await;
+    let observed = tokio::time::timeout(DEADLINE, async {
+        while !reader.is_finished()
+            && fs.disk_read_decisions()[geesefs_rs::read::DiskDecision::NamespaceContended as usize]
+                == 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    release.send(()).unwrap();
+    locker.join().unwrap();
+    observed.unwrap();
+    let (actual, population_waits_before_reply) = delivery.unwrap().unwrap();
+    assert_eq!(actual, bytes);
+    assert_eq!(
+        population_waits_before_reply, 0,
+        "optional population must not consume its wait allowance before the remaining requested source chunks reach the reply"
+    );
+    assert!(
+        tokio::time::timeout(DEADLINE, &mut reader)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    fs.drain_disk_cache(DEADLINE).await.unwrap();
+    let gets = store.read_calls.load(Ordering::Relaxed);
+    let cached = fs.read(ino, 0, bytes.len()).await.unwrap();
+    assert_eq!(cached.as_slice(), bytes);
+    assert_eq!(store.read_calls.load(Ordering::Relaxed), gets);
+    drop(cached);
+    fs.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn source_reply_and_fill_completion_are_bounded_while_population_is_contended() {
+    population_with_namespace_contention(true, "deadline").await;
+}
+
+#[tokio::test]
+async fn cancelling_contended_population_releases_its_existing_fill_ownership() {
+    population_with_namespace_contention(true, "cancel").await;
+}
+
+async fn population_with_namespace_contention(recovered: bool, finish: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let mount = tempfile::tempdir().unwrap();
+    let store = scoped_store();
+    let bytes: Vec<_> = (0..READ_BLOCK_BYTES).map(|i| (i % 251) as u8).collect();
+    store.seed("package.rpm", &bytes);
+    let config = configured(dir.path(), mount.path());
+    let fs = if recovered {
+        attach(config, store.clone()).await
+    } else {
+        let fs = Filesystem::new(config, store.clone()).unwrap();
+        fs.attach_disk_cache(PreparedDiskCache::prepare(dir.path(), 16 * MIB as u64).unwrap())
+            .await
+            .unwrap();
+        fs
+    };
+    let node = fs.lookup(1, "package.rpm").await.unwrap();
+    let ino = node.ino;
+    let (hold, held) = std::sync::mpsc::channel();
+    let (locked, lock_ready) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let locker = std::thread::spawn({
+        let fs = fs.clone();
+        move || {
+            held.recv_timeout(DEADLINE).unwrap();
+            let _namespace = fs.namespace.lock().unwrap();
+            locked.send(()).unwrap();
+            released.recv_timeout(DEADLINE).unwrap();
+        }
+    });
+    let (delivered, delivery) = tokio::sync::oneshot::channel();
+    let mut reader = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.read_reply_data(ino, 0, READ_BLOCK_BYTES, move |result| {
+                let bytes = result.unwrap().to_vec();
+                // Like a concurrent namespace metadata writer: begin only
+                // after the source has delivered its verified reply, before
+                // the same fill performs optional population.
+                hold.send(()).unwrap();
+                lock_ready.recv_timeout(DEADLINE).unwrap();
+                delivered.send(bytes).unwrap();
+            })
+            .await
+        }
+    });
+    let delivered = tokio::time::timeout(DEADLINE, delivery)
+        .await
+        .unwrap()
+        .unwrap();
+    let observed = tokio::time::timeout(DEADLINE, async {
+        while !reader.is_finished()
+            && fs.disk_read_decisions()[geesefs_rs::read::DiskDecision::NamespaceContended as usize]
+                == 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let completed_while_locked = if finish == "release" {
+        None
+    } else {
+        if finish == "cancel" {
+            reader.abort();
+        }
+        // The production population allowance remains 250 ms. Keep the
+        // metadata owner held until completion/cancellation: neither may
+        // wait indefinitely for that owner or retract the successful reply.
+        Some(tokio::time::timeout(Duration::from_secs(1), &mut reader).await)
+    };
+    release.send(()).unwrap();
+    locker.join().unwrap();
+    observed.unwrap();
+    assert_eq!(delivered, bytes);
+    let completed = match completed_while_locked {
+        Some(completed) => completed.unwrap(),
+        None => tokio::time::timeout(DEADLINE, reader).await.unwrap(),
+    };
+    if finish == "cancel" {
+        assert!(completed.unwrap_err().is_cancelled());
+    } else {
+        assert!(completed.unwrap().is_none());
+    }
+    // A delivered source reply does not promise persistent publication.
+    // Finish the fill, then use the public bounded publication barrier.
+    fs.drain_disk_cache(DEADLINE).await.unwrap();
+    assert_eq!(
+        fs.effective_budgets().data_used_bytes,
+        fs.effective_budgets().disk_cache_funding_bytes,
+        "completed/cancelled population must not retain source or waiter owners"
+    );
+    let gets = store.read_calls.load(Ordering::Relaxed);
+    assert_eq!(gets, 1);
+    let cached = fs.read(node.ino, 0, bytes.len()).await.unwrap();
+    assert_eq!(cached.as_slice(), bytes);
+    assert_eq!(
+        store.read_calls.load(Ordering::Relaxed),
+        if finish == "release" { gets } else { gets + 1 },
+        "brief metadata contention must not leave a hole in eligible L2 population; recovered={recovered}"
+    );
+    drop(cached);
+    fs.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn changed_clean_eof_during_window_admission_releases_the_old_plan() {
     for enabled in [true, false] {
         for new_size in [128 * 1024, 64 * 1024, 32 * 1024, 0] {
@@ -228,7 +438,7 @@ async fn unaligned_disk_hits_release_decoded_backings_and_never_repopulate_fragm
     assert_eq!(fs.disk_cache_stats().unwrap().hits, before.hits + 1);
     assert_eq!(
         fs.disk_cache_read_bytes(),
-        48,
+        37,
         "reply/window delivery stays sliced"
     );
     assert_eq!(
@@ -262,8 +472,8 @@ async fn unaligned_disk_hits_release_decoded_backings_and_never_repopulate_fragm
     );
     assert_eq!(
         fs.disk_cache_read_bytes(),
-        disk_bytes + 65584,
-        "the independent aligned-prefix window must come from L2 again"
+        disk_bytes + 37,
+        "only the independent requested span is delivered from the canonical L2 record"
     );
     fs.shutdown().await.unwrap();
     drop(fs);
@@ -309,10 +519,75 @@ async fn restart_reuses_stable_identity_not_inode_or_read_shape() {
         &[0x39; 37]
     );
     assert_eq!(store.read_calls.load(Ordering::Relaxed), gets);
-    // The existing read planner aligns this request to 0..48; only disk I/O,
-    // never an extended source GET, supplies the prefix before the reply.
-    assert_eq!(fs.disk_cache_read_bytes(), 48);
+    // Canonical disk lookup covers an exact unaligned span without delivering
+    // an unnecessary prefix or issuing a source GET.
+    assert_eq!(fs.disk_cache_read_bytes(), 37);
     fs.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn cold_unaligned_zero_read_ahead_fetches_only_requested_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mount = tempfile::tempdir().unwrap();
+    let store = scoped_store();
+    let bytes: Vec<u8> = (0..READ_BLOCK_BYTES).map(|i| (i % 251) as u8).collect();
+    store.seed("package.rpm", &bytes);
+    let mut config = configured(dir.path(), mount.path());
+    config.read_ahead = 0;
+    config.read_ahead_small = 0;
+    config.read_ahead_large = 0;
+    let fs = attach(config, store.clone()).await;
+    let node = fs.lookup(1, "package.rpm").await.unwrap();
+    assert_eq!(fs.disk_cache_stats().unwrap().index_entries, 0);
+    assert_eq!(
+        tokio::time::timeout(DEADLINE, fs.read(node.ino, 11, 37))
+            .await
+            .unwrap()
+            .unwrap()
+            .as_slice(),
+        &bytes[11..48]
+    );
+    fs.drain_disk_cache(DEADLINE).await.unwrap();
+    fs.shutdown().await.unwrap();
+    assert_eq!(
+        *store.read_ranges.lock().unwrap(),
+        [(11, 37)],
+        "a cold L2 miss must not download an aligned prefix when read-ahead is zero"
+    );
+}
+
+#[tokio::test]
+async fn neighboring_zero_read_ahead_miss_does_not_refetch_the_completed_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let mount = tempfile::tempdir().unwrap();
+    let store = scoped_store();
+    let bytes: Vec<u8> = (0..READ_BLOCK_BYTES).map(|i| (i % 251) as u8).collect();
+    store.seed("package.rpm", &bytes);
+    let mut config = configured(dir.path(), mount.path());
+    config.read_ahead = 0;
+    config.read_ahead_small = 0;
+    config.read_ahead_large = 0;
+    let fs = attach(config, store.clone()).await;
+    let node = fs.lookup(1, "package.rpm").await.unwrap();
+    for offset in [0, 4096] {
+        assert_eq!(
+            tokio::time::timeout(DEADLINE, fs.read(node.ino, offset as u64, 4096))
+                .await
+                .unwrap()
+                .unwrap()
+                .as_slice(),
+            &bytes[offset..offset + 4096]
+        );
+        // Complete population before the next independent read: this is not
+        // an overlapping in-flight subscriber or an uncommitted disk fill.
+        fs.drain_disk_cache(DEADLINE).await.unwrap();
+    }
+    fs.shutdown().await.unwrap();
+    assert_eq!(
+        *store.read_ranges.lock().unwrap(),
+        [(0, 4096), (4096, 4096)],
+        "the neighboring miss must not download the preceding completed fragment again"
+    );
 }
 
 #[tokio::test]
@@ -373,9 +648,17 @@ async fn exact_fragment_and_eof_coverage_never_invents_a_hole_or_extends_get() {
     fs.drain_disk_cache(DEADLINE).await.unwrap();
     assert_eq!(
         fs.disk_cache_stats().unwrap().engine_admitted_demotions,
-        loaded.engine_admitted_demotions
+        loaded.engine_admitted_demotions + 1
     );
+    // Exact fragment identities do not alias the existing (0, 17) record.
+    // The new request fetches only its own bytes and then reuses that fragment.
+    assert_eq!(store.read_ranges.lock().unwrap().last(), Some(&(11, 6)));
     let gets = store.read_calls.load(Ordering::Relaxed);
+    assert_eq!(
+        fs.read(node.ino, 11, 6).await.unwrap().as_slice(),
+        &[0x4c; 6]
+    );
+    assert_eq!(store.read_calls.load(Ordering::Relaxed), gets);
     assert_eq!(
         fs.read(node.ino, 0, 18).await.unwrap().as_slice(),
         &[0x4c; 18]
@@ -455,7 +738,14 @@ async fn persistent_identity_separates_etag_size_and_backend_but_not_metadata() 
             READ_BLOCK_BYTES
         };
         assert_eq!(block.as_slice(), vec![expected_byte; expected_length]);
-        assert_eq!(store.read_calls.load(Ordering::Relaxed), gets);
+        assert_eq!(
+            store.read_calls.load(Ordering::Relaxed),
+            gets + usize::from(change == "size"),
+            "an EOF-clipped exact fragment at offset 11 does not cover the preceding bytes"
+        );
+        if change == "size" {
+            assert_eq!(store.read_ranges.lock().unwrap().last(), Some(&(0, 31)));
+        }
         fs.shutdown().await.unwrap();
     }
 }

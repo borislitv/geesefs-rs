@@ -675,11 +675,9 @@ impl Filesystem {
         startup
     }
 
-    fn start_disk_for_fill(&self, node: &Inode, generation: u64) {
-        let deferred = self.disk.lock().unwrap().deferred.is_some();
-        if !deferred || !self.disk_eligible(node, generation) {
-            return;
-        }
+    // Called only after bounded population qualification. A later namespace or
+    // generation change is checked again before any record is submitted.
+    fn start_disk_for_fill(&self) {
         let mut disk = self.disk.lock().unwrap();
         if !disk.closing
             && let Some(funded) = disk.deferred.take()
@@ -688,6 +686,8 @@ impl Filesystem {
         }
     }
 
+    /// Publish admitted records. Call after completing the read/fill future:
+    /// an early source reply does not promise completed population or durability.
     pub async fn drain_disk_cache(&self, deadline: Duration) -> Result<()> {
         let startup = self.disk.lock().unwrap().startup.clone();
         tokio::time::timeout(deadline, async {
@@ -706,21 +706,13 @@ impl Filesystem {
         .map_err(|_| Error::Timeout("L2 drain"))?
     }
 
-    fn disk_read(&self, node: &Inode, generation: u64) -> Option<read::DiskRead> {
-        let (cache, namespace) = {
-            let disk = self.disk.lock().unwrap();
-            (disk.cache.clone()?, disk.namespace?)
-        };
-        self.disk_eligible(node, generation)
-            .then_some(read::DiskRead { cache, namespace })
+    pub fn disk_read_decisions(&self) -> [u64; 16] {
+        std::array::from_fn(|index| self.disk_decisions[index].load(Ordering::Relaxed))
     }
 
     fn disk_eligible(&self, node: &Inode, generation: u64) -> bool {
-        self.check_disk_eligible(node, generation).is_ok()
-    }
-
-    pub fn disk_read_decisions(&self) -> [u64; 16] {
-        std::array::from_fn(|index| self.disk_decisions[index].load(Ordering::Relaxed))
+        self.check_disk_population(node, generation, &|_| ())
+            .is_ok()
     }
 
     fn record_disk_decision(&self, reason: read::DiskDecision) {
@@ -843,25 +835,66 @@ impl Filesystem {
         }
     }
 
-    fn check_disk_eligible(
+    async fn qualify_disk_population<T>(
         &self,
         node: &Inode,
         generation: u64,
-    ) -> std::result::Result<(), read::DiskDecision> {
+        deadline: tokio::time::Instant,
+        qualified: impl Fn(&State) -> T,
+    ) -> Option<T> {
+        let mut waited = false;
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            match self.check_disk_population(node, generation, &qualified) {
+                Ok(value) => return Some(value),
+                Err(
+                    reason @ (read::DiskDecision::NamespaceContended
+                    | read::DiskDecision::InodeContended),
+                ) => {
+                    if !waited {
+                        self.record_disk_decision(reason);
+                        waited = true;
+                    }
+                }
+                Err(_) => return None,
+            }
+            // Unlike required-read qualification, this also runs before cache
+            // startup, without a ReadAdmission. Retry in the existing funded fill
+            // instead of spawning another owner/blocking worker. No guard crosses
+            // this wait; cancellation drops it, and one cumulative population
+            // deadline bounds all retries, startup and spill admission.
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + Duration::from_millis(1)),
+            )
+            .await;
+        }
+    }
+
+    fn check_disk_population<T>(
+        &self,
+        node: &Inode,
+        generation: u64,
+        qualified: &impl Fn(&State) -> T,
+    ) -> std::result::Result<T, read::DiskDecision> {
         if self.is_closing() {
             return Err(read::DiskDecision::Closing);
         }
-        // Optional population never waits for namespace/inode ownership.
-        let ns = self
-            .namespace
-            .try_lock()
-            .map_err(|_| read::DiskDecision::NamespaceContended)?;
-        let state = node
-            .state
-            .try_lock()
-            .map_err(|_| read::DiskDecision::InodeContended)?;
+        // Both acquisitions are nonblocking, even when nested. Qualification and
+        // key construction observe namespace and inode state together.
+        let reason = |error| match error {
+            std::sync::TryLockError::WouldBlock => read::DiskDecision::NamespaceContended,
+            std::sync::TryLockError::Poisoned(_) => read::DiskDecision::LockPoisoned,
+        };
+        let ns = self.namespace.try_lock().map_err(reason)?;
+        let state = node.state.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => read::DiskDecision::InodeContended,
+            std::sync::TryLockError::Poisoned(_) => read::DiskDecision::LockPoisoned,
+        })?;
         Self::check_disk_state(&self.config, &state, generation)?;
-        Self::check_disk_namespace(&ns, &state.key)
+        Self::check_disk_namespace(&ns, &state.key)?;
+        Ok(qualified(&state))
     }
 
     fn check_disk_state(
@@ -936,65 +969,66 @@ impl Filesystem {
         block: &Block,
         deadline: tokio::time::Instant,
     ) {
-        if block.is_disk_origin() || !self.disk_eligible(node, generation) {
+        if block.is_disk_origin() || self.disk_funding_bytes == 0 {
             return;
         }
-        self.start_disk_for_fill(node, generation);
+        if self
+            .qualify_disk_population(node, generation, deadline, |_| ())
+            .await
+            .is_none()
+        {
+            return;
+        }
+        self.start_disk_for_fill();
         let startup = self.disk.lock().unwrap().startup.clone();
         if let Some(startup) = startup
             && !matches!(tokio::time::timeout_at(deadline, startup).await, Ok(Ok(())))
         {
             return;
         }
-        let Some(disk) = self.disk_read(node, generation) else {
-            return;
+        let disk = {
+            let disk = self.disk.lock().unwrap();
+            let (Some(cache), Some(namespace)) = (disk.cache.clone(), disk.namespace) else {
+                return;
+            };
+            read::DiskRead { cache, namespace }
         };
         let mut relative = 0;
         while relative < block.as_slice().len() {
             let at = offset + relative as u64;
             // Best-effort population uses existing guarded Foyer admission.
-            // Revalidate identity after waiting; never enqueue dirty/stale bytes.
-            let slot = disk.cache.spill_admission(deadline).await;
-            let key = {
-                let Ok(state) = node.state.try_lock() else {
-                    return;
-                };
-                if state.deleted
-                    || state.version != state.durable
-                    || state.rename_target.is_some()
-                    || read::generation(state.version, state.remote.as_ref()) != generation
-                {
+            // Revalidate namespace AND identity after every wait.
+            let slot = match disk.cache.spill_admission(deadline).await {
+                Ok(slot) => slot,
+                Err(reason) => {
+                    disk.cache.dropped_spill(reason);
                     return;
                 }
-                let Some(head) = &state.remote else {
-                    return;
-                };
-                let amount = (read::block_end(at, state.size).saturating_sub(at) as usize)
-                    .min(block.as_slice().len() - relative);
-                crate::disk_cache::DiskKey::new(
-                    &disk.namespace,
-                    state.key.as_bytes(),
-                    head.etag.as_bytes(),
-                    state.size,
-                    at,
-                    amount,
-                )
-                .ok()
             };
-            let Some(key) = key else {
+            let key = self
+                .qualify_disk_population(node, generation, deadline, |state| {
+                    let head = state.remote.as_ref().expect("qualified clean identity");
+                    let amount = (read::block_end(at, state.size).saturating_sub(at) as usize)
+                        .min(block.as_slice().len() - relative);
+                    crate::disk_cache::DiskKey::new(
+                        &disk.namespace,
+                        state.key.as_bytes(),
+                        head.etag.as_bytes(),
+                        state.size,
+                        at,
+                        amount,
+                    )
+                    .ok()
+                })
+                .await;
+            let Some(Some(key)) = key else {
                 return;
             };
             let end = relative + key.covered_len();
             // No cache/inode/namespace lock and no await while copying. Adapter
             // owns only its admitted visible copy, never this full source backing.
             let part = block.slice(relative..end);
-            match slot {
-                Ok(slot) => slot.demote(key, part),
-                Err(reason) => {
-                    disk.cache.dropped_spill(reason);
-                    crate::disk_cache::Demotion::Dropped
-                }
-            };
+            slot.demote(key, part);
             relative = end;
         }
     }
@@ -2080,7 +2114,16 @@ impl Filesystem {
         }
         // Without persistent eligibility, optional bytes have nowhere to live
         // after this request. Do not download and discard a speculative tail.
-        let persistent = self.disk_funding_bytes > 0 && self.disk_eligible(&node, generation);
+        let persistent = self.disk_funding_bytes > 0
+            && matches!(
+                self.disk_cache_state(),
+                Some(
+                    crate::disk_cache::State::Prepared
+                        | crate::disk_cache::State::Recovering
+                        | crate::disk_cache::State::Ready
+                )
+            )
+            && self.disk_eligible(&node, generation);
         let budgets = self.effective_budgets();
         let mut start = if clean && persistent {
             offset / read::READ_BLOCK_BYTES as u64 * read::READ_BLOCK_BYTES as u64
@@ -2095,7 +2138,7 @@ impl Filesystem {
         if offset - start + length as u64 > window_limit as u64 {
             start = offset;
         }
-        let relative = (offset - start) as usize;
+        let mut relative = (offset - start) as usize;
         let mut prefetch = if clean && persistent {
             window
                 .max(relative + length)
@@ -2117,6 +2160,14 @@ impl Filesystem {
                 .lock()
                 .unwrap()
                 .persistent_window(generation, start, relative + length, prefetch);
+        }
+        // Canonical L2 lookup already handles an unaligned requested span.
+        // Without a speculative tail, alignment must not widen a source miss,
+        // including when the interval hint suppressed another read-ahead window.
+        if prefetch == relative + length {
+            start = offset;
+            prefetch = length;
+            relative = 0;
         }
         // FUSE may issue neighboring reads before the first window completes.
         // Waiting readers must not reserve another whole window and evict the
@@ -2323,8 +2374,8 @@ impl Filesystem {
         let mut tasks = tokio::task::JoinSet::new();
         let (sender, mut chunks) = tokio::sync::mpsc::channel(self.config.max_requests);
         let mut next = range.start;
-        let mut prefetch_error = None;
-        while next < end || !tasks.is_empty() || !chunks.is_empty() {
+        let mut source_error = None;
+        'receive: while next < end || !tasks.is_empty() || !chunks.is_empty() {
             while next < end && tasks.len() < self.config.max_requests {
                 let at = next;
                 let mut amount = (end - next).min(chunk as u64) as usize;
@@ -2425,11 +2476,18 @@ impl Filesystem {
                         if at >= offset + available as u64 || chunk_end <= offset {
                             // Optional read-ahead cannot cancel a healthy requested
                             // dependency, irrespective of completion order.
-                            prefetch_error.get_or_insert(error);
+                            source_error.get_or_insert(error);
                             continue;
                         }
                         tasks.abort_all();
                         while tasks.join_next().await.is_some() {}
+                        if remaining == 0 {
+                            // Preserve the observable late error, but allow the
+                            // validated, already-delivered prefix to populate
+                            // after source consumption has stopped.
+                            source_error = Some(error);
+                            break 'receive;
+                        }
                         return Err(error);
                     }
                     None
@@ -2481,12 +2539,22 @@ impl Filesystem {
                 self.read_metrics.completed(std::mem::take(&mut delivered));
                 ready(Ok(result.take().expect("completed requested result")));
             }
-            if let Some((_, generation)) =
-                cache_key.filter(|(_, generation)| read::current(fill.node(), *generation))
-            {
+            if cache_key.is_some_and(|(_, generation)| read::current(fill.node(), generation)) {
                 // Subscribed readers share only this active producer's validated
                 // immutable owners. The registry removes them at producer exit.
-                fill.publish(at, block.clone());
+                fill.publish(at, block);
+            }
+        }
+        // Consume all required/source tasks before optional population can wait.
+        // FillGuard already owns the admitted published chunks for subscribers;
+        // walk those owners one at a time, without another payload/work ledger or
+        // holding its mutex across qualification/admission/I/O waits.
+        if let Some((_, generation)) = cache_key {
+            let mut index = 0;
+            while !population_wait.is_zero() {
+                let Some((at, block)) = fill.published_chunk(index) else {
+                    break;
+                };
                 let started = tokio::time::Instant::now();
                 self.populate_disk(
                     fill.node(),
@@ -2497,9 +2565,10 @@ impl Filesystem {
                 )
                 .await;
                 population_wait = population_wait.saturating_sub(started.elapsed());
+                index += 1;
             }
         }
-        if let Some(error) = prefetch_error {
+        if let Some(error) = source_error {
             return Err(error);
         }
         if result.is_some() {

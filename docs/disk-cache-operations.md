@@ -54,8 +54,17 @@ Region fullness includes partially used writer regions and obsolete records.
 The tombstone log and unusable tail are outside the reported data-region pool.
 Allocated file size and cumulative written bytes are not occupancy measurements.
 
-On the existing bounded policy, an 8,388,608-slot ceiling can represent at most
-about 1 TiB of 128-KiB payload records even with a 2-TiB file; partial records lower
-that useful payload total. Physical regions can continue to be written/recycled
-after index evictions. Neither matching more suffixes nor optional compression
-removes this independent index bound.
+The index automatically scales with configured capacity at one slot per full
+128-KiB payload record, limited by the existing memory-derived allowance. There
+is no separate 8,388,608-slot ceiling. A page-aligned 1.5-decimal-TB device
+(`1499999997952` bytes) receives 11,444,091 slots when memory permits; a 2-TiB
+device receives 16,777,216. Fixed index funding is deducted from the data lane,
+not added outside `--memory-limit`. A smaller memory budget can still reduce the
+index, and partial records lower the useful payload represented by those slots.
+Physical regions can continue to be written/recycled after index evictions.
+
+Capacity must be a multiple of 4096 bytes. Existing media cannot be resized by
+changing the flag: Foyer's capacity-dependent layout must match the existing
+file. Use an explicitly authorized cold replacement or a separately qualified
+migration. Keep the cache directory outside another application's managed cache
+tree; a cache loader or cleaner may delete files it does not recognize.

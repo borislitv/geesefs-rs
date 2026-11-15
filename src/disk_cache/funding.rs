@@ -44,10 +44,11 @@ impl Funding {
             1024 * 1024
         };
         let regions = capacity / region_bytes;
-        // Partial records cannot increase this independently funded index cap.
+        // Scale with the device while keeping index metadata inside its share of
+        // the payload budget. Partial records do not increase this funded cap.
         let index_entries = (capacity / MAX_PAYLOAD_BYTES)
             .min(available_payload_bytes / 4 / 512)
-            .clamp(1, 8_388_608);
+            .max(1);
         let recent_entries = index_entries.min(65_536);
         let recovery_bytes = rounded(8 * PAGE + 16 * regions + 2 * PAGE);
         let fixed_bytes = 2 * POOL + recovery_bytes + 1024 * 1024;

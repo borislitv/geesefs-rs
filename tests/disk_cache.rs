@@ -536,6 +536,24 @@ fn bounded_identity_range_and_scaled_funding() {
     assert!(Funding::derive((16 * MIB) as u64, MIB).is_err());
 }
 
+#[test]
+fn large_cache_index_scales_with_disk_capacity_and_available_memory() {
+    // Explicit full-record counts, including capacities beyond the old 8M cap.
+    for (capacity, entries) in [
+        (1_000_000_000_000, 7_629_394),
+        (1_499_999_997_952, 11_444_091),
+        (2_199_023_255_552, 16_777_216),
+    ] {
+        let funding = Funding::derive(capacity, 64 * 1024 * MIB).unwrap();
+        assert_eq!(funding.index_entries, entries, "capacity={capacity}");
+        assert!(funding.required_bytes <= 64 * 1024 * MIB);
+        assert_eq!(funding.recent_entries, 65_536);
+    }
+    let constrained = Funding::derive(2_199_023_255_552, 1024 * MIB).unwrap();
+    assert_eq!(constrained.index_entries, 524_288);
+    assert!(constrained.required_bytes <= 1024 * MIB);
+}
+
 #[tokio::test]
 async fn output_budget_and_wrong_coverage_fail_without_allocation_or_data() {
     use disk_cache::{READ_WAIT_BYTES, ReadFallback};

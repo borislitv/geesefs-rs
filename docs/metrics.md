@@ -124,9 +124,11 @@ At diagnostic level `warn`, `l2_spill_drop` records the actual reason, cumulativ
 drop count and current spill/copy/submission/index ownership. It uses the existing
 bounded nonblocking logger and warning rate limiter, including background errors
 outside a FUSE trace; no object keys or credentials are logged.
-Nonordinary `l2_read_fallback` warnings include timeout, integrity/identity,
-worker and backend failures with their request trace. Normal absent records stay
-debug-only; counters retain all reasons even when log records are rate-limited.
+Nonordinary `l2_read_fallback` warnings include integrity/identity, worker and
+backend failures with their request trace. Normal absent records and optional
+L2 deadlines stay debug-only: a timeout permits source fallback, not a failed
+filesystem reply. Actual reply errors retain their error/warning severity.
+Counters retain all fallback reasons regardless of the configured log level.
 
 Two different fullness limits must remain visible:
 

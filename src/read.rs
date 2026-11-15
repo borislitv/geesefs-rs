@@ -272,7 +272,6 @@ pub(crate) fn debug_disk_fallback(
         if matches!(
             reason,
             ReadFallback::Poisoned
-                | ReadFallback::Timeout
                 | ReadFallback::Join
                 | ReadFallback::BackendError
                 | ReadFallback::Identity

@@ -161,7 +161,10 @@ async fn cancelling_contended_population_releases_its_existing_fill_ownership() 
 }
 
 async fn population_with_namespace_contention(recovered: bool, finish: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
     let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let mount = tempfile::tempdir().unwrap();
     let store = scoped_store();
     let bytes: Vec<_> = (0..READ_BLOCK_BYTES).map(|i| (i % 251) as u8).collect();

@@ -5,6 +5,16 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## v0.1.20: larger native regions for large payload caches
+
+At configured capacities of 8 TiB or more, use 64 MiB native regions to reduce
+the number of regions. Smaller caches retain legacy geometry, including 16 MiB
+regions at 1.5 TB. The three L2 flags, 128 KiB payload record limit, and exact
+crates.io Foyer 0.22.6 with hot-record reinsertion remain unchanged. The distinct
+large-region media requires an [offline cold transition](disk-cache-operations.md#cache-geometry-and-cold-transition)
+when switching layouts. Reclamation is coarser; allocated file length may
+include an unused internal tail.
+
 ## 2026-11-17: use the standard Foyer library and native index
 
 Version 0.1.19 replaces the downstream fork with exact crates.io Foyer 0.22.6.

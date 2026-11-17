@@ -34,7 +34,6 @@ use std::{
 };
 use tokio::sync::{OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock, Semaphore};
 
-const DATA_FILE: &str = "payload-upstream-v1.cache";
 const LOCK_FILE: &str = ".lock";
 const OPEN_DEADLINE: Duration = Duration::from_secs(120);
 const POPULATION_DEADLINE: Duration = Duration::from_secs(5);
@@ -171,7 +170,7 @@ fn options() -> OpenOptions {
 /// blocking filesystem work; invoke at startup, not on a request executor path.
 pub struct PreparedDiskCache {
     directory: PathBuf,
-    capacity: usize,
+    funding: Funding,
     _lock: DirectoryLock,
     status: DiskCacheStatus,
     inventory: Option<(u64, u64)>,
@@ -183,7 +182,6 @@ pub struct PreparedDiskCache {
 /// deferral never exposes engine funding to payload admission.
 pub struct FundedPreparedDiskCache {
     prepared: PreparedDiskCache,
-    funding: Funding,
     owner: Reservation,
 }
 
@@ -209,13 +207,23 @@ impl Drop for DirectoryLock {
 impl PreparedDiskCache {
     pub fn prepare(directory: &Path, capacity: u64) -> Result<Self> {
         // Validate geometry without allocating engine resources.
-        let funding = Funding::derive(capacity, usize::MAX / 4)?;
+        Self::prepare_with_funding(directory, Funding::derive(capacity, usize::MAX / 4)?)
+    }
+
+    /// Exercise the real 64 MiB layout without a multi-TiB device.
+    #[cfg(test)]
+    pub fn prepare_r64_fixture(directory: &Path) -> Result<Self> {
+        let funding = Funding::for_layout(256 << 20, super::funding::Layout::R64)?;
+        Self::prepare_with_funding(directory, funding)
+    }
+
+    fn prepare_with_funding(directory: &Path, funding: Funding) -> Result<Self> {
         let directory = Self::prepare_directory(directory)?;
         let lock = Self::lock_directory(&directory)?;
-        let inventory = Self::validate_inventory(&directory, funding.capacity)?;
+        let inventory = Self::validate_inventory(&directory, &funding)?;
         Ok(Self {
             directory,
-            capacity: funding.capacity,
+            funding,
             _lock: lock,
             status: DiskCacheStatus(Arc::new(Startup::default())),
             inventory,
@@ -280,20 +288,25 @@ impl PreparedDiskCache {
         Ok(DirectoryLock(lock))
     }
 
-    fn validate_inventory(directory: &Path, capacity: usize) -> Result<Option<(u64, u64)>> {
+    fn check_inventory_names(directory: &Path, data_file: &str) -> Result<()> {
         for entry in std::fs::read_dir(directory).map_err(io)? {
             let name = entry.map_err(io)?.file_name();
-            if name != DATA_FILE && name != LOCK_FILE {
-                return Err(Error::Unsupported(
-                    "unrecognized files in private disk cache; no automatic reset".into(),
-                ));
+            if name != data_file && name != LOCK_FILE {
+                return Err(Error::Unsupported(format!(
+                    "unrecognized files in private disk cache (expected {data_file}); no automatic reset"
+                )));
             }
         }
-        let data = directory.join(DATA_FILE);
+        Ok(())
+    }
+
+    fn validate_inventory(directory: &Path, funding: &Funding) -> Result<Option<(u64, u64)>> {
+        Self::check_inventory_names(directory, funding.data_file)?;
+        let data = directory.join(funding.data_file);
         match std::fs::symlink_metadata(&data) {
             Ok(meta) => {
                 private(&meta)?;
-                if !meta.is_file() || meta.nlink() != 1 || meta.len() != capacity as u64 {
+                if !meta.is_file() || meta.nlink() != 1 || meta.len() != funding.capacity as u64 {
                     return Err(Error::Unsupported(
                         "cache geometry changed/unsafe; media left untouched".into(),
                     ));
@@ -308,27 +321,28 @@ impl PreparedDiskCache {
         self.status.clone()
     }
     pub fn funding(&self, available_payload_bytes: usize) -> Result<Funding> {
-        Funding::derive(self.capacity as u64, available_payload_bytes)
+        self.funding.check_limit(available_payload_bytes)?;
+        Ok(self.funding.clone())
     }
 
     pub fn fund(self, resources: &Budget) -> Result<FundedPreparedDiskCache> {
         let started = Instant::now();
         let result = (|| {
-            let funding = self.funding(resources.limit())?;
+            self.funding.check_limit(resources.limit())?;
+            let required_bytes = self.funding.required_bytes;
             // Aggregate engine funding is not one payload allocation. Tokio's
             // per-request u32 limit must not cap the whole shared-lane credit.
-            let mut owner = resources.try_reserve(funding.required_bytes.min(u32::MAX as usize))?;
-            while owner.size() < funding.required_bytes {
-                let bytes = (funding.required_bytes - owner.size()).min(u32::MAX as usize);
+            let mut owner = resources.try_reserve(required_bytes.min(u32::MAX as usize))?;
+            while owner.size() < required_bytes {
+                let bytes = (required_bytes - owner.size()).min(u32::MAX as usize);
                 // Nonblocking admission: an error drops every acquired credit.
                 owner.merge(resources.try_reserve(bytes)?);
             }
-            Ok((funding, owner))
+            Ok(owner)
         })();
         match result {
-            Ok((funding, owner)) => Ok(FundedPreparedDiskCache {
+            Ok(owner) => Ok(FundedPreparedDiskCache {
                 prepared: self,
-                funding,
                 owner,
             }),
             Err(error) => {
@@ -340,7 +354,9 @@ impl PreparedDiskCache {
     }
 
     fn allocate(&self) -> Result<(File, Option<u64>)> {
-        let path = self.directory.join(DATA_FILE);
+        // Deferred startup must still refuse wrong or mixed media before writes.
+        Self::check_inventory_names(&self.directory, self.funding.data_file)?;
+        let path = self.directory.join(self.funding.data_file);
         // Existing inventory may not be replaced after prepare, and a deferred
         // fresh owner must never adopt a file introduced while it was waiting.
         if self.inventory.is_some() {
@@ -357,7 +373,7 @@ impl PreparedDiskCache {
             &file,
             rustix::fs::FallocateFlags::empty(),
             0,
-            self.capacity as u64,
+            self.funding.capacity as u64,
         )
         .map_err(|e| Error::Fs(e.raw_os_error()))?;
         file.sync_all().map_err(io)?;
@@ -382,7 +398,7 @@ impl PreparedDiskCache {
         if Some((meta.dev(), meta.ino())) != self.inventory
             || !meta.is_file()
             || meta.nlink() != 1
-            || meta.len() != self.capacity as u64
+            || meta.len() != self.funding.capacity as u64
             || meta.blocks().saturating_mul(512) < meta.len()
         {
             return Err(Error::Unsupported(
@@ -772,17 +788,13 @@ impl DiskCache {
     }
     async fn start_funded(funded: FundedPreparedDiskCache) -> Result<Self> {
         let started = Instant::now();
-        let FundedPreparedDiskCache {
-            prepared,
-            funding,
-            owner,
-        } = funded;
+        let FundedPreparedDiskCache { prepared, owner } = funded;
         let status = prepared.status();
         status.set(State::Recovering);
         let observer = status.clone();
         // Owned startup retains directory and funding if its caller is cancelled.
         let task = tokio::spawn(async move {
-            let result = Self::build(prepared, funding, owner).await;
+            let result = Self::build(prepared, owner).await;
             observer.0.startup.record(started);
             if result.is_err() {
                 observer.set(State::Bypass);
@@ -791,11 +803,7 @@ impl DiskCache {
         });
         task.await.map_err(engine)?
     }
-    async fn build(
-        prepared: PreparedDiskCache,
-        funding: Funding,
-        owner: Reservation,
-    ) -> Result<Self> {
+    async fn build(prepared: PreparedDiskCache, owner: Reservation) -> Result<Self> {
         let status = prepared.status();
         let allocation_started = Instant::now();
         let allocation = tokio::task::spawn_blocking(move || {
@@ -813,16 +821,16 @@ impl DiskCache {
             status.0.file_observed.store(true, Ordering::Release);
         }
         let recovery_started = Instant::now();
-        let result = Self::build_engine(prepared, file, funding, owner).await;
+        let result = Self::build_engine(prepared, file, owner).await;
         status.0.recovery.record(recovery_started);
         result
     }
     async fn build_engine(
         prepared: PreparedDiskCache,
         file: File,
-        funding: Funding,
         owner: Reservation,
     ) -> Result<Self> {
+        let funding = prepared.funding.clone();
         let recent = Recent::new(funding.recent_entries);
         // FileDeviceBuilder reopens with create(true) and set_len. Keep our
         // validated inode pinned through that supported path-only API instead

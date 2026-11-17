@@ -70,13 +70,32 @@ deducted from the data lane within `--memory-limit`; insufficient funding reject
 configuration rather than silently lowering an index cap. Measure native index
 and recovery memory separately from the planned allowance.
 
-Capacity must be a multiple of 4096 bytes. Existing media cannot be resized by
-changing the flag: Foyer's capacity-dependent layout must match the existing
-file. Use an explicitly authorized cold replacement or a separately qualified
-migration. Keep the cache directory outside another application's managed cache
-tree; a cache loader or cleaner may delete files it does not recognize.
+## Cache geometry and cold transition
 
-Version 0.1.19 uses `payload-upstream-v1.cache`. The previous fork's
-`payload-v1.cache` is incompatible and rejected without modification. A cold
-transition requires an explicit operator decision and a stopped previous owner.
-Do not reset media automatically on startup or after a cache error.
+Version 0.1.20 selects the native region size from the configured capacity:
+
+| Configured capacity | Native region size | Backing filename |
+| --- | --- | --- |
+| Below 256 MiB | 1 MiB | `payload-upstream-v1.cache` |
+| 256 MiB to below 8 TiB (including 1.5 TB) | 16 MiB | `payload-upstream-v1.cache` |
+| 8 TiB and above | 64 MiB | `payload-upstream-r64-v1.cache` |
+
+The flags `--disk-cache-dir`, `--disk-cache-max-size` and `--disk-cache-regex`
+are unchanged. Capacity is still page-aligned (a multiple of 4096 bytes), and
+payload records are still at most 128 KiB. The engine remains exact crates.io
+Foyer 0.22.6 with hot-record reinsertion enabled. Only whole regions are usable:
+any partial region at the end is an unused internal tail in the allocated file.
+Larger regions make reclamation coarser: each victim covers more capacity and
+can affect more records at once.
+
+The v1 and 64 MiB native layouts are incompatible in both directions, and the
+former fork's `payload-v1.cache` is incompatible with either. Changing capacity
+does not resize existing media. Reuse requires the matching layout and capacity.
+For an explicitly authorized cold transition, stop the current cache owner,
+confirm no process still holds the cache, and verify the directory and media
+belong to the expected service account before moving any inventory. Start with
+an empty private cache directory on a local filesystem, outside the mount and
+other applications' managed cache trees. Preserve the old directory separately
+if rollback is needed. Do not rename one layout's file to the other's basename.
+Startup rejects incompatible inventory without modifying it; there is no
+automatic reset on startup or after a cache error.

@@ -102,12 +102,11 @@ resource settings. No general configuration file or payload TTL is added.
 
 Persistent keys contain a format version, backend namespace, exact object key,
 opaque ETag, object size and covered offset/length. Process-local inode numbers
-and hashed read generations are not persistent identities. Native media uses
-`payload-upstream-v1.cache`; old-format inventory is rejected without deletion.
-The transition needs an explicitly authorized cold cache. Validate identity,
-length and integrity before returning a
-record. Short EOF/partial coverage is explicit; a missing span is never a zero-filled
-hit. No source GET is extended solely to complete a cache record.
+and hashed read generations are not persistent identities. The backing filename
+distinguishes the two [native media layouts](disk-cache-operations.md#cache-geometry-and-cold-transition).
+Validate identity, length and integrity before returning a record. Short EOF/partial
+coverage is explicit; a missing span is never a zero-filled hit. No source GET is
+extended solely to complete a cache record.
 
 Payload has no inactivity expiry. Metadata TTL, permissions, rename/delete and
 local generation rules remain authoritative. ETag/size changes invalidate old

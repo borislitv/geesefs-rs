@@ -18,11 +18,11 @@ size threshold, and it does not bypass these checks.
 The [mirror payload pattern](mirror-payload.regex) selects observed artifact
 formats case-insensitively and only at the end of the filename:
 
-- Packages/installers: deb/udeb/ddeb, rpm, apk, xbps, hpkg, ipk, flatpak,
+- Packages/installers: deb/udeb/ddeb, rpm, apk, xbps, hpkg, ipk, ipa, flatpak,
   AppImage, run, exe, msi/msix, cab, bin, hpi, vsix, war and xzm.
 - Images: iso, img, raw, qcow/qcow2, vhd/vhdx, vmdk, vdi, dmg, squashfs; these and
   tar, pkg, zip and diff also support gz, bz2, xz, zst, lz4 and lzma suffixes.
-- Other archives/objects: tgz, tbz/tbz2, txz, tzst, 7z, rar, ova, whl, jar,
+- Other archives/objects: tgz, tbz/tbz2, txz, tzst, 7z, rar, ova, whl, jar, far,
   crate, OSTree filez, debug-symbol pdb and Git pack.
 - Narrow path exceptions: versioned `dl.k8s.io/v*/bin/<os>/<arch>/kubectl`
   executables and `manjaro/<channel>/<repo>/<arch>/*.files` repository databases.

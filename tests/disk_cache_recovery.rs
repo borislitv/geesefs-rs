@@ -11,6 +11,113 @@ use support::{DEADLINE, MIB, block, key, open};
 pub use support::{budget, disk_cache, error};
 
 #[tokio::test]
+async fn close_releases_native_workers_and_all_device_owners() {
+    let dir = support::directory();
+    let resources = Budget::new(32 * MIB).unwrap();
+    let gate = support::EngineGate::new();
+    let cache = support::gated(dir.path(), &resources, gate.clone()).await;
+    assert!(!gate.device_released());
+    assert_eq!(
+        cache.try_demote(key(0, 3), block(b"old")),
+        Demotion::Admitted
+    );
+    cache.drain(DEADLINE).await.unwrap();
+    cache.close(DEADLINE).await.unwrap();
+    drop(cache);
+    assert!(
+        gate.device_released(),
+        "native workers retained the closed device"
+    );
+    assert_eq!(resources.used(), 0);
+    let cache = open(dir.path(), &resources).await;
+    assert_eq!(
+        cache
+            .read_block(&key(0, 3), &Budget::new(3).unwrap())
+            .await
+            .unwrap()
+            .as_slice(),
+        b"old"
+    );
+    cache.close(DEADLINE).await.unwrap();
+}
+
+#[tokio::test]
+async fn recovered_zero_clean_regions_bound_population_and_shutdown() {
+    let dir = support::directory();
+    let resources = Budget::new(32 * MIB).unwrap();
+    let cache = open(dir.path(), &resources).await;
+    assert_eq!(
+        cache.try_demote(key(0, 3), block(b"old")),
+        Demotion::Admitted
+    );
+    cache.drain(DEADLINE).await.unwrap();
+    cache.close(DEADLINE).await.unwrap();
+    drop(cache);
+    // Reproduce the all-regions-populated restart boundary with real completed
+    // media, without inventing headers/checksums or claiming a traffic frequency.
+    let path = dir.path().join("payload-upstream-v1.cache");
+    let mut region = vec![0; MIB];
+    std::fs::File::open(&path)
+        .unwrap()
+        .read_exact(&mut region)
+        .unwrap();
+    let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    for id in 1..16_u64 {
+        file.seek(SeekFrom::Start(id * MIB as u64)).unwrap();
+        file.write_all(&region).unwrap();
+    }
+    file.sync_all().unwrap();
+    drop(file);
+    let gate = support::EngineGate::new();
+    let cache = support::gated(dir.path(), &resources, gate.clone()).await;
+    assert_eq!(cache.stats().regions.clean, 0);
+    let output = Budget::new(3).unwrap();
+    assert_eq!(
+        cache
+            .read_block(&key(0, 3), &output)
+            .await
+            .unwrap()
+            .as_slice(),
+        b"old"
+    );
+    assert_eq!(
+        cache.try_demote(key(3, 3), block(b"new")),
+        Demotion::Admitted
+    );
+    tokio::time::timeout(DEADLINE, async {
+        while cache.stats().engine_offered_demotions == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(6)).await;
+    tokio::time::resume();
+    tokio::time::timeout(DEADLINE, async {
+        while cache.status().state() != State::Bypass {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(cache.stats().spill_errors > 0);
+    assert!(cache.read_block(&key(3, 3), &output).await.is_none());
+    assert_eq!(
+        cache.try_demote(key(6, 3), block(b"src")),
+        Demotion::Dropped
+    );
+    cache.close(DEADLINE).await.unwrap();
+    drop(cache);
+    assert!(
+        gate.device_released(),
+        "stalled native workers retained the device"
+    );
+    assert_eq!(resources.used(), 0);
+    assert!(PreparedDiskCache::prepare(dir.path(), (16 * MIB) as u64).is_ok());
+}
+
+#[tokio::test]
 async fn completed_partial_and_short_eof_survive_reopen_without_repreallocation() {
     let dir = support::directory();
     let resources = Budget::new(32 * MIB).unwrap();
@@ -22,7 +129,7 @@ async fn completed_partial_and_short_eof_survive_reopen_without_repreallocation(
         Demotion::Admitted
     );
     cache.drain(DEADLINE).await.unwrap();
-    let allocated = std::fs::metadata(dir.path().join("payload-v1.cache"))
+    let allocated = std::fs::metadata(dir.path().join("payload-upstream-v1.cache"))
         .unwrap()
         .blocks();
     assert!(allocated * 512 >= (16 * MIB) as u64);
@@ -30,7 +137,7 @@ async fn completed_partial_and_short_eof_survive_reopen_without_repreallocation(
     drop(cache);
     let cache = open(dir.path(), &resources).await;
     assert_eq!(
-        std::fs::metadata(dir.path().join("payload-v1.cache"))
+        std::fs::metadata(dir.path().join("payload-upstream-v1.cache"))
             .unwrap()
             .blocks(),
         allocated
@@ -89,7 +196,7 @@ async fn second_process_cannot_open_locked_directory_even_before_engine_open() {
     assert_eq!(prepared.status().state(), State::Prepared);
     support::child("locked", dir.path()).await;
     assert!(
-        !dir.path().join("payload-v1.cache").exists(),
+        !dir.path().join("payload-upstream-v1.cache").exists(),
         "locking must precede preallocation"
     );
     drop(prepared);
@@ -113,19 +220,14 @@ async fn cancelled_recovery_keeps_funding_and_directory_until_owned_startup_clos
     let status = prepared.status();
     assert_eq!(status.startup().startup.count, 0);
     assert_eq!(status.opened_file_allocated_bytes(), None);
-    let gate = support::IoGate::new();
+    let gate = support::EngineGate::new();
     gate.hold_reads.store(true, Ordering::SeqCst);
     let opening = {
         let resources = resources.clone();
         let gate = gate.clone();
-        tokio::spawn(async move {
-            DiskCache::open_test(
-                prepared,
-                &resources,
-                Some(Box::new(support::GateConfig(gate))),
-            )
-            .await
-        })
+        tokio::spawn(
+            async move { DiskCache::open(prepared.with_test_gate(gate), &resources).await },
+        )
     };
     tokio::time::timeout(DEADLINE, gate.entered.acquire())
         .await
@@ -185,7 +287,7 @@ async fn disk_cache_child() {
         return;
     }
     let resources = Budget::new(32 * MIB).unwrap();
-    let gate = support::IoGate::new();
+    let gate = support::EngineGate::new();
     let cache = support::gated(&path, &resources, gate.clone()).await;
     assert_eq!(
         cache.try_demote(key(0, 9), block(b"completed")),
@@ -200,25 +302,12 @@ async fn disk_cache_child() {
             .as_slice(),
         b"completed"
     );
-    gate.publication_only
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    gate.hold_writes
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    gate.hold_writes();
     assert_eq!(
         cache.try_demote(key(128, 7), block(b"pending")),
         Demotion::Admitted
     );
     tokio::time::timeout(DEADLINE, gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
-    assert_eq!(
-        gate.payload_written.available_permits(),
-        1,
-        "real payload write completed, but its publication index is still gated"
-    );
-    tokio::time::timeout(DEADLINE, gate.log_written.acquire())
         .await
         .unwrap()
         .unwrap()
@@ -233,8 +322,7 @@ async fn disk_cache_child() {
         std::process::exit(0);
     }
     assert_eq!(mode, "graceful");
-    gate.hold_writes
-        .store(false, std::sync::atomic::Ordering::SeqCst);
+    gate.release_writes();
     gate.release.add_permits(16);
     cache.close(DEADLINE).await.unwrap();
 }
@@ -252,7 +340,7 @@ async fn corrupt_record_is_a_miss_not_zero_fill_or_destructive_recovery() {
     cache.drain(DEADLINE).await.unwrap();
     cache.close(DEADLINE).await.unwrap();
     drop(cache);
-    let path = dir.path().join("payload-v1.cache");
+    let path = dir.path().join("payload-upstream-v1.cache");
     let bytes = std::fs::read(&path).unwrap();
     let position = bytes
         .windows(payload.len())
@@ -292,7 +380,7 @@ async fn capacity_and_payload_budget_shrink_never_truncate_or_wipe_media() {
     cache.drain(DEADLINE).await.unwrap();
     cache.close(DEADLINE).await.unwrap();
     drop(cache);
-    let path = dir.path().join("payload-v1.cache");
+    let path = dir.path().join("payload-upstream-v1.cache");
     let before = std::fs::read(&path).unwrap();
     assert!(PreparedDiskCache::prepare(dir.path(), (8 * MIB) as u64).is_err());
     let prepared = PreparedDiskCache::prepare(dir.path(), (16 * MIB) as u64).unwrap();
@@ -321,7 +409,7 @@ async fn capacity_and_payload_budget_shrink_never_truncate_or_wipe_media() {
 }
 
 #[tokio::test]
-async fn unsafe_log_history_and_truncated_media_return_errors_without_reset() {
+async fn corrupt_index_is_a_miss_and_truncated_inventory_is_not_recreated() {
     let dir = support::directory();
     let resources = Budget::new(32 * MIB).unwrap();
     let cache = open(dir.path(), &resources).await;
@@ -332,28 +420,32 @@ async fn unsafe_log_history_and_truncated_media_return_errors_without_reset() {
     cache.drain(DEADLINE).await.unwrap();
     cache.close(DEADLINE).await.unwrap();
     drop(cache);
-    let path = dir.path().join("payload-v1.cache");
+    let path = dir.path().join("payload-upstream-v1.cache");
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&path)
         .unwrap();
-    let mut original = [0; 8];
-    file.read_exact(&mut original).unwrap();
     file.seek(SeekFrom::Start(0)).unwrap();
     file.write_all(b"unsafe!!").unwrap();
     let before = std::fs::read(&path).unwrap();
     let prepared = PreparedDiskCache::prepare(dir.path(), (16 * MIB) as u64).unwrap();
     let status = prepared.status();
-    assert!(DiskCache::open(prepared, &resources).await.is_err());
-    assert_eq!(status.state(), State::Bypass);
+    let cache = DiskCache::open(prepared, &resources).await.unwrap();
+    assert!(
+        cache
+            .read_block(&key(0, 3), &Budget::new(3).unwrap())
+            .await
+            .is_none()
+    );
+    assert_eq!(status.state(), State::Ready);
     assert_eq!(status.startup().startup.count, 1);
     assert_eq!(status.startup().allocation.count, 1);
     assert_eq!(status.startup().recovery.count, 1);
     assert!(status.opened_file_allocated_bytes().unwrap() >= (16 * MIB) as u64);
     assert_eq!(std::fs::read(&path).unwrap(), before);
-    file.seek(SeekFrom::Start(0)).unwrap();
-    file.write_all(&original).unwrap();
+    cache.close(DEADLINE).await.unwrap();
+    drop(cache);
     file.set_len((8 * MIB) as u64).unwrap();
     let truncated = std::fs::read(&path).unwrap();
     assert!(PreparedDiskCache::prepare(dir.path(), (16 * MIB) as u64).is_err());
@@ -496,7 +588,7 @@ async fn native_block_exhaustion(mount: &std::path::Path) {
     cache.drain(DEADLINE).await.unwrap();
     cache.close(DEADLINE).await.unwrap();
     drop(cache);
-    let path = existing.join("payload-v1.cache");
+    let path = existing.join("payload-upstream-v1.cache");
     let before = std::fs::read(&path).unwrap();
     let failing = mount.join("no-blocks");
     let prepared = PreparedDiskCache::prepare(&failing, (16 * MIB) as u64).unwrap();
@@ -542,7 +634,7 @@ async fn native_block_exhaustion(mount: &std::path::Path) {
         std::fs::metadata(failing.join(".lock")).unwrap().ino(),
         lock_inode
     );
-    let partial = failing.join("payload-v1.cache");
+    let partial = failing.join("payload-upstream-v1.cache");
     let partial_bytes = std::fs::read(&partial).unwrap();
     assert!(PreparedDiskCache::prepare(&failing, (16 * MIB) as u64).is_err());
     assert_eq!(
@@ -603,7 +695,7 @@ async fn native_inode_exhaustion(mount: &std::path::Path) {
     ));
     assert_eq!(observer.state(), State::Bypass);
     assert_eq!(resources.used(), 0);
-    assert!(!failing.join("payload-v1.cache").exists());
+    assert!(!failing.join("payload-upstream-v1.cache").exists());
     assert!(failing.join(".lock").exists());
     std::fs::File::open(failing.join(".lock"))
         .unwrap()
@@ -637,7 +729,7 @@ fn native_permission_failure_child() {
         cache.drain(DEADLINE).await.unwrap();
         cache.close(DEADLINE).await.unwrap();
         drop(cache);
-        let media = path.join("payload-v1.cache");
+        let media = path.join("payload-upstream-v1.cache");
         let before = std::fs::read(&media).unwrap();
         std::fs::set_permissions(&media, std::fs::Permissions::from_mode(0o400)).unwrap();
         let prepared = PreparedDiskCache::prepare(&path, (16 * MIB) as u64).unwrap();

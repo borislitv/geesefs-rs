@@ -169,101 +169,43 @@ Sources: [Go SDK retryer](https://github.com/aws/aws-sdk-go/blob/v1.55.8/aws/cli
 [Go configuration](https://github.com/yandex-cloud/geesefs/blob/80c214ef14f620d93407454fc76ca01dd71fa25f/core/cfg/conf_s3.go),
 [Rust RetryConfig API](https://docs.rs/aws-smithy-types/1.9.0/aws_smithy_types/retry/struct.RetryConfig.html).
 
-## Selective disk payload cache qualification — 2026-11-09
+## Standard Foyer payload cache — 2026-11-17
 
-Evaluate released [Foyer 0.22.6](https://docs.rs/foyer/0.22.6/foyer/) (Apache-2.0)
-first as a development-only dependency. Its supported disk-only writer, single-file
-device, region reclamation, checksum validation and recovery avoid a custom disk
-format or one inode per small payload block. **The released engine fails the
-reinsertion/recovery gate and is not selected for runtime.**
-Qualification must establish memory ownership, recency adaptation, fixed-capacity
-reuse, error/cancellation behavior and persistent inventory costs. Default FIFO
-eviction is not the agreed approximate-LRU policy. The application retains its
-existing charged L1; missing TTL support is irrelevant because payload TTL was
-explicitly removed. Keep raw receipts outside tracked source.
+Select published [Foyer 0.22.6](https://docs.rs/foyer/0.22.6/foyer/) (Apache-2.0)
+from crates.io. The operator accepts optional recovery misses and requires the
+native sharded HashMap, not the downstream bounded HashMap/BTreeSet. Retain
+buffered FileDevice I/O, exact immutable keys, bounded codecs and reinsertion
+through supported policy hooks. Do not add a replacement engine or shadow index.
 
-`tests/disk_cache_engine.rs` qualifies the public API with a 16-MiB container,
-1-MiB regions, 128-KiB records, 512-KiB configured buffer pool and one
-flusher/reclaimer. The disk-only roundtrip/reopen and fixed-container recycling
-checks pass. Default eviction loses a continuously read record at cold-scan step
-106. The test-only `StorageFilterCondition`/`EvictionPicker` adapter uses the
-already selected `lru` crate for at most 64 reference hashes and limits copied
-records to one quarter of each reclaimed region. The hot record survives the
-scan, and becomes evictable when access stops. This does not establish an
-aggregate in-flight memory bound or an accepted runtime policy.
+The released revision is `dd46245c45071d1036331e4e2c48e15386017b96`.
+[Reinsertion preserves logical sequence](https://github.com/foyer-rs/foyer/blob/dd46245c45071d1036331e4e2c48e15386017b96/foyer-storage/src/engine/block/reclaimer.rs),
+while [recovery stops at a decreasing sequence](https://github.com/foyer-rs/foyer/blob/dd46245c45071d1036331e4e2c48e15386017b96/foyer-storage/src/engine/block/recover.rs).
+A fresh real-file probe lost six of 104 resident entries after reinsertion/reopen;
+all returned bytes were correct and subsequent writes worked. Without reinsertion,
+102/102 survived. Keep reinsertion: protecting hot entries during normal eviction
+is useful, and a miss can refetch the immutable range. These small probes do not
+predict production loss rates or guarantee recovery of every completed entry.
 
-The combined persistence test fails: after inserting keys 0–255 while repeatedly
-reading key 0, keys `[0, 210, 211, 212, 213, 214]` are readable after `close()` but
-missing after reopen. This reproduces on both tmpfs and local ext4. The four-test
-qualification result is **three passed, one failed**; the failing test is retained
-without ignoring it or changing its expected behavior.
+An independently prepared zero-clean-region restart opens and reads existing
+entries but stalls new population. Ordinary filled/recycling caches keep clean
+reserves and are a different case. Optional waits must stay bounded and loss of
+L2 progress must fall back to the source; neither requires patching the index.
 
-The crate's recorded upstream revision is
-`dd46245c45071d1036331e4e2c48e15386017b96` (tag `v0.22.6`).
-[Reinsertion preserves the original sequence](https://github.com/foyer-rs/foyer/blob/dd46245c45071d1036331e4e2c48e15386017b96/foyer-storage/src/engine/block/reclaimer.rs#L137-L159),
-whereas [recovery stops a region when sequences decrease](https://github.com/foyer-rs/foyer/blob/dd46245c45071d1036331e4e2c48e15386017b96/foyer-storage/src/engine/block/recover.rs#L164-L198).
-An isolated checkout at that exact revision reproduces the failure. Temporarily
-removing only the decreasing-sequence cutoff makes the same test pass; restoring
-the source restores the same missing-key failure. The checkout was restored.
-This was a causal diagnostic, **not the adopted fix**: the cutoff also distinguishes
-old region tails. The maintained correction below preserves that distinction.
+Use the supported [Spawner Handle](https://github.com/foyer-rs/foyer/blob/dd46245c45071d1036331e4e2c48e15386017b96/foyer-common/src/spawn.rs)
+with an application-owned dedicated Tokio runtime. A public-API probe confirms
+that stopping that runtime releases idle workers retained after native close.
+Keep Device/file owners and directory ownership alive until blocking I/O ends;
+an observer timeout is not I/O completion.
 
-At inspection, [v0.22.6 remains the latest release](https://github.com/foyer-rs/foyer/releases/tag/v0.22.6).
-The newer [recovery optimization](https://github.com/foyer-rs/foyer/commit/4e5ca058d3552d963cdc47289094bdd118ea4584)
-addresses [large-index costs](https://github.com/foyer-rs/foyer/issues/1295), but retains
-the decreasing-sequence cutoff; it does not resolve this incompatibility.
-The released result is retained independently of the maintained fork's subsequent
-qualification. Filesystem integration and performance acceptance remain separate.
+Released enqueue/wait do not provide the fork's submission credits, index count
+or hard read/recovery limits. Preserve bounded application jobs and backing owners,
+report unavailable metrics honestly, and measure native index/recovery RSS rather
+than presenting nominal funding as a hard bound. The old fork format requires an
+explicit cold transition; unknown inventory must not be silently reset.
 
-The operator subsequently authorized a maintained fork and other engine trials
-without another decision checkpoint. Development and PR delivery are confined to
-the operator's repositories; external upstream submissions require a separate
-explicit decision. Remain on the maintained fork until equivalent upstream fixes
-are independently verified. The first correction
-will separate physical region incarnation from logical entry sequence: checksum-
-protected blob indexes carry a shared random incarnation for each new region.
-Recovery/reclamation must reject a previous incarnation's tail while allowing old
-logical sequences from valid reinsertions. Preserve legacy decoding and make old
-readers reject the new index format safely. This narrow format correction is
-necessary because the released picker/filter APIs cannot fix recovery's sequence
-assumption; it is not a replacement storage engine. Keep legacy/reuse/corruption
-tests and the unmodified released RED as independent controls.
-
-Select public fork revision `d60dd0462c1de1e0853590791371208b659c90bf`
-for the isolated adapter, maintained in [fork PR 1](https://github.com/borislitv/foyer/pull/1).
-The released crate remains unsuitable. Corrections separate physical region
-incarnation from logical sequence, join shutdown ownership, validate recovered
-record geometry, bound CLOCK index slots and stream recovery. A circular
-tombstone log now persists the maximum sequence whose invalidation history was
-actually overwritten; otherwise completed deletions could resurrect after wrap.
-Unwrapped logs retain old completed records. Unsafe history returns an error,
-without automatically clearing inventory. Older readers must not open upgraded logs.
-
-Guarded callers use `Store::{try_enqueue, try_delete, load, wait_guarded}`.
-Byte/item credits precede index mutation and follow actual I/O; admission failure
-means not accepted, not a completed deletion. Serialized record size is capped
-before read allocation, and the adapter must permit only `Compression::None`.
-HybridCache's automatic writer/eviction paths use legacy void APIs and are **not**
-compatible with guarded mode. Caller backing, bounded codecs, fixed pools and
-index funding remain application responsibilities. No new journal or startup
-dirty-marker inventory reset is used. Process-interruption fixtures preserve
-unrelated completed records; this is not a power-loss durability guarantee.
-
-The exact fork passes 130 affected native tests, three explicitly configured
-doctests, default-feature package checks and all-target Clippy. Tests include
-real-file collision/corruption, queue exhaustion, interrupted child processes,
-tombstone wrap, lifecycle and 30 small geometry fixtures. The audit exception
-permits only the exact public repository, revision and six workspace packages.
-
-Resource qualification of the same bounded CLOCK representation recovered
-8,388,608 tiny records: 1,837.48 MiB requested live memory and up to 1,984.96 MiB
-observed RSS after touches. This supersedes the earlier unbounded-index estimate;
-the order tree must be funded too. A sparse 1-TiB log-enabled open kept scratch
-below 2 MiB but incurred about 3.75 GiB of file-cache residency. These are
-index/geometry experiments, not a populated 1-TiB payload benchmark or a whole-RSS
-bound. Retain raw source hashes, CPU/cgroup accounting and sampling limitations
-outside tracked source. Integration must disclose the resulting L1 reduction and
-test ownership/fallback under its actual configuration before accepting the feature.
+Historical fork qualification and raw failures remain in version history and
+private evidence. The former requirement to retain every cache hit is superseded,
+not retrospectively reported as a passing upstream test.
 
 For the independent CLI work, reuse maintained public
 [regex 1.13.1](https://github.com/rust-lang/regex) (MIT OR Apache-2.0) with bounded pattern
@@ -340,18 +282,16 @@ owned flush gate, conditional reads and private-receipt recovery contract.
 
 ### Removal of retained application payload cache — 2026-11-14
 
-Reuse the existing Apache-2.0 Foyer 0.22.6 public fork at
-[`d60dd0462c1de1e0853590791371208b659c90bf`](https://github.com/borislitv/foyer/tree/d60dd0462c1de1e0853590791371208b659c90bf)
-for persistent indexing, CLOCK/region eviction, recovery, record I/O, serialization
+Reuse Apache-2.0 Foyer 0.22.6 from crates.io (the 2026-11-17 selection above)
+for persistent indexing, region eviction, recovery, record I/O, serialization
 and integrity. Its `FileDeviceBuilder` defaults to buffered I/O, and the selected
 `Store` defaults to Psync; backing-file page cache already participates. Retain
-the supported passive hybrid factory, reject-all `Piece` source and guarded
-`Store::{load,try_enqueue,wait_guarded}` APIs. A zero memory capacity is not a
+the supported passive hybrid factory, reject-all `Piece` source and public
+`Store::{load,enqueue,wait}` APIs. A zero memory capacity is not a
 hard allocation bound or a no-retention API. Do not replace the storage engine or
 disable its integrity checks to remove the application's `ReadCache`.
 
-The exact-pin high-level hybrid writer uses legacy `enqueue`, which is forbidden
-with guarded submission limits. Memory `get_or_fetch` deduplicates exact keys,
+The adapter owns its bounded population jobs. Memory `get_or_fetch` deduplicates exact keys,
 spawns its producer independently of caller cancellation, and only publishes its
 result at producer completion (`foyer-memory/src/raw.rs:1082-1105`). It cannot
 replace overlapping-range coordination while preserving early requested replies,
@@ -362,7 +302,8 @@ transient request state, without an idle LRU, eviction policy or cross-request
 retained payload index. Metadata and dirty writer ownership remain independent.
 
 Populate Foyer from validated clean source fills, rather than RAM capacity
-victims. Preserve its bounded copy/queue/read funding and optional-tier fallback.
+victims. Preserve application copy/job/read funding and optional-tier fallback;
+native queue/index/recovery allocations have no enforced application cap.
 This changes cache admission, not S3 writeback durability. Fresh inventory startup
 must follow the first eligible fill. No latency, RSS or whole-cgroup improvement
 is implied without measurements; kernel file pages and client memory remain

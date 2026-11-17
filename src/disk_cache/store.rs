@@ -1,8 +1,9 @@
 use super::{
     DiskKey, Funding,
     funding::{JOBS, POOL},
-    key::{DiskValue, RECORD_CAP},
+    key::DiskValue,
     policy::Recent,
+    runtime::{EngineOwners, EngineRuntime},
 };
 use crate::{
     budget::{Block, Budget, Reservation},
@@ -10,8 +11,8 @@ use crate::{
 };
 use foyer::{
     BlockEngineConfig, Cache, CacheBuilder, DefaultHasher, DeviceBuilder, FileDeviceBuilder,
-    HybridCacheBuilder, HybridCacheProperties, IndexUsage, InvalidRatioPicker, RecoverMode,
-    StorageFilter, Store, SubmissionLimits,
+    HybridCacheBuilder, HybridCacheProperties, InvalidRatioPicker, RecoverMode, StorageFilter,
+    Store,
 };
 use futures_util::{
     FutureExt,
@@ -20,7 +21,6 @@ use futures_util::{
 use std::{
     fs::{File, OpenOptions},
     hash::BuildHasher,
-    num::NonZeroUsize,
     os::{
         fd::AsRawFd,
         unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
@@ -34,9 +34,10 @@ use std::{
 };
 use tokio::sync::{OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock, Semaphore};
 
-const DATA_FILE: &str = "payload-v1.cache";
+const DATA_FILE: &str = "payload-upstream-v1.cache";
 const LOCK_FILE: &str = ".lock";
 const OPEN_DEADLINE: Duration = Duration::from_secs(120);
+const POPULATION_DEADLINE: Duration = Duration::from_secs(5);
 /// Conservative ownership for an existing fill task's admission wait. Charged
 /// from its window, before any DiskKey exists; retained through actual I/O.
 pub const READ_WAIT_BYTES: usize = super::funding::PAGE;
@@ -92,7 +93,7 @@ impl Latency {
 /// Per-open phases, each with count 0 (not finished/not attempted) or 1.
 /// Startup is open-entry through owned completion, excluding prepare().
 /// Allocation includes blocking-pool queue, file validation/preallocation/sync.
-/// Recovery is subsequent engine construction/strict recovery, not allocation.
+/// Recovery is subsequent native engine construction, not allocation.
 /// Failed phases are included; caller timeout/cancellation does not end a phase.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StartupStats {
@@ -175,7 +176,7 @@ pub struct PreparedDiskCache {
     status: DiskCacheStatus,
     inventory: Option<(u64, u64)>,
     #[cfg(test)]
-    test_io: Option<Box<dyn foyer::IoEngineConfig>>,
+    test_gate: Option<Arc<super::TestGate>>,
 }
 
 /// The original shared-lane credit follows preparation into owned startup;
@@ -219,15 +220,14 @@ impl PreparedDiskCache {
             status: DiskCacheStatus(Arc::new(Startup::default())),
             inventory,
             #[cfg(test)]
-            test_io: None,
+            test_gate: None,
         })
     }
 
-    /// Inject only the I/O boundary; filesystem qualification and owned startup
-    /// still use their production path. Absent from non-test builds.
+    /// Control the external engine boundary while retaining its real file I/O.
     #[cfg(test)]
-    pub(crate) fn with_test_io(mut self, io: Box<dyn foyer::IoEngineConfig>) -> Self {
-        self.test_io = Some(io);
+    pub fn with_test_gate(mut self, gate: Arc<super::TestGate>) -> Self {
+        self.test_gate = Some(gate);
         self
     }
 
@@ -411,20 +411,16 @@ pub enum SpillDrop {
     Activity,
     InvalidBlock,
     Copy,
-    EngineNoSpace,
-    EngineError,
     UnindexedAfterDrain,
 }
 impl SpillDrop {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 7] = [
         Self::Jobs,
         Self::Timeout,
         Self::State,
         Self::Activity,
         Self::InvalidBlock,
         Self::Copy,
-        Self::EngineNoSpace,
-        Self::EngineError,
         Self::UnindexedAfterDrain,
     ];
     pub const fn label(self) -> &'static str {
@@ -435,8 +431,6 @@ impl SpillDrop {
             Self::Activity => "activity",
             Self::InvalidBlock => "invalid_block",
             Self::Copy => "copy",
-            Self::EngineNoSpace => "engine_no_space",
-            Self::EngineError => "engine_error",
             Self::UnindexedAfterDrain => "unindexed_after_drain",
         }
     }
@@ -457,7 +451,6 @@ pub enum ReadFallback {
     OutputReservation,
     OutputCoverage,
     State,
-    Poisoned,
     Jobs,
     Activity,
     Timeout,
@@ -471,11 +464,10 @@ pub enum ReadFallback {
 }
 
 impl ReadFallback {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 13] = [
         Self::OutputReservation,
         Self::OutputCoverage,
         Self::State,
-        Self::Poisoned,
         Self::Jobs,
         Self::Activity,
         Self::Timeout,
@@ -492,7 +484,6 @@ impl ReadFallback {
             Self::OutputReservation => "output_reservation",
             Self::OutputCoverage => "output_coverage",
             Self::State => "state",
-            Self::Poisoned => "poisoned",
             Self::Jobs => "jobs",
             Self::Activity => "activity",
             Self::Timeout => "timeout",
@@ -517,9 +508,6 @@ pub struct Stats {
     pub state: State,
     pub active_jobs: usize,
     pub copied_bytes: usize,
-    pub submission_bytes: usize,
-    pub submission_items: usize,
-    pub index_entries: usize,
     pub recent_entries: usize,
     pub hits: u64,
     pub misses: u64,
@@ -531,13 +519,12 @@ pub struct Stats {
     pub io_write_bytes: u64,
     /// Exact copied payload admitted by the adapter; excludes IndexedHint.
     pub admitted_demotions: u64,
-    /// Fallible Store enqueue accepted, not a payload publication/durability ack.
-    pub engine_admitted_demotions: u64,
-    pub spill_no_space: u64,
-    /// Non-pressure enqueue errors or observed guarded drain failures.
+    /// Offered to the native void enqueue API; neither admission nor publication.
+    pub engine_offered_demotions: u64,
+    /// Optional population waits that exceeded their deadline.
     pub spill_errors: u64,
-    /// Admitted copies: try_demote entry through enqueue rejection or joined
-    /// guarded drain, including copying, task queue and I/O. Not per-record fsync.
+    /// Admitted copies through native drain observation or its timeout.
+    /// This is not a per-record publication or fsync acknowledgement.
     pub spill_operations: LatencyStats,
     /// Job-admitted reads: reserved-read entry through load/validation/output
     /// copy completion, including task queue/I/O, even after caller cancellation.
@@ -558,8 +545,6 @@ pub(crate) struct SpillDropEvent {
     pub total: u64,
     pub active_jobs: usize,
     pub copy_bytes: usize,
-    pub submission_bytes: usize,
-    pub index_entries: usize,
 }
 
 struct Inner {
@@ -567,7 +552,6 @@ struct Inner {
     backend: Backend,
     factory: foyer::HybridCache<DiskKey, DiskValue>,
     source: Source,
-    prepared: Mutex<Option<PreparedDiskCache>>,
     funding: Funding,
     copies: Budget,
     jobs: Arc<Semaphore>,
@@ -576,8 +560,7 @@ struct Inner {
     activity: Arc<RwLock<()>>,
     close: Mutex<Option<Close>>,
     status: DiskCacheStatus,
-    limits: SubmissionLimits,
-    index: IndexUsage,
+    engine_runtime: Mutex<Option<EngineRuntime>>,
     recent: Recent,
     runtime: tokio::runtime::Handle,
     hits: AtomicU64,
@@ -587,8 +570,7 @@ struct Inner {
     spill_observer: OnceLock<Arc<dyn Fn(SpillDropEvent) + Send + Sync>>,
     errors: AtomicU64,
     admitted_demotions: AtomicU64,
-    engine_admitted_demotions: AtomicU64,
-    spill_no_space: AtomicU64,
+    engine_offered_demotions: AtomicU64,
     spill_errors: AtomicU64,
     spill_operations: Latency,
     read_operations: Latency,
@@ -596,7 +578,7 @@ struct Inner {
     read_operation_misses: AtomicU64,
     read_operation_errors: AtomicU64,
     // Last field: every funded owner is destroyed before returning admission.
-    _funding_owner: Reservation,
+    owners: Arc<EngineOwners>,
 }
 struct Handle(Arc<Inner>);
 impl Drop for Handle {
@@ -704,18 +686,12 @@ impl Inner {
                 total,
                 active_jobs: self.funding.spill_jobs - self.jobs.available_permits(),
                 copy_bytes: self.copies.used(),
-                submission_bytes: self.limits.bytes(),
-                index_entries: self.index.entries(),
             });
         }
     }
     fn available(&self) -> std::result::Result<(), ReadFallback> {
         if self.status.state() != State::Ready {
             return Err(ReadFallback::State);
-        }
-        if self.limits.is_poisoned() {
-            self.fail();
-            return Err(ReadFallback::Poisoned);
         }
         Ok(())
     }
@@ -756,17 +732,20 @@ impl Inner {
         let inner = this.clone();
         let task = this.runtime.spawn(async move {
             let _exclusive = inner.activity.clone().write_owned().await;
-            match inner.factory.close().await {
-                Ok(()) => {
-                    drop(inner.prepared.lock().unwrap().take());
-                    inner.status.set(State::Closed);
-                    Ok(())
-                }
-                Err(error) => {
-                    inner.fail();
-                    Err(Arc::<str>::from(error.to_string()))
-                }
+            let drained = tokio::time::timeout(POPULATION_DEADLINE, inner.factory.close()).await;
+            if !matches!(drained, Ok(Ok(()))) {
+                inner.errors.fetch_add(1, Ordering::Relaxed);
             }
+            let runtime = inner.engine_runtime.lock().unwrap().take();
+            if let Some(runtime) = runtime {
+                runtime
+                    .shutdown()
+                    .await
+                    .map_err(|error| Arc::<str>::from(error.to_string()))?;
+            }
+            drop(inner.owners.prepared.lock().unwrap().take());
+            inner.status.set(State::Closed);
+            Ok(())
         });
         let future = async move { task.await.map_err(|e| Arc::<str>::from(e.to_string()))? }
             .boxed()
@@ -778,64 +757,20 @@ impl Inner {
 
 impl DiskCache {
     pub async fn open(prepared: PreparedDiskCache, resources: &Budget) -> Result<Self> {
-        Self::start(prepared, resources, None, None).await
+        Self::start(prepared, resources).await
     }
     /// Transfer pre-admitted credit without reopening an admission gap. An owned
     /// startup completes even if a caller cancels its bounded observation.
     pub async fn open_funded(prepared: FundedPreparedDiskCache) -> Result<Self> {
-        #[cfg(test)]
-        let mut prepared = prepared;
-        #[cfg(test)]
-        let io = prepared.prepared.test_io.take();
-        #[cfg(not(test))]
-        let io = None;
-        Self::start_funded(prepared, io, None).await
+        Self::start_funded(prepared).await
     }
-    #[cfg(test)]
-    pub async fn open_test(
-        prepared: PreparedDiskCache,
-        resources: &Budget,
-        io: Option<Box<dyn foyer::IoEngineConfig>>,
-    ) -> Result<Self> {
-        Self::start(prepared, resources, io, None).await
-    }
-    /// Exercise the real Store's pressure boundary with less than the funded
-    /// submission allowance. Production admission/funding remain unchanged.
-    #[cfg(test)]
-    pub async fn open_test_with_submission_limit(
-        prepared: PreparedDiskCache,
-        resources: &Budget,
-        io: Box<dyn foyer::IoEngineConfig>,
-        bytes: NonZeroUsize,
-    ) -> Result<Self> {
-        if bytes.get() > prepared.funding(resources.limit())?.submission_bytes {
-            return Err(Error::Config(
-                "test submission limit exceeds funding".into(),
-            ));
-        }
-        let limits = SubmissionLimits::new(bytes, NonZeroUsize::new(2 * JOBS + 4).unwrap())
-            .map_err(engine)?;
-        Self::start(prepared, resources, Some(io), Some(limits)).await
-    }
-    async fn start(
-        prepared: PreparedDiskCache,
-        resources: &Budget,
-        io_config: Option<Box<dyn foyer::IoEngineConfig>>,
-        limits: Option<SubmissionLimits>,
-    ) -> Result<Self> {
+    async fn start(prepared: PreparedDiskCache, resources: &Budget) -> Result<Self> {
         let prepared = prepared.fund(resources)?;
-        tokio::time::timeout(
-            OPEN_DEADLINE,
-            Self::start_funded(prepared, io_config, limits),
-        )
-        .await
-        .map_err(|_| Error::Timeout("L2 recovery"))?
+        tokio::time::timeout(OPEN_DEADLINE, Self::start_funded(prepared))
+            .await
+            .map_err(|_| Error::Timeout("L2 recovery"))?
     }
-    async fn start_funded(
-        funded: FundedPreparedDiskCache,
-        io_config: Option<Box<dyn foyer::IoEngineConfig>>,
-        limits: Option<SubmissionLimits>,
-    ) -> Result<Self> {
+    async fn start_funded(funded: FundedPreparedDiskCache) -> Result<Self> {
         let started = Instant::now();
         let FundedPreparedDiskCache {
             prepared,
@@ -847,7 +782,7 @@ impl DiskCache {
         let observer = status.clone();
         // Owned startup retains directory and funding if its caller is cancelled.
         let task = tokio::spawn(async move {
-            let result = Self::build(prepared, funding, owner, io_config, limits).await;
+            let result = Self::build(prepared, funding, owner).await;
             observer.0.startup.record(started);
             if result.is_err() {
                 observer.set(State::Bypass);
@@ -860,18 +795,16 @@ impl DiskCache {
         prepared: PreparedDiskCache,
         funding: Funding,
         owner: Reservation,
-        io_config: Option<Box<dyn foyer::IoEngineConfig>>,
-        limits: Option<SubmissionLimits>,
     ) -> Result<Self> {
         let status = prepared.status();
         let allocation_started = Instant::now();
         let allocation = tokio::task::spawn_blocking(move || {
             let (file, allocated_bytes) = prepared.allocate()?;
-            Ok::<_, Error>((prepared, file, allocated_bytes))
+            Ok::<_, Error>((prepared, file, allocated_bytes, owner))
         })
         .await;
         status.0.allocation.record(allocation_started);
-        let (prepared, file, allocated_bytes) = allocation.map_err(engine)??;
+        let (prepared, file, allocated_bytes, owner) = allocation.map_err(engine)??;
         if let Some(bytes) = allocated_bytes {
             status
                 .0
@@ -880,7 +813,7 @@ impl DiskCache {
             status.0.file_observed.store(true, Ordering::Release);
         }
         let recovery_started = Instant::now();
-        let result = Self::build_engine(prepared, file, funding, owner, io_config, limits).await;
+        let result = Self::build_engine(prepared, file, funding, owner).await;
         status.0.recovery.record(recovery_started);
         result
     }
@@ -889,18 +822,8 @@ impl DiskCache {
         file: File,
         funding: Funding,
         owner: Reservation,
-        io_config: Option<Box<dyn foyer::IoEngineConfig>>,
-        limits: Option<SubmissionLimits>,
     ) -> Result<Self> {
         let recent = Recent::new(funding.recent_entries);
-        let limits = match limits {
-            Some(limits) => limits,
-            None => SubmissionLimits::new(
-                NonZeroUsize::new(funding.submission_bytes.min(POOL)).unwrap(),
-                NonZeroUsize::new(2 * JOBS + 4).unwrap(),
-            )
-            .map_err(engine)?,
-        };
         // FileDeviceBuilder reopens with create(true) and set_len. Keep our
         // validated inode pinned through that supported path-only API instead
         // of allowing an unlink/replacement between validation and device open
@@ -910,28 +833,31 @@ impl DiskCache {
             .build()
             .map_err(engine)?;
         drop(file);
+        let status = prepared.status();
+        #[cfg(test)]
+        let test_gate = prepared.test_gate.clone();
+        let owners = Arc::new(EngineOwners::new(prepared, owner));
+        let engine_runtime = EngineRuntime::new(device.clone(), owners.clone())?;
         let config = BlockEngineConfig::new(device)
             .with_block_size(funding.region_bytes)
             .with_buffer_pool_size(POOL)
-            .with_indexer_shards(1)
-            .with_index_capacity(NonZeroUsize::new(funding.index_entries).unwrap())
-            .with_recovery_scratch_limit(NonZeroUsize::new(funding.recovery_bytes).unwrap())
+            .with_submit_queue_size_threshold(POOL)
             .with_recover_concurrency(1)
             .with_flushers(1)
             .with_reclaimers(1)
             .with_clean_block_threshold((funding.capacity / funding.region_bytes / 20).max(1))
-            .with_tombstone_log(true)
-            .with_read_limits(
-                NonZeroUsize::new(RECORD_CAP).unwrap(),
-                foyer::Compression::None,
-            )
-            .with_submission_limits(limits.clone())
             .with_eviction_pickers(vec![
                 Box::new(InvalidRatioPicker::new(0.8)),
                 Box::new(recent.picker()),
             ])
             .with_reinsertion_filter(StorageFilter::new().with_condition(recent.clone()));
-        let index = config.index_usage();
+        #[cfg(test)]
+        let config: Box<
+            dyn foyer::EngineConfig<DiskKey, DiskValue, HybridCacheProperties>,
+        > = match &test_gate {
+            Some(gate) => gate.wrap(config),
+            None => Box::new(config),
+        };
         // Public StoreBuilder requires an unexported metrics type. Use
         // the public builder only as a passive factory. Retain its empty shell
         // until explicit close (dropping it would close its Store). NEVER call
@@ -941,15 +867,17 @@ impl DiskCache {
             .with_flush_on_close(false)
             .memory(1)
             .storage()
-            .with_recover_mode(RecoverMode::Strict)
+            .with_recover_mode(RecoverMode::Quiet)
+            .with_spawner(engine_runtime.spawner())
             .with_compression(foyer::Compression::None)
             .with_engine_config(config);
-        let builder = if let Some(io) = io_config {
-            builder.with_io_engine_config(io)
-        } else {
-            builder
+        let shell = match builder.build().await {
+            Ok(shell) => shell,
+            Err(error) => {
+                engine_runtime.shutdown().await?;
+                return Err(engine(error));
+            }
         };
-        let shell = builder.build().await.map_err(engine)?;
         let backend = shell.storage().clone();
         // Rejecting the memory admission filter yields detached phantom Pieces,
         // with no automatic spill listener or retained second RAM payload cache.
@@ -957,25 +885,22 @@ impl DiskCache {
             .with_shards(1)
             .with_filter(|_: &DiskKey, _: &DiskValue| false)
             .build();
-        let status = prepared.status();
         let spill_jobs = funding.spill_jobs;
         let inner = Arc::new(Inner {
             read_fallbacks: std::array::from_fn(|_| AtomicU64::new(0)),
             backend,
             factory: shell,
             source,
-            prepared: Mutex::new(Some(prepared)),
             copies: Budget::new(funding.copy_bytes)?,
             funding,
-            _funding_owner: owner,
+            owners,
             jobs: Arc::new(Semaphore::new(spill_jobs)),
             read_jobs: Arc::new(Semaphore::new(JOBS)),
             queued_reads: AtomicU64::new(0),
             activity: Arc::new(RwLock::new(())),
             close: Mutex::new(None),
             status,
-            limits,
-            index,
+            engine_runtime: Mutex::new(Some(engine_runtime)),
             recent,
             runtime: tokio::runtime::Handle::current(),
             hits: AtomicU64::new(0),
@@ -985,8 +910,7 @@ impl DiskCache {
             spill_observer: OnceLock::new(),
             errors: AtomicU64::new(0),
             admitted_demotions: AtomicU64::new(0),
-            engine_admitted_demotions: AtomicU64::new(0),
-            spill_no_space: AtomicU64::new(0),
+            engine_offered_demotions: AtomicU64::new(0),
             spill_errors: AtomicU64::new(0),
             spill_operations: Latency::default(),
             read_operations: Latency::default(),
@@ -1021,9 +945,6 @@ impl DiskCache {
                 - i.jobs.available_permits()
                 - i.read_jobs.available_permits(),
             copied_bytes: i.copies.used(),
-            submission_bytes: i.limits.bytes(),
-            submission_items: i.limits.items(),
-            index_entries: i.index.entries(),
             recent_entries: i.recent.len(),
             hits: i.hits.load(Ordering::Relaxed),
             misses: i.misses.load(Ordering::Relaxed),
@@ -1034,8 +955,7 @@ impl DiskCache {
             io_read_bytes: i.backend.statistics().disk_read_bytes() as u64,
             io_write_bytes: i.backend.statistics().disk_write_bytes() as u64,
             admitted_demotions: i.admitted_demotions.load(Ordering::Relaxed),
-            engine_admitted_demotions: i.engine_admitted_demotions.load(Ordering::Relaxed),
-            spill_no_space: i.spill_no_space.load(Ordering::Relaxed),
+            engine_offered_demotions: i.engine_offered_demotions.load(Ordering::Relaxed),
             spill_errors: i.spill_errors.load(Ordering::Relaxed),
             spill_operations: i.spill_operations.stats(),
             read_operations: i.read_operations.stats(),
@@ -1109,32 +1029,20 @@ impl DiskCache {
             i.runtime.spawn(async move {
                 let _job = job;
                 let entry = inner.source.insert(key.clone(), DiskValue::Source(copy));
-                let admitted = inner.backend.try_enqueue(entry.piece(), true);
+                inner
+                    .engine_offered_demotions
+                    .fetch_add(1, Ordering::Relaxed);
+                inner.backend.enqueue(entry.piece(), true);
                 drop(entry);
-                match admitted {
-                    Err(error) => {
-                        if error.kind() == foyer::ErrorKind::NoSpace {
-                            inner.drop_spill(SpillDrop::EngineNoSpace);
-                            inner.spill_no_space.fetch_add(1, Ordering::Relaxed);
-                        } else {
-                            inner.drop_spill(SpillDrop::EngineError);
-                            inner.spill_errors.fetch_add(1, Ordering::Relaxed);
-                            inner.fail();
-                        }
-                    }
-                    Ok(_) => {
-                        inner
-                            .engine_admitted_demotions
-                            .fetch_add(1, Ordering::Relaxed);
-                        if inner.backend.wait_guarded().await.is_err() {
-                            inner.spill_errors.fetch_add(1, Ordering::Relaxed);
-                            inner.fail();
-                        } else if !inner.backend.may_contains(&key) {
-                            // A drain is not a publication receipt. Concurrent
-                            // eviction can also make a completed key absent.
-                            inner.drop_spill(SpillDrop::UnindexedAfterDrain);
-                        }
-                    }
+                if tokio::time::timeout(POPULATION_DEADLINE, inner.backend.wait())
+                    .await
+                    .is_err()
+                {
+                    inner.drop_spill(SpillDrop::Timeout);
+                    inner.spill_errors.fetch_add(1, Ordering::Relaxed);
+                    inner.fail();
+                } else if !inner.backend.may_contains(&key) {
+                    inner.drop_spill(SpillDrop::UnindexedAfterDrain);
                 }
                 inner.spill_operations.record(started);
             });
@@ -1357,10 +1265,10 @@ impl DiskCache {
     }
 
     /// Advisory only: caller already validated the current remote generation.
-    /// Touching a missing/pending record neither creates it nor marks new spills.
+    /// Native presence may include Keeper work; the hint never inserts data.
     pub fn touch_validated(&self, key: &DiskKey) -> bool {
         let i = self.inner();
-        if i.status.state() == State::Ready && i.backend.touch(key) {
+        if i.status.state() == State::Ready && i.backend.may_contains(key) {
             i.recent.touch(DefaultHasher::default().hash_one(key));
             true
         } else {
@@ -1371,10 +1279,10 @@ impl DiskCache {
         let i = self.inner();
         tokio::time::timeout(deadline, async {
             let _exclusive = i.activity.clone().write_owned().await;
-            i.backend.wait_guarded().await.map_err(engine)
+            i.backend.wait().await;
         })
         .await
-        .map_err(|_| Error::Timeout("L2 drain"))?
+        .map_err(|_| Error::Timeout("L2 drain"))
     }
     /// Deadline limits this caller, not kernel I/O. Owned close continues and
     /// retains directory/funding until real jobs and engine shutdown finish.

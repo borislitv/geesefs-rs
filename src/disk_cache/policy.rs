@@ -100,8 +100,8 @@ impl EvictionPicker for CopyBoundedFifo {
             .region_reclaims_started
             .fetch_add(1, Ordering::Relaxed);
         self.fifo.on_block_evict(info, block);
-        // Exactly one engine reclaimer makes this a per-region quota. The shared
-        // SubmissionLimits additionally bounds live raw-copy bytes/items.
+        // Per-region copy traffic allowance with one reclaimer, not an aggregate
+        // cap on the native engine's live allocations.
         self.recent.0.references.lock().unwrap().remaining = self.copy_limit;
     }
 }

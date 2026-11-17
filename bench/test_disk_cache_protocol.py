@@ -66,7 +66,7 @@ class Contracts(unittest.TestCase):
             def sampler(*_):
                 yield SimpleNamespace(metrics=lambda: {}, cpu=SimpleNamespace(before={}, after={}))
             def prime(_binary, _fixture, _work, _record, _config, cache, *_):
-                (cache / 'payload-v1.cache').write_bytes(b'external-cache-fixture')
+                (cache / 'payload-upstream-v1.cache').write_bytes(b'external-cache-fixture')
             with patch.object(disk.compare, 'cgroup', side_effect=lambda *_: contextlib.nullcontext(root)), \
                  patch.object(disk.integration, 'mount', mount), patch.object(disk, 'prime', prime), \
                  patch.object(disk, 'disk_started'), patch.object(disk, 'worker', worker), \

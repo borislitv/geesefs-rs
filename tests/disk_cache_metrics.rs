@@ -42,7 +42,7 @@ async fn attach(config: Config, store: Arc<MemoryStore>) -> Arc<Filesystem> {
     let disk = config.disk_cache_config().unwrap().unwrap();
     std::fs::set_permissions(&disk.directory, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut prepared = PreparedDiskCache::prepare(&disk.directory, disk.max_bytes).unwrap();
-    if !disk.directory.join("payload-v1.cache").exists() {
+    if !disk.directory.join("payload-upstream-v1.cache").exists() {
         // Exact Ready-operation accounting requires recovered media, not a
         // deferred fresh engine. Lazy attachment metrics are tested separately.
         let resources = geesefs_rs::budget::Budget::new(32 * MIB).unwrap();
@@ -280,20 +280,20 @@ async fn real_fill_recovery_and_independent_l2_reads_have_exact_count_and_byte_m
     let config = configured(dir.path(), mount.path());
     let fs = attach(config.clone(), store.clone()).await;
     let empty = render(&fs).unwrap();
-    // The 16-MiB file also contains the tombstone log: only fifteen complete
-    // 1-MiB data regions exist. Preallocation must not look like a full cache.
+    // Immutable native records use all sixteen data regions, without a tombstone
+    // partition. Preallocation must not look like a full cache.
     assert_eq!(
         sample(&empty, "geesefs_disk_cache_region_capacity_bytes"),
-        (15 * MIB) as f64
+        (16 * MIB) as f64
     );
     assert_eq!(
         sample(&empty, "geesefs_disk_cache_region_free_bytes"),
-        (15 * MIB) as f64
+        (16 * MIB) as f64
     );
     assert_eq!(sample(&empty, "geesefs_disk_cache_region_used_bytes"), 0.);
     assert_eq!(
         sample(&empty, "geesefs_disk_cache_regions{state=\"clean\"}"),
-        15.
+        16.
     );
     let package = fs.lookup(1, "private-package.rpm").await.unwrap();
     assert_eq!(
@@ -310,7 +310,9 @@ async fn real_fill_recovery_and_independent_l2_reads_have_exact_count_and_byte_m
     assert_eq!(sample(&text, "geesefs_disk_cache_hits_total"), 0.);
     assert_eq!(sample(&text, "geesefs_disk_cache_hit_bytes_total"), 0.);
     assert!(sample(&text, "geesefs_disk_cache_io_write_bytes_total") > READ_BLOCK_BYTES as f64);
-    assert_eq!(sample(&text, "geesefs_disk_cache_index_entries"), 1.);
+    assert!(!text.contains("geesefs_disk_cache_index_entries"));
+    assert!(!text.contains("geesefs_disk_cache_index_entry_limit"));
+    assert_eq!(sample(&text, "geesefs_disk_cache_nominal_entries"), 128.);
     assert_eq!(
         sample(&text, "geesefs_disk_cache_region_size_bytes"),
         MIB as f64
@@ -321,7 +323,7 @@ async fn real_fill_recovery_and_independent_l2_reads_have_exact_count_and_byte_m
     );
     assert_eq!(
         sample(&text, "geesefs_disk_cache_region_free_bytes"),
-        (14 * MIB) as f64
+        (15 * MIB) as f64
     );
     assert_eq!(
         sample(&text, "geesefs_disk_cache_regions{state=\"writing\"}"),
@@ -332,14 +334,14 @@ async fn real_fill_recovery_and_independent_l2_reads_have_exact_count_and_byte_m
         1.
     );
     assert_eq!(
-        sample(&text, "geesefs_disk_cache_engine_admitted_demotions_total"),
+        sample(&text, "geesefs_disk_cache_engine_offered_demotions_total"),
         1.
     );
     assert_eq!(
         sample(&text, "geesefs_disk_cache_spill_operations_total"),
         1.
     );
-    assert_eq!(sample(&text, "geesefs_disk_cache_spill_no_space_total"), 0.);
+    assert!(!text.contains("geesefs_disk_cache_spill_no_space"));
     assert_eq!(sample(&text, "geesefs_disk_cache_spill_errors_total"), 0.);
     assert_eq!(
         sample(&text, "geesefs_disk_cache_read_operations_total"),
@@ -380,7 +382,7 @@ async fn real_fill_recovery_and_independent_l2_reads_have_exact_count_and_byte_m
     );
     assert_eq!(
         sample(&recovered, "geesefs_disk_cache_region_free_bytes"),
-        (14 * MIB) as f64
+        (15 * MIB) as f64
     );
     assert_eq!(
         sample(&recovered, "geesefs_disk_cache_regions{state=\"writing\"}"),
@@ -418,7 +420,7 @@ async fn real_fill_recovery_and_independent_l2_reads_have_exact_count_and_byte_m
     );
     assert_eq!(
         sample(&text, "geesefs_disk_cache_region_free_bytes"),
-        (13 * MIB) as f64
+        (14 * MIB) as f64
     );
     assert_eq!(
         sample(&text, "geesefs_disk_cache_regions{state=\"evictable\"}"),
@@ -618,21 +620,12 @@ async fn real_fill_recovery_and_independent_l2_reads_have_exact_count_and_byte_m
     );
     for (metric, expected) in [
         ("geesefs_disk_cache_active_jobs", stats.active_jobs),
-        (
-            "geesefs_disk_cache_submission_bytes{scope=\"queued_and_active\"}",
-            stats.submission_bytes,
-        ),
-        (
-            "geesefs_disk_cache_submission_items{scope=\"queued_and_active\"}",
-            stats.submission_items,
-        ),
         ("geesefs_disk_cache_copy_owned_bytes", stats.copied_bytes),
-        ("geesefs_disk_cache_index_entries", stats.index_entries),
         ("geesefs_disk_cache_recent_entries", stats.recent_entries),
     ] {
         assert_eq!(sample(&text, metric), expected as f64, "{metric}");
     }
-    assert!(text.contains("queued and active"));
+    assert!(!text.contains("geesefs_disk_cache_submission_"));
     assert!(text.contains("not measured heap"));
     assert!(text.contains("external overhead"));
     assert!(!text.contains("private-package"));

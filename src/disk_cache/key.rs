@@ -14,9 +14,8 @@ pub const MAX_PAYLOAD_BYTES: usize = 128 * 1024;
 const KEY_HEADER: usize = 34;
 // Foyer header (36), complete bounded key, value envelope (12), payload.
 const MAX_ENCODED_RECORD_BYTES: usize = 36 + MAX_IDENTITY_BYTES + 12 + MAX_PAYLOAD_BYTES;
-// Foyer uses one limit for raw addr.len on reads AND page-rounded buffer
-// admission on writes/reinsertion. The storage envelope must cover both;
-// decoded identity/payload bounds remain independently enforced below.
+// Application allowance for a valid encoded record. Released Foyer has no
+// pre-allocation record-limit API; codecs independently bound decoded values.
 pub(crate) const RECORD_CAP: usize = super::funding::rounded(MAX_ENCODED_RECORD_BYTES);
 const KEY_MAGIC: &[u8; 4] = b"GLK1";
 const VALUE_MAGIC: &[u8; 4] = b"GLV1";

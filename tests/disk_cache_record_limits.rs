@@ -8,55 +8,7 @@ use disk_cache::{
     Demotion, DiskCache, DiskKey, Funding, MAX_IDENTITY_BYTES, MAX_PAYLOAD_BYTES, PreparedDiskCache,
 };
 use foyer::Code;
-use std::sync::{Arc, Mutex};
 use support::{DEADLINE, MIB, block, open};
-
-#[derive(Debug)]
-struct RecordReadBuffers(Arc<Mutex<Vec<usize>>>);
-
-#[derive(Debug)]
-struct RecordedIo {
-    real: Arc<dyn foyer::IoEngine>,
-    lengths: Arc<Mutex<Vec<usize>>>,
-}
-
-impl foyer::IoEngineConfig for RecordReadBuffers {
-    fn build(
-        self: Box<Self>,
-        context: foyer::IoEngineBuildContext,
-    ) -> futures_util::future::BoxFuture<'static, foyer::Result<Arc<dyn foyer::IoEngine>>> {
-        Box::pin(async move {
-            let real = Box::new(foyer::PsyncIoEngineConfig::new())
-                .build(context)
-                .await?;
-            Ok(Arc::new(RecordedIo {
-                real,
-                lengths: self.0,
-            }) as Arc<dyn foyer::IoEngine>)
-        })
-    }
-}
-
-impl foyer::IoEngine for RecordedIo {
-    fn read(
-        &self,
-        buffer: foyer_storage::IoReadBuffer,
-        partition: &dyn foyer_storage::Partition,
-        offset: u64,
-    ) -> foyer::IoHandle {
-        self.lengths.lock().unwrap().push(buffer.len());
-        self.real.read(buffer, partition, offset)
-    }
-
-    fn write(
-        &self,
-        buffer: foyer_storage::IoWriteBuffer,
-        partition: &dyn foyer_storage::Partition,
-        offset: u64,
-    ) -> foyer::IoHandle {
-        self.real.write(buffer, partition, offset)
-    }
-}
 
 fn boundary_key(identity_bytes: usize, payload_bytes: usize) -> DiskKey {
     // Wire header 34 B, plus one object byte and one ETag byte. An opaque
@@ -91,11 +43,9 @@ async fn maximum_and_page_neighbor_records_survive_drain_and_reopen() {
             (16_384, 131_071),
         ];
         let expected = (0_u8..=255).cycle().take(131_072).collect::<Vec<_>>();
-        let lengths = Arc::new(Mutex::new(Vec::new()));
-        let cache = DiskCache::open_test(
+        let cache = DiskCache::open(
             PreparedDiskCache::prepare(directory.path(), (16 * MIB) as u64).unwrap(),
             &resources,
-            Some(Box::new(RecordReadBuffers(lengths.clone()))),
         )
         .await
         .unwrap();
@@ -112,7 +62,7 @@ async fn maximum_and_page_neighbor_records_survive_drain_and_reopen() {
             // assuming a batch of best-effort spills all become readable.
             cache.drain(DEADLINE).await.unwrap();
         }
-        lengths.lock().unwrap().clear();
+        let reads_before = cache.stats().io_read_bytes;
         for (identity, length) in cases {
             let actual = cache
                 .read_block_with_deadline(&boundary_key(identity, length), &output, DEADLINE)
@@ -120,14 +70,10 @@ async fn maximum_and_page_neighbor_records_survive_drain_and_reopen() {
                 .unwrap_or_else(|| panic!("record missing: identity={identity}, payload={length}"));
             assert_eq!(actual.as_slice(), &expected[..length]);
         }
-        let observed = lengths.lock().unwrap().clone();
-        assert!(
-            observed.contains(&151_552),
-            "maximum padded read absent: {observed:?}"
-        );
-        assert!(
-            observed.iter().all(|&n| n <= 151_552),
-            "unfunded padded read: {observed:?}"
+        assert_eq!(
+            cache.stats().io_read_bytes - reads_before,
+            901_120,
+            "four 37-page records and two 36-page records are read without a larger I/O window"
         );
         assert_eq!(output.used(), 0);
         cache.close(DEADLINE).await.unwrap();
@@ -147,14 +93,7 @@ async fn maximum_and_page_neighbor_records_survive_drain_and_reopen() {
         assert_eq!(output.used(), 0);
         reopened.close(DEADLINE).await.unwrap();
         let stats = reopened.stats();
-        assert_eq!(
-            (
-                stats.active_jobs,
-                stats.copied_bytes,
-                stats.submission_bytes
-            ),
-            (0, 0, 0)
-        );
+        assert_eq!((stats.active_jobs, stats.copied_bytes), (0, 0));
         drop(reopened);
         assert_eq!(resources.used(), 0);
     })
@@ -172,10 +111,10 @@ fn one_byte_above_codec_limits_is_not_a_valid_key() {
 #[test]
 fn read_and_submission_funding_cover_the_existing_maximum_physical_record() {
     let funding = Funding::derive((16 * MIB) as u64, 32 * MIB).unwrap();
-    // Four jobs, each with a 151552-B padded I/O buffer. Existing decoded
-    // identity/value and native submission bookkeeping allowances stay intact.
+    // Four valid 151552-B encoded records; decoded identities and payloads
+    // have a separate read-work allowance. These are not native hard limits.
     assert_eq!(funding.read_work_bytes, 1_343_488);
-    assert_eq!(funding.submission_bytes, 610_304);
+    assert_eq!(funding.submission_bytes, 606_208);
     assert!(Funding::derive((16 * MIB) as u64, funding.required_bytes - 1).is_err());
     assert_eq!(
         Funding::derive((16 * MIB) as u64, funding.required_bytes)

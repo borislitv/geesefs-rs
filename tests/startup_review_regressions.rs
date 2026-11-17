@@ -283,7 +283,7 @@ async fn disk_cache_directory_is_locked_before_sdk_initialization() {
         Some(std::io::ErrorKind::WouldBlock)
     );
     assert!(
-        !cache.join("payload-v1.cache").exists(),
+        !cache.join("payload-upstream-v1.cache").exists(),
         "directory exclusion must precede engine preallocation"
     );
     assert!(std::fs::read_dir(&mount).unwrap().next().is_none());

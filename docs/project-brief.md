@@ -18,7 +18,31 @@ closed without merge; native metadata/conditional-response checks also expose
 unequal behavior. Preserve its raw measurements. This does not imply that Go
 cannot be optimized or that Rust automatically improves memory or speed.
 
-## Current operator scope — 2026-11-13
+## Standard Foyer scope — 2026-11-17
+
+The operator requires the unmodified published Foyer library and its native hash
+index; maintaining the downstream fork for optional-cache behavior is rejected.
+Use crates.io `foyer = 0.22.6`. Reinsertion remains enabled through supported
+policy hooks. Losing some optional cache hits during recovery is accepted; wrong
+returned bytes, blocked filesystem requests and misleading telemetry are not.
+
+Qualify ordinary reuse/restart and continued population, bounded source fallback,
+runtime ownership and memory before the authorized scoped reader trial. The
+operator permits a one-time cold L2 transition on that reader; preserve source
+data, resource settings, metadata freshness and writer durability. This does not
+authorize other-reader rollout. Website updates are explicitly out of scope.
+
+The first comparison retains 128-KiB records. Native index occupancy is not exposed
+by the released API: do not keep a shadow index for metrics or fabricate a zero.
+Nominal sizing allowances are not an enforced native-index or recovery RSS bound.
+The former complete-hit-recovery and hard-slot-cap assertions are historical fork
+contracts, not requirements to reproduce with another custom engine.
+
+Keep the current library contract in [dependency decisions](dependency-decisions.md)
+and remove superseded fork-specific tests, helpers and documentation with the code.
+Detailed execution plans and receipts remain outside the source diff.
+
+## Previous operator scope — 2026-11-13
 
 The operator accepted the synthetic fixed-capacity recycling controls, stopped
 the long artificial population test and authorized traffic readmission on the

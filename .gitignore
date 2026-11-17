@@ -32,6 +32,7 @@ rustc-ice-*.txt
 # Detailed measurement exports and generated graphs stay outside source diffs.
 /docs/*-20??????.json
 /docs/flamegraphs*/
+/vibe/
 
 # Local benchmark data, credentials and build-tool environments.
 /test-data/

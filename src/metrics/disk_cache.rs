@@ -163,11 +163,6 @@ fn adapter(registry: &mut Registry, stats: Option<&Stats>) {
             stats.map_or(0, |s| s.copied_bytes),
         ),
         (
-            "geesefs_disk_cache_index_entries",
-            "Current guarded record-index slots including pending updates and tombstones; not distinct S3 objects or index heap bytes",
-            stats.map_or(0, |s| s.index_entries),
-        ),
-        (
             "geesefs_disk_cache_recent_entries",
             "Current bounded approximate-recency hints; not measured heap bytes",
             stats.map_or(0, |s| s.recent_entries),
@@ -177,41 +172,18 @@ fn adapter(registry: &mut Registry, stats: Option<&Stats>) {
     }
     for (name, help, value) in [
         (
-            "geesefs_disk_cache_submission_bytes",
-            "Engine submission ownership including queued and active serialization/publication, not queued-only payload bytes",
-            stats.map_or(0, |s| s.submission_bytes),
-        ),
-        (
-            "geesefs_disk_cache_submission_items",
-            "Engine submissions including queued and active publication, not the adapter job count",
-            stats.map_or(0, |s| s.submission_items),
-        ),
-    ] {
-        let scoped = Family::<Vec<(&str, &str)>, Observation>::default();
-        scoped
-            .get_or_create(&vec![("scope", "queued_and_active")])
-            .set(value as f64);
-        registry.register(name, help, scoped);
-    }
-    for (name, help, value) in [
-        (
             "geesefs_disk_cache_admitted_demotions",
             "Funded exact-visible-range copies admitted this session; excludes index hints and rejected admission; not publication",
             stats.map_or(0, |s| s.admitted_demotions),
         ),
         (
-            "geesefs_disk_cache_engine_admitted_demotions",
-            "Store enqueue acceptances this session, not publication or durability acknowledgements",
-            stats.map_or(0, |s| s.engine_admitted_demotions),
-        ),
-        (
-            "geesefs_disk_cache_spill_no_space",
-            "Completed enqueue NoSpace rejections, not storage errors",
-            stats.map_or(0, |s| s.spill_no_space),
+            "geesefs_disk_cache_engine_offered_demotions",
+            "Calls to native void enqueue; neither confirmed admission nor publication",
+            stats.map_or(0, |s| s.engine_offered_demotions),
         ),
         (
             "geesefs_disk_cache_spill_errors",
-            "Admitted spill enqueue or guarded-drain errors, excluding NoSpace",
+            "Optional native population waits exceeding their deadline",
             stats.map_or(0, |s| s.spill_errors),
         ),
         (
@@ -246,7 +218,7 @@ fn adapter(registry: &mut Registry, stats: Option<&Stats>) {
         ),
         (
             "geesefs_disk_cache_dropped",
-            "Best-effort population refusals including size/copy/job/submission limits; not capacity evictions",
+            "Best-effort population refusals including size/copy/job limits and deadlines; not capacity evictions",
             stats.map_or(0, |s| s.drops),
         ),
         (
@@ -317,7 +289,7 @@ fn regions(registry: &mut Registry, stats: RegionStats) {
         ),
         (
             "geesefs_disk_cache_region_capacity_bytes",
-            "Actual data-region capacity excluding the tombstone log and unusable file tail",
+            "Actual data-region capacity excluding unusable file tail; immutable keys use no tombstone partition",
             stats.total * stats.size_bytes,
         ),
         (
@@ -387,9 +359,9 @@ fn funding_metrics(registry: &mut Registry, funding: Option<&Funding>) {
     );
     gauge(
         registry,
-        "geesefs_disk_cache_index_entry_limit",
-        "Funded guarded index entry ceiling, not current occupancy",
-        funding.map_or(0, |f| f.index_entries) as u64,
+        "geesefs_disk_cache_nominal_entries",
+        "Capacity divided by maximum payload size for planning; not native index occupancy or a limit",
+        funding.map_or(0, |f| f.nominal_entries) as u64,
     );
     gauge(
         registry,
@@ -453,7 +425,10 @@ fn instrumentation(registry: &mut Registry, stats: Option<&Stats>) {
     for observation in [
         "capacity_evictions",
         "allocated_bytes",
+        "index_entries",
         "index_heap_bytes",
+        "submission_bytes",
+        "submission_items",
         "latency_quantiles",
         "payload_bytes",
         "object_count",

@@ -5,6 +5,33 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-17: use the standard Foyer library and native index
+
+Version 0.1.19 replaces the downstream fork with exact crates.io Foyer 0.22.6.
+Use the native sharded HashMap and retain bounded hot-record reinsertion through
+public hooks. The operator accepts some recovery misses instead of maintaining
+engine patches; exact identity, length and both checksums remain mandatory.
+New `payload-upstream-v1.cache` media requires an explicit cold transition;
+unknown or incompatible existing inventory is never automatically deleted.
+
+Native enqueue is an offer rather than an admission receipt. Limit optional
+population waits and enter bypass when the engine stops progressing. Dedicated
+runtime ownership joins native workers and blocking I/O before releasing the
+directory; runtime cleanup and surviving handles retain their funded owners.
+Fixed index/recovery allowances are nominal, without an application slot cap.
+Remove unavailable index/submission gauges and report native offers separately.
+
+Remove fork-specific format/delete/cap tests and obsolete implementation plans;
+retain real collision, identity, corruption, cancellation, source-fallback and
+writer coverage. Current design, metrics and benchmark contracts describe the
+released APIs rather than preserving compatibility counters with invented values.
+These changes do not establish full turnover or comparative performance acceptance.
+
+The mirror selection policy also includes observed missing package/object formats
+and narrow versioned-executable and large-file-database paths, based on an hourly
+read-only traffic sample. Sidecar and path-boundary tests retain the exclusions;
+raw request information and operational identities remain outside this repository.
+
 ## 2026-11-15: bound source amplification and preserve eligible L2 population
 
 Version 0.1.18 disables speculative source reads after terminal persistent-tier

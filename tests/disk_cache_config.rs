@@ -32,6 +32,8 @@ impl Fixture {
             "1 TiB".into(),
             "--disk-cache-regex".into(),
             r"\.(deb|rpm)$".into(),
+            "--memory-limit".into(),
+            "8192".into(),
         ]
     }
 }
@@ -53,6 +55,8 @@ fn accepts_documented_flags_without_touching_cache_contents() {
         "1 TiB",
         "--disk-cache-regex",
         r"\.(deb|rpm)$",
+        "--memory-limit",
+        "8192",
     ])
     .expect("the documented three flags must parse");
     config.validate().unwrap();
@@ -194,7 +198,7 @@ fn regex_policy_uses_literal_case_sensitive_mount_relative_paths() {
 }
 
 #[test]
-fn mirror_payload_policy_selects_images_archives_and_packages_not_metadata_or_sidecars() {
+fn mirror_payload_policy_selects_artifacts_and_explicit_indexes_not_sidecars() {
     let fixture = Fixture::new();
     let mut args = fixture.args();
     args[8] = include_str!("../docs/mirror-payload.regex").trim().into();
@@ -233,6 +237,28 @@ fn mirror_payload_policy_selects_images_archives_and_packages_not_metadata_or_si
         "/packages/module.whl",
         "/packages/application.jar",
         "/packages/library.crate",
+        "/pool/package.ddeb",
+        "/pool/package.xbps",
+        "/pool/package.hpkg",
+        "/pool/package.ipk",
+        "/pool/package.pkg",
+        "/pool/package.pkg.gz",
+        "/pool/module.xzm",
+        "/packages/application.flatpak",
+        "/packages/plugin.hpi",
+        "/packages/plugin.vsix",
+        "/packages/application.war",
+        "/installers/setup.msix",
+        "/installers/firmware.bin",
+        "/symbols/application.pdb",
+        "/objects/ab/0123456789.filez",
+        "/objects/pack/pack-0123456789.pack",
+        "/images/disk.zip.xz",
+        "/sources/version.diff.gz",
+        "/dl.k8s.io/v1.30.0/bin/linux/amd64/kubectl",
+        "/dl.k8s.io/v1.31.0/bin/darwin/arm64/kubectl",
+        "/manjaro/stable/extra/x86_64/extra.files",
+        "/manjaro/testing/community/aarch64/community.files",
     ] {
         assert!(policy.matches(path), "payload omitted: {path}");
     }
@@ -257,6 +283,16 @@ fn mirror_payload_policy_selects_images_archives_and_packages_not_metadata_or_si
         "/installer.isox",
         "/installerXiso",
         "/installer.iso/",
+        "/package.xbps.sig",
+        "/package.pkg.gz.sig",
+        "/object.filez.sha256",
+        "/repo/extra.files",
+        "/manjaro/stable/extra/x86_64/extra.files.sig",
+        "/nested/manjaro/stable/extra/x86_64/extra.files",
+        "/dl.k8s.io/release/stable.txt",
+        "/dl.k8s.io/v1.30.0/bin/linux/amd64/kubectl.sha256",
+        "/nested/dl.k8s.io/v1.30.0/bin/linux/amd64/kubectl",
+        "/index.json",
         "",
     ] {
         assert!(!policy.matches(path), "non-payload selected: {path}");
@@ -336,7 +372,7 @@ fn fstab_normalization_preserves_disk_flags_and_existing_mount_options() {
     let fixture = Fixture::new();
     let root = fixture.root.path();
     let options = format!(
-        "ro,--f,--disk-cache-dir={},--disk-cache-max-size=1 TiB,--disk-cache-regex=\\.(deb|rpm)$",
+        "ro,--f,--memory-limit=8192,--disk-cache-dir={},--disk-cache-max-size=1 TiB,--disk-cache-regex=\\.(deb|rpm)$",
         root.join("cache").display()
     );
     let args = [

@@ -9,13 +9,13 @@ pub(crate) const fn rounded(n: usize) -> usize {
 }
 
 /// Required deduction from active data capacity, not an RSS/cgroup guarantee.
-/// Index coefficient includes hash/order state: measured ~230 B/entry at 8M,
-/// conservatively funded at 384, plus separately bounded recent hints/regions.
+/// Retains the conservative nominal allowance for the first upstream comparison.
+/// Native index/recovery allocations are not capped by this reservation.
 #[derive(Clone, Debug)]
 pub struct Funding {
     pub capacity: usize,
     pub region_bytes: usize,
-    pub index_entries: usize,
+    pub nominal_entries: usize,
     pub recent_entries: usize,
     pub recovery_bytes: usize,
     pub fixed_bytes: usize,
@@ -44,25 +44,20 @@ impl Funding {
             1024 * 1024
         };
         let regions = capacity / region_bytes;
-        // Scale with the device while keeping index metadata inside its share of
-        // the payload budget. Partial records do not increase this funded cap.
-        let index_entries = (capacity / MAX_PAYLOAD_BYTES)
-            .min(available_payload_bytes / 4 / 512)
-            .max(1);
-        let recent_entries = index_entries.min(65_536);
+        // This plans full-size records; small records can produce more native
+        // index entries. There is no application-enforced index slot ceiling.
+        let nominal_entries = (capacity / MAX_PAYLOAD_BYTES).max(1);
+        let recent_entries = nominal_entries.min(65_536);
         let recovery_bytes = rounded(8 * PAGE + 16 * regions + 2 * PAGE);
         let fixed_bytes = 2 * POOL + recovery_bytes + 1024 * 1024;
-        let metadata_bytes = 384 * index_entries + 128 * recent_entries + 256 * regions;
+        let metadata_bytes = 384 * nominal_entries + 128 * recent_entries + 256 * regions;
         let copy_bytes = JOBS * MAX_PAYLOAD_BYTES;
-        // Concurrent encoded records, not raw payloads, must fit one flusher
-        // buffer. Keep the existing funding deduction and copy ceiling.
-        let spill_jobs =
-            JOBS.min(POOL / (RECORD_CAP + 2 * foyer::SubmissionLimits::METADATA_BYTES));
+        let spill_jobs = JOBS.min(POOL / RECORD_CAP);
         // Each admitted read may own serialized buffer, decoded key/value, and
         // task bookkeeping simultaneously. Caller output is separately admitted.
         let read_work_bytes =
             JOBS * (RECORD_CAP + 3 * super::MAX_IDENTITY_BYTES + MAX_PAYLOAD_BYTES + PAGE);
-        let submission_bytes = JOBS * (RECORD_CAP + 2 * foyer::SubmissionLimits::METADATA_BYTES);
+        let submission_bytes = JOBS * RECORD_CAP;
         let required_bytes =
             fixed_bytes + metadata_bytes + copy_bytes + read_work_bytes + submission_bytes;
         if required_bytes > available_payload_bytes {
@@ -74,7 +69,7 @@ impl Funding {
         Ok(Self {
             capacity,
             region_bytes,
-            index_entries,
+            nominal_entries,
             recent_entries,
             recovery_bytes,
             fixed_bytes,

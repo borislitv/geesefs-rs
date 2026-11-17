@@ -47,137 +47,15 @@ pub async fn open(directory: &Path, resources: &Budget) -> DiskCache {
     .unwrap()
 }
 
-use foyer::{IoEngine, IoEngineConfig};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-};
-#[derive(Debug)]
-pub struct IoGate {
-    pub hold_reads: AtomicBool,
-    pub hold_writes: AtomicBool,
-    pub publication_only: AtomicBool,
-    armed_data_writes: AtomicUsize,
-    pub payload_written: tokio::sync::Semaphore,
-    pub log_written: tokio::sync::Semaphore,
-    pub fail_write: AtomicBool,
-    pub fail_read: AtomicBool,
-    pub entered: tokio::sync::Semaphore,
-    pub release: tokio::sync::Semaphore,
-}
-impl IoGate {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            hold_reads: AtomicBool::new(false),
-            hold_writes: AtomicBool::new(false),
-            publication_only: AtomicBool::new(false),
-            armed_data_writes: AtomicUsize::new(0),
-            payload_written: tokio::sync::Semaphore::new(0),
-            log_written: tokio::sync::Semaphore::new(0),
-            fail_write: AtomicBool::new(false),
-            fail_read: AtomicBool::new(false),
-            entered: tokio::sync::Semaphore::new(0),
-            release: tokio::sync::Semaphore::new(0),
-        })
-    }
-}
-#[derive(Debug)]
-pub struct GateConfig(pub Arc<IoGate>);
-#[derive(Debug)]
-struct GateEngine {
-    real: Arc<dyn IoEngine>,
-    gate: Arc<IoGate>,
-}
-impl IoEngineConfig for GateConfig {
-    fn build(
-        self: Box<Self>,
-        context: foyer::IoEngineBuildContext,
-    ) -> futures_util::future::BoxFuture<'static, foyer::Result<Arc<dyn IoEngine>>> {
-        Box::pin(async move {
-            let real = Box::new(foyer::PsyncIoEngineConfig::new())
-                .build(context)
-                .await?;
-            Ok(Arc::new(GateEngine { real, gate: self.0 }) as Arc<dyn IoEngine>)
-        })
-    }
-}
-impl IoEngine for GateEngine {
-    fn read(
-        &self,
-        buffer: foyer_storage::IoReadBuffer,
-        partition: &dyn foyer_storage::Partition,
-        offset: u64,
-    ) -> foyer::IoHandle {
-        let held = self.gate.hold_reads.load(Ordering::SeqCst);
-        let fail = self.gate.fail_read.swap(false, Ordering::SeqCst);
-        let operation = self.real.read(buffer, partition, offset);
-        let gate = self.gate.clone();
-        foyer::IoHandle::from(Box::pin(async move {
-            if held {
-                gate.entered.add_permits(1);
-                gate.release.acquire().await.unwrap().forget();
-            }
-            let (buffer, result) = operation.await;
-            (
-                buffer,
-                if fail {
-                    Err(foyer::Error::io_error(std::io::Error::from_raw_os_error(
-                        libc::EIO,
-                    )))
-                } else {
-                    result
-                },
-            )
-        }) as futures_util::future::BoxFuture<'static, _>)
-    }
-    fn write(
-        &self,
-        buffer: foyer_storage::IoWriteBuffer,
-        partition: &dyn foyer_storage::Partition,
-        offset: u64,
-    ) -> foyer::IoHandle {
-        let fail = self.gate.fail_write.swap(false, Ordering::SeqCst);
-        let armed = self.gate.hold_writes.load(Ordering::SeqCst);
-        let publication = self.gate.publication_only.load(Ordering::SeqCst);
-        let log_write = armed && publication && partition.id() == 0;
-        let payload = armed
-            && publication
-            && partition.id() != 0
-            && self.gate.armed_data_writes.fetch_add(1, Ordering::SeqCst) == 0;
-        let held = armed && (!publication || (partition.id() != 0 && !payload));
-        let operation = self.real.write(buffer, partition, offset);
-        let gate = self.gate.clone();
-        foyer::IoHandle::from(Box::pin(async move {
-            if held {
-                gate.entered.add_permits(1);
-                gate.release.acquire().await.unwrap().forget();
-            }
-            let (buffer, result) = operation.await;
-            if payload && result.is_ok() {
-                gate.payload_written.add_permits(1);
-            }
-            if log_write && result.is_ok() {
-                gate.log_written.add_permits(1);
-            }
-            (
-                buffer,
-                if fail {
-                    Err(foyer::Error::io_error(std::io::Error::from_raw_os_error(
-                        libc::ENOSPC,
-                    )))
-                } else {
-                    result
-                },
-            )
-        }) as futures_util::future::BoxFuture<'static, _>)
-    }
-}
+pub use disk_cache::TestGate as EngineGate;
+use std::sync::Arc;
 
-pub async fn gated(directory: &Path, resources: &Budget, gate: Arc<IoGate>) -> DiskCache {
-    DiskCache::open_test(
-        PreparedDiskCache::prepare(directory, (16 * MIB) as u64).unwrap(),
+pub async fn gated(directory: &Path, resources: &Budget, gate: Arc<EngineGate>) -> DiskCache {
+    DiskCache::open(
+        PreparedDiskCache::prepare(directory, (16 * MIB) as u64)
+            .unwrap()
+            .with_test_gate(gate),
         resources,
-        Some(Box::new(GateConfig(gate))),
     )
     .await
     .unwrap()

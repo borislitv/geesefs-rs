@@ -1,8 +1,8 @@
 # Persistent payload cache and active read ownership
 
-The 2026-11-14 operator request removes the application's retained clean RAM
-payload cache. This contract supersedes the previous L1 victim-cache proposal
-and its [historical implementation plan](disk-cache-plan.md). Full compatibility,
+The application has no retained clean RAM payload cache. The 2026-11-17 contract
+uses unmodified crates.io Foyer with its native hash index and enabled reinsertion.
+This supersedes the former fork and L1 victim-cache design. Full compatibility,
 inventory turnover and performance/production acceptance remain separate gates.
 
 ## Data path
@@ -10,7 +10,7 @@ inventory turnover and performance/production acceptance remain separate gates.
 ```text
 filesystem read -> active same-generation fill reuse
                 -> eligible validated Foyer record
-                -> conditional S3 range -> validated fill -> guarded Foyer enqueue
+                -> conditional S3 range -> validated fill -> optional Foyer enqueue
 ```
 
 There is no `ReadCache`, clean-payload LRU/range index, flush-loan registry or
@@ -26,13 +26,12 @@ The writer flush reserve is never lent to clean readers.
 
 ## Supported library reuse
 
-The six locked Foyer packages are version 0.22.6 from the public maintained fork
-at [`d60dd0462c1de1e0853590791371208b659c90bf`](https://github.com/borislitv/foyer/tree/d60dd0462c1de1e0853590791371208b659c90bf).
-Foyer owns persistent record I/O, index/submission admission, regions, checksums,
-recovery and physical reclamation. Use its supported guarded
-`Store::{load,try_enqueue,wait_guarded}` APIs with the existing funded adapter,
-region picker and passive memory `Piece` source. Do not substitute the legacy
-hybrid writer's unguarded enqueue path or treat `memory(0)` as an allocation bound.
+The locked Foyer packages are version 0.22.6 from crates.io. Foyer owns persistent
+record I/O, the sharded HashMap, regions, checksums, recovery and reclamation.
+The adapter uses public `Store::{load,enqueue,wait}` with a bounded copy/job pool,
+region picker and passive memory `Piece` source. Void enqueue is an offer, not an
+admission or publication receipt; `may_contains` is only a hint, including pending
+Keeper work. No custom index or shadow occupancy map is maintained.
 The selected runtime engine is Psync, not io-uring merely because that crate is
 present in the lockfile.
 
@@ -103,8 +102,10 @@ resource settings. No general configuration file or payload TTL is added.
 
 Persistent keys contain a format version, backend namespace, exact object key,
 opaque ETag, object size and covered offset/length. Process-local inode numbers
-and hashed read generations are not persistent identities. Existing media and its
-format are preserved. Validate identity, length and integrity before returning a
+and hashed read generations are not persistent identities. Native media uses
+`payload-upstream-v1.cache`; old-format inventory is rejected without deletion.
+The transition needs an explicitly authorized cold cache. Validate identity,
+length and integrity before returning a
 record. Short EOF/partial coverage is explicit; a missing span is never a zero-filled
 hit. No source GET is extended solely to complete a cache record.
 
@@ -117,23 +118,30 @@ add a GET merely to reauthorize KMS on each local hit.
 
 ## Capacity, policy and observations
 
-Fixed Foyer funding is deducted from the existing data lane. Active/queued read
-work, copy pools, submission/serialization and recovery/index allowances remain
-separate bounded owners. Neither payload admission nor planned funding is a heap,
+Fixed Foyer funding is deducted from the existing data lane. Application reads,
+copies and jobs are bounded; native serialization/index/recovery allocations have
+nominal allowances rather than enforced native caps. Small records can exceed
+the nominal full-record entry count. Neither admission nor funding is a heap,
 RSS or whole-cgroup limit. Report allocator, process and cgroup/file/kernel memory
 independently; removing retained payload does not prove a measured memory win.
 
-The guarded index entry cap and physical region capacity are independent. Existing
-bounded approximate-recency/second-chance region selection and hot-record
-reinsertion remain library-driven. Region reclamation is not a per-record LRU or
-a count of complete cached files. Preserve integrity and reclamation tests when
-removing tests for the deleted application's retention policy.
+Bounded approximate-recency/second-chance region selection and hot-record
+reinsertion use public library hooks. Some hits can be lost during best-effort
+recovery after reinsertion; returned bytes must still validate. Region reclamation
+is not a per-record LRU or a count of complete cached files. If recovered media has
+no clean regions, optional population has a five-second deadline and the adapter
+enters bypass. Filesystem reads retain their ordinary source fallback.
+
+Foyer receives a Handle to a dedicated Tokio runtime. Close stops admission, joins
+application work and bounds the native drain wait, then shuts down that runtime.
+Device, directory lock and funding owners survive actual blocking I/O, including
+cancelled observers. A caller timeout does not release a live operation's owners.
 
 The [exporter contract](metrics.md) distinguishes requested `inflight`, `l2`,
 `s3` and `overlay` delivery from all consumed SDK GET body bytes, adapter I/O and
 population operations. Retention/loan/eviction gauges and the old `l1` delivery
-label are removed. Historical `admitted_demotions` family names now describe
-validated-fill copy/enqueue operations; they are not RAM eviction counters.
+label are removed. `admitted_demotions` counts admitted validated-fill copies;
+`engine_offered_demotions` counts native enqueue attempts, not durable records.
 Dashboard queries require the matching schema and complete same-reader cohorts;
 missing series are not zeros. Neither descriptive byte ratios nor passing unit
 tests establish causal savings, full coverage or production acceptance.

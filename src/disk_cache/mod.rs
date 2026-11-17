@@ -1,9 +1,15 @@
-//! Bounded optional persistent payload tier and owned-operation observations.
+//! Optional persistent payload tier with bounded application work.
 mod funding;
 mod key;
 mod policy;
 mod regions;
+mod runtime;
 mod store;
+#[cfg(test)]
+mod testing;
+
+#[cfg(test)]
+pub use testing::TestGate;
 
 pub use funding::Funding;
 pub use key::{DiskKey, MAX_IDENTITY_BYTES, MAX_PAYLOAD_BYTES};

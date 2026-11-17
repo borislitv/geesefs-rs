@@ -40,7 +40,7 @@ POPULATION_ROUNDS = 8
 POPULATION_SECONDS = 180
 POPULATION_READ_AHEAD_KIB = 128
 EVICTION_PIPELINE_BYTES = 5 * MIB
-READ_REASONS = ['output_reservation', 'output_coverage', 'state', 'poisoned', 'jobs', 'activity',
+READ_REASONS = ['output_reservation', 'output_coverage', 'state', 'jobs', 'activity',
                 'timeout', 'join', 'backend_miss', 'backend_error', 'identity', 'output_copy',
                 'generation_before', 'generation_after']
 STATES = ['both_cold', 'l2_hot_pagecache_hot', 'l2_hot_pagecache_cold_requested']
@@ -77,8 +77,7 @@ def example_manifest():
                                   dropped='geesefs_disk_cache_dropped_total',
                                    errors='geesefs_disk_cache_errors_total',
                                    admitted_demotions='geesefs_disk_cache_admitted_demotions_total',
-                                   engine_admitted_demotions='geesefs_disk_cache_engine_admitted_demotions_total',
-                                   spill_no_space='geesefs_disk_cache_spill_no_space_total',
+                                   engine_offered_demotions='geesefs_disk_cache_engine_offered_demotions_total',
                                    spill_errors='geesefs_disk_cache_spill_errors_total',
                                    region_reclaims_started='geesefs_disk_cache_region_reclaims_started_total',
                                    read_operations='geesefs_disk_cache_read_operations_total',
@@ -96,10 +95,8 @@ def example_manifest():
                                       for phase in ['startup', 'allocation', 'recovery']
                                       for meaning, metric in [('completions', 'completions_total'),
                                           ('seconds', 'duration_seconds_total'), ('max_seconds', 'duration_seconds_max')]},
-                                  index_entries='geesefs_disk_cache_index_entries',
+                                  nominal_entries='geesefs_disk_cache_nominal_entries',
                                   recent_entries='geesefs_disk_cache_recent_entries',
-                                  submission_bytes='geesefs_disk_cache_submission_bytes{scope="queued_and_active"}',
-                                  submission_items='geesefs_disk_cache_submission_items{scope="queued_and_active"}',
                                    active_jobs='geesefs_disk_cache_active_jobs',
                                    active_read_jobs='geesefs_disk_cache_active_read_jobs',
                                    active_spill_jobs='geesefs_disk_cache_active_spill_jobs',
@@ -117,7 +114,8 @@ def example_manifest():
                                   funding_bytes='geesefs_disk_cache_funding_bytes',
                                   read_work_capacity_bytes='geesefs_read_work_capacity_bytes'),
                  unavailable_disk_observations=['capacity_evictions', 'allocated_bytes',
-                     'index_heap_bytes', 'latency_quantiles'],
+                     'index_entries', 'index_heap_bytes', 'submission_bytes', 'submission_items',
+                     'latency_quantiles'],
                 superiority_targets={'sequential/l2_hot_pagecache_hot': ['throughput'],
                                      'random/l2_hot_pagecache_hot': ['throughput']},
                 non_inferiority_margins={},
@@ -593,12 +591,13 @@ def mount_extra(config, arm, cache, stats, port, read_only=False):
 
 
 def disk_idle(port, config):
+    """Observe application owners, not unexposed native queue quiescence."""
     deadline = time.monotonic() + 10
     while True:
         snapshot = sample_endpoint(port, config['disk_metrics'])
         if snapshot['state_prepared'] == 1 and snapshot['stats_available'] == 0:
             return snapshot
-        if snapshot['active_jobs'] == 0 and snapshot['submission_bytes'] == 0 and snapshot['submission_items'] == 0:
+        if snapshot['active_jobs'] == 0 and snapshot['copy_owned_bytes'] == 0:
             return snapshot
         if time.monotonic() >= deadline:
             raise RuntimeError('optional spill did not drain within ten seconds')
@@ -690,7 +689,7 @@ def prime(binary, fixture, work, record, config, cache, group, output):
         with integration.mount(binary, fixture['bucket'], fixture['prefix'], fixture['endpoint'], fixture['environment'],
                                work, label, config['memory_limit_mb'], extra, group, row) as (path, daemon):
             if record['arm'] == 'candidate':
-                disk_started(port, config, require_ready=(cache / 'payload-v1.cache').exists())
+                disk_started(port, config, require_ready=(cache / 'payload-upstream-v1.cache').exists())
             row['before'] = native_snapshot(port, config, output, label + '-before', require_adapter=record['arm'] == 'candidate')
             if record['workload'] == 'eviction':
                 eviction_probe(path, EVICTION_PIPELINE_BYTES)
@@ -765,7 +764,7 @@ def measured_run(binary, fixture, work, record, config, group_root, output):
         with integration.mount(binary, fixture['bucket'], fixture['prefix'], fixture['endpoint'], fixture['environment'],
                                work, label, config['memory_limit_mb'], extra, group, record) as (path, daemon):
             if record['arm'] == 'candidate':
-                disk_started(port, config, require_ready=(cache / 'payload-v1.cache').exists())
+                disk_started(port, config, require_ready=(cache / 'payload-upstream-v1.cache').exists())
             record['mount_and_recovery_seconds'] = time.monotonic() - started
             if record['workload'] == 'eviction':
                 # Outside the timed workload; warm the same prefix in every arm.
@@ -827,7 +826,7 @@ def measured_run(binary, fixture, work, record, config, group_root, output):
                     effective_cgroup_limits={name: (group / name).read_text().strip() for name in ['cpu.max', 'memory.max']},
                     l1_residency_scope='pre/post visible retained bytes and idle-flush loan bytes, not peak backing allocation; effective L1 policy is an upper bound including loans; Ready selected victims may exclude the idle flush lane')
                 if after.get('state_prepared') == 1:
-                    if after['stats_available'] != 0 or (cache / 'payload-v1.cache').exists():
+                    if after['stats_available'] != 0 or (cache / 'payload-upstream-v1.cache').exists():
                         raise RuntimeError('lazy Prepared unexpectedly has an attached engine/data file')
                     record['lazy_engine_absence'] = dict(state='prepared', adapter_available=False,
                         data_file_present=False, known_engine_io=after['known_engine_io'])
@@ -1006,7 +1005,7 @@ def native_read_cache_phase(binary, fixture, package, work, config, group_root, 
                 receipt['rounds'].append(row)
                 with integration.mount(binary, fixture['bucket'], fixture['prefix'], fixture['endpoint'], fixture['environment'],
                                        work, label, config['memory_limit_mb'], extra, group, row) as (path, daemon):
-                    disk_started(port, config, require_ready=(cache / 'payload-v1.cache').exists())
+                    disk_started(port, config, require_ready=(cache / 'payload-upstream-v1.cache').exists())
                     before = native_snapshot(port, config, output, label + '-before')
                     row['before'] = before
                     native_hash(path / 'package.rpm', package_sha, group, max(1, min(30, deadline - time.monotonic())))
@@ -1020,17 +1019,15 @@ def native_read_cache_phase(binary, fixture, package, work, config, group_root, 
                 if time.monotonic() >= deadline:
                     raise RuntimeError('native cache population exceeded 180-second deadline')
                 (output / 'native-reader-protocol.json').write_text(json.dumps(receipt, indent=2) + '\n')
-            # Inventory is only a population condition, NOT proof of identity
-            # or coverage. Never vary round count to obtain a favorable result.
-            if after['index_entries'] < expected_records:
-                raise RuntimeError('native population condition unmet after eight bounded warmup mounts; allowed drops are not a runtime correctness failure')
+            # The native index has no occupancy gauge. Coverage is established by
+            # the byte-checked recovered read below, never a nominal slot estimate.
             label, port = 'reader-validate', integration.free_port()
             extra = mount_extra(config, 'candidate', cache, output / (label + '-stats.jsonl'), port, read_only=True)
             validation = {}
             receipt['validation'] = validation
             with integration.mount(binary, fixture['bucket'], fixture['prefix'], fixture['endpoint'], fixture['environment'],
                                    work, label, config['memory_limit_mb'], extra, group, validation) as (path, daemon):
-                disk_started(port, config, require_ready=(cache / 'payload-v1.cache').exists())
+                disk_started(port, config, require_ready=(cache / 'payload-upstream-v1.cache').exists())
                 before = native_snapshot(port, config, output, label + '-before')
                 native_hash(path / 'package.rpm', package_sha, group)
                 after = native_snapshot(port, config, output, label + '-after')
@@ -1080,7 +1077,7 @@ def native_checks(binary, fixture, work, config, group_root, output):
             compatibility = dict(phase='RW compatibility, not L2-hot qualification', passed=False)
             with integration.mount(binary, bucket, prefix, fixture['endpoint'], fixture['environment'], work,
                                    f'native-{cycle}', config['memory_limit_mb'], extra, group, compatibility) as (path, daemon):
-                disk_started(port, config, require_ready=(cache / 'payload-v1.cache').exists())
+                disk_started(port, config, require_ready=(cache / 'payload-upstream-v1.cache').exists())
                 compare.workload(path, 'metadata', config, s3, bucket, prefix,
                                  fixture['endpoint'], True, fixture['expected_sha'])
                 attrs = (path / 'package.rpm').stat()

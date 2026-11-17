@@ -645,7 +645,6 @@ impl Filesystem {
                 diagnostics.warning("l2_spill_drop", || serde_json::json!({
                     "reason": event.reason.label(), "drops": event.total,
                     "active_spill_jobs": event.active_jobs, "copy_owned_bytes": event.copy_bytes,
-                    "submission_bytes": event.submission_bytes, "index_entries": event.index_entries,
                 }));
             });
             let closing = {
@@ -996,7 +995,7 @@ impl Filesystem {
         let mut relative = 0;
         while relative < block.as_slice().len() {
             let at = offset + relative as u64;
-            // Best-effort population uses existing guarded Foyer admission.
+            // Best-effort population uses the adapter's bounded copy/job admission.
             // Revalidate namespace AND identity after every wait.
             let slot = match disk.cache.spill_admission(deadline).await {
                 Ok(slot) => slot,

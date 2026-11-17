@@ -153,9 +153,9 @@ that older observation. Later HEAD/commit generations still override older data.
 ## Optional persistent payload tier
 
 The three disk-cache flags enable a private, locked local container through the
-maintained Foyer Store adapter. Proven-new media initially stays Prepared: funding
+released Foyer Store adapter. Proven-new media initially stays Prepared: funding
 and directory ownership are reserved, but no engine or payload file is constructed
-until an eligible validated source fill. Existing media starts bounded recovery
+until an eligible validated source fill. Existing media starts best-effort recovery
 eagerly; lazy creation must not discard its inventory. Population funds an exact
 visible-range copy without retaining its full source backing. Qualified L2 hits
 serve active reads; no decoded RAM copy survives independent requests. Missing
@@ -168,15 +168,17 @@ the tier. Reads revalidate generation after waits, including after funding a
 window whose file may have changed size. Opaque/rotating credentials explicitly
 bypass persistent reuse rather than guessing a stable principal.
 
-Funding covers bounded index/order state, pools, copies, read/decode work and
-submission credits, reducing active data capacity without taking writer or
-ingress reserves. Recovery is asynchronous with source fallback and no inventory
-reset. Owned jobs retain funding/directory ownership past caller cancellation;
-shutdown starts cache teardown even when writer flushing later fails.
+Funding reserves nominal index/recovery allowances plus application pools, copies
+and read/decode work, reducing active data capacity without taking writer or
+ingress reserves. Native index/recovery allocations have no hard application cap.
+Recovery is asynchronous with source fallback and no automatic inventory reset.
+Owned jobs and the dedicated engine runtime retain funding/directory ownership
+past cancellation; teardown joins actual blocking I/O. Shutdown starts cache
+teardown even when writer flushing later fails.
 
 Required read windows use a key-free FIFO queue before allocating persistent
-identities. Four funded read-work owners are independent of four funded spill
-owners; eight aggregate jobs are possible without enlarging the fixed pools.
+identities. Four funded read-work owners are independent of three funded spill
+owners; seven aggregate jobs are possible without enlarging the fixed pools.
 Each potential disk block also reserves 4096 bytes of bookkeeping within the same
 data-window admission, reducing its effective ceiling rather than adding a pool.
 Eligibility borrows that credit and a read slot for bounded blocking work. It
@@ -185,15 +187,15 @@ ownership before revalidating the namespace. No guard crosses disk/source I/O.
 Qualification and each block lookup have their own bounded operation deadline;
 a source gap does not age later lookups against one shared window deadline.
 Timed-out or cancelled tasks retain their actual slot, credit and owners until
-completion. Source-fill population uses existing guarded admission with one
+completion. Source-fill population uses application admission with one
 cumulative bounded wait allowance per window. It is independent of RAM pressure
 and never borrows the writer flush reserve.
 
 Metrics distinguish admission, actual worker completion and caller delivery.
 Region-reclaim callbacks are not per-record eviction counts; funded metadata is
 not measured index heap, and opening-time filesystem allocation is not a live
-physical-storage gauge. See [the design](disk-cache-design.md) and
-[qualification plan](disk-cache-plan-track.md) for remaining acceptance gates.
+physical-storage gauge. Native enqueue attempts are not publication receipts.
+See [the design](disk-cache-design.md) and [verification](testing.md) for boundaries.
 
 ## Payload ownership and progress
 

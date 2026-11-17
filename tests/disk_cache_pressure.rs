@@ -19,7 +19,7 @@ async fn attach(config: Config, store: std::sync::Arc<MemoryStore>) -> std::sync
     let fs = Filesystem::new(config, store).unwrap();
     if let Some(mut prepared) = prepared {
         let disk = fs.config.disk_cache_config().unwrap().unwrap();
-        if !disk.directory.join("payload-v1.cache").exists() {
+        if !disk.directory.join("payload-upstream-v1.cache").exists() {
             // Exercise a Ready persistent tier; deferred startup has separate coverage.
             let resources = geesefs_rs::budget::Budget::new(32 * MIB).unwrap();
             let cache = geesefs_rs::disk_cache::DiskCache::open(prepared, &resources)
@@ -110,10 +110,10 @@ async fn byte_pressure(enabled: bool, selected: bool, window: usize) {
                 stats.admitted_demotions > 0,
                 "eligible validated fills must reach L2 without waiting for RAM pressure"
             );
-            assert!(stats.index_entries > 0);
+            assert!(stats.io_write_bytes > 0);
         } else {
             assert_eq!(stats.admitted_demotions, 0);
-            assert_eq!(stats.index_entries, 0);
+            assert_eq!(stats.io_write_bytes, 0);
             assert_eq!(budgets.flush_used_bytes, 0);
         }
     } else {

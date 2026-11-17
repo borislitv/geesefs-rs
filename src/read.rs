@@ -274,8 +274,7 @@ pub(crate) fn debug_disk_fallback(
         use crate::disk_cache::ReadFallback;
         if matches!(
             reason,
-            ReadFallback::Poisoned
-                | ReadFallback::Join
+            ReadFallback::Join
                 | ReadFallback::BackendError
                 | ReadFallback::Identity
                 | ReadFallback::OutputCopy

@@ -73,7 +73,10 @@ comparative performance acceptance.
   and anonymous access. Opaque/rotating/profile/IAM providers explicitly bypass
   persistence rather than sharing data under an inferred principal.
 
-See [design](docs/disk-cache-design.md), [stage status](docs/disk-cache-plan-track.md)
+The standard-Foyer transition uses a new media filename and requires an explicitly
+authorized cold cache; see [operation](docs/disk-cache-operations.md).
+
+See [design](docs/disk-cache-design.md), [verification](docs/testing.md)
 and [ownership](docs/architecture.md). Local regression/native checks are distinct
 from representative performance and production acceptance.
 

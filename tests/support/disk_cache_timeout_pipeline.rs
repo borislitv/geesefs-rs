@@ -6,21 +6,17 @@ use crate::{
     backend::{Store, cache_scope::CacheScope, extended_list::ListPage, s3::ObjectHead},
     budget::{Block, Budget},
     config::Config,
-    disk_cache::{Demotion, DiskCache, DiskKey, PreparedDiskCache, ReadFallback, State},
+    disk_cache::{Demotion, DiskCache, DiskKey, PreparedDiskCache, ReadFallback, State, TestGate},
     error::Result,
     filesystem::Filesystem,
     read::READ_BLOCK_BYTES as BLOCK,
 };
 use aws_sdk_s3::{primitives::ByteStream, types::CompletedPart};
 use clap::Parser;
-use foyer::{IoEngine, IoEngineConfig};
 use std::{
     collections::HashMap,
     os::unix::fs::PermissionsExt,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex, atomic::Ordering},
     time::Duration,
 };
 
@@ -109,60 +105,6 @@ impl Store for Source {
     }
 }
 
-#[derive(Debug)]
-struct Gate {
-    held: AtomicBool,
-    entered: tokio::sync::Semaphore,
-    release: tokio::sync::Semaphore,
-}
-#[derive(Debug)]
-struct GatedConfig(Arc<Gate>);
-#[derive(Debug)]
-struct GatedEngine {
-    real: Arc<dyn IoEngine>,
-    gate: Arc<Gate>,
-}
-impl IoEngineConfig for GatedConfig {
-    fn build(
-        self: Box<Self>,
-        context: foyer::IoEngineBuildContext,
-    ) -> futures_util::future::BoxFuture<'static, foyer::Result<Arc<dyn IoEngine>>> {
-        Box::pin(async move {
-            let real = Box::new(foyer::PsyncIoEngineConfig::new())
-                .build(context)
-                .await?;
-            Ok(Arc::new(GatedEngine { real, gate: self.0 }) as Arc<dyn IoEngine>)
-        })
-    }
-}
-impl IoEngine for GatedEngine {
-    fn read(
-        &self,
-        buffer: foyer_storage::IoReadBuffer,
-        partition: &dyn foyer_storage::Partition,
-        offset: u64,
-    ) -> foyer::IoHandle {
-        let operation = self.real.read(buffer, partition, offset);
-        let held = self.gate.held.load(Ordering::SeqCst);
-        let gate = self.gate.clone();
-        foyer::IoHandle::from(Box::pin(async move {
-            if held {
-                gate.entered.add_permits(1);
-                gate.release.acquire().await.unwrap().forget();
-            }
-            operation.await
-        }) as futures_util::future::BoxFuture<'static, _>)
-    }
-    fn write(
-        &self,
-        buffer: foyer_storage::IoWriteBuffer,
-        partition: &dyn foyer_storage::Partition,
-        offset: u64,
-    ) -> foyer::IoHandle {
-        self.real.write(buffer, partition, offset)
-    }
-}
-
 #[tokio::test]
 async fn qualified_range_stops_disk_waits_after_timeout_and_keeps_actual_worker_owned() {
     let directory = tempfile::tempdir().unwrap();
@@ -202,11 +144,7 @@ async fn qualified_range_stops_disk_waits_after_timeout_and_keeps_actual_worker_
     }
     cache.close(DEADLINE).await.unwrap();
     drop(cache);
-    let gate = Arc::new(Gate {
-        held: AtomicBool::new(false),
-        entered: tokio::sync::Semaphore::new(0),
-        release: tokio::sync::Semaphore::new(0),
-    });
+    let gate = TestGate::new();
     let mut config = Config::try_parse_from([
         "geesefs-rs",
         "--endpoint=http://fixture.invalid",
@@ -228,18 +166,18 @@ async fn qualified_range_stops_disk_waits_after_timeout_and_keeps_actual_worker_
     fs.attach_disk_cache(
         PreparedDiskCache::prepare(directory.path(), (16 * MIB) as u64)
             .unwrap()
-            .with_test_io(Box::new(GatedConfig(gate.clone()))),
+            .with_test_gate(gate.clone()),
     )
     .await
     .unwrap();
     let ino = fs.lookup(1, "slow.rpm").await.unwrap().ino;
     let baseline = fs.effective_budgets().data_used_bytes;
-    gate.held.store(true, Ordering::SeqCst);
+    gate.hold_reads.store(true, Ordering::SeqCst);
     let reader = tokio::spawn({
         let fs = fs.clone();
         async move { fs.read(ino, 0, MIB).await }
     });
-    // Entering actual payload I/O proves qualification already succeeded. Measure
+    // Entering the engine load proves qualification already succeeded. Measure
     // only from this controlled boundary, not cold recovery or scheduler startup.
     let entered = tokio::time::timeout(DEADLINE, gate.entered.acquire()).await;
     if entered.is_err() {
@@ -250,7 +188,7 @@ async fn qualified_range_stops_disk_waits_after_timeout_and_keeps_actual_worker_
             source.ranges.lock().unwrap(),
             reader.is_finished()
         );
-        gate.held.store(false, Ordering::SeqCst);
+        gate.hold_reads.store(false, Ordering::SeqCst);
         gate.release.add_permits(64);
         source.release.add_permits(64);
         reader.abort();
@@ -270,7 +208,7 @@ async fn qualified_range_stops_disk_waits_after_timeout_and_keeps_actual_worker_
     // On RED unblock discovery for cleanup. On GREEN source delivery must
     // finish while the actual timed-out disk worker remains gated and funded.
     if first_get.is_err() {
-        gate.held.store(false, Ordering::SeqCst);
+        gate.hold_reads.store(false, Ordering::SeqCst);
         gate.release.add_permits(64);
     }
     source.release.add_permits(64);
@@ -282,7 +220,7 @@ async fn qualified_range_stops_disk_waits_after_timeout_and_keeps_actual_worker_
     assert_eq!(data.as_slice(), &source.bytes[..MIB]);
     let before_release = fs.effective_budgets().data_used_bytes;
     let active_before_release = fs.disk_cache_stats().unwrap().active_read_jobs;
-    gate.held.store(false, Ordering::SeqCst);
+    gate.hold_reads.store(false, Ordering::SeqCst);
     gate.release.add_permits(64);
     fs.drain_disk_cache(DEADLINE).await.unwrap();
     let after_release = fs.effective_budgets().data_used_bytes;

@@ -32,7 +32,8 @@ async fn attach(config: Config, store: Arc<MemoryStore>) -> Arc<Filesystem> {
     std::fs::set_permissions(&disk.directory, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut prepared = PreparedDiskCache::prepare(&disk.directory, disk.max_bytes).unwrap();
     let fs = Filesystem::new(config, store).unwrap();
-    if fs.disk_cache_bypass_reason().is_none() && !disk.directory.join("payload-v1.cache").exists()
+    if fs.disk_cache_bypass_reason().is_none()
+        && !disk.directory.join("payload-upstream-v1.cache").exists()
     {
         // These read tests require an already Ready tier. Seed empty persistent
         // media explicitly; fresh deferred attachment is covered separately.
@@ -396,7 +397,7 @@ async fn excluded_and_disabled_reads_do_not_populate_disk() {
         );
         assert_eq!(store.read_calls.load(Ordering::Relaxed), gets + 1);
         if enabled {
-            assert_eq!(fs.disk_cache_stats().unwrap().index_entries, 0);
+            assert_eq!(fs.disk_cache_stats().unwrap().io_write_bytes, 0);
         } else {
             assert!(fs.disk_cache_stats().is_none());
             assert!(fs.disk_cache_state().is_none());
@@ -422,7 +423,6 @@ async fn unaligned_disk_hits_release_decoded_backings_and_never_repopulate_fragm
         bytes
     );
     fs.drain_disk_cache(DEADLINE).await.unwrap();
-    assert_eq!(fs.disk_cache_stats().unwrap().index_entries, 1);
     fs.shutdown().await.unwrap();
     drop(fs);
 
@@ -453,11 +453,10 @@ async fn unaligned_disk_hits_release_decoded_backings_and_never_repopulate_fragm
     fs.drain_disk_cache(DEADLINE).await.unwrap();
     let evicted = fs.disk_cache_stats().unwrap();
     assert_eq!(
-        evicted.engine_admitted_demotions, loaded.engine_admitted_demotions,
+        evicted.engine_offered_demotions, loaded.engine_offered_demotions,
         "reusing a validated backing must not admit a new fragment"
     );
     assert_eq!(evicted.io_write_bytes, loaded.io_write_bytes);
-    assert_eq!(evicted.index_entries, loaded.index_entries);
     let gets = store.read_calls.load(Ordering::Relaxed);
     assert_eq!(
         fs.read(node.ino, 0, bytes.len()).await.unwrap().as_slice(),
@@ -506,7 +505,6 @@ async fn restart_reuses_stable_identity_not_inode_or_read_shape() {
     let old_ino = node.ino;
     fs.read(node.ino, 0, READ_BLOCK_BYTES).await.unwrap();
     fs.drain_disk_cache(DEADLINE).await.unwrap();
-    assert!(fs.disk_cache_stats().unwrap().index_entries > 0);
     fs.shutdown().await.unwrap();
     drop(fs);
     let mut config = config;
@@ -541,7 +539,7 @@ async fn cold_unaligned_zero_read_ahead_fetches_only_requested_bytes() {
     config.read_ahead_large = 0;
     let fs = attach(config, store.clone()).await;
     let node = fs.lookup(1, "package.rpm").await.unwrap();
-    assert_eq!(fs.disk_cache_stats().unwrap().index_entries, 0);
+    assert_eq!(fs.disk_cache_stats().unwrap().io_write_bytes, 0);
     assert_eq!(
         tokio::time::timeout(DEADLINE, fs.read(node.ino, 11, 37))
             .await
@@ -650,8 +648,8 @@ async fn exact_fragment_and_eof_coverage_never_invents_a_hole_or_extends_get() {
     );
     fs.drain_disk_cache(DEADLINE).await.unwrap();
     assert_eq!(
-        fs.disk_cache_stats().unwrap().engine_admitted_demotions,
-        loaded.engine_admitted_demotions + 1
+        fs.disk_cache_stats().unwrap().engine_offered_demotions,
+        loaded.engine_offered_demotions + 1
     );
     // Exact fragment identities do not alias the existing (0, 17) record.
     // The new request fetches only its own bytes and then reuses that fragment.
@@ -846,7 +844,7 @@ async fn cancelled_source_leader_releases_fill_and_old_generation_is_not_demoted
     );
     fs.drain_disk_cache(DEADLINE).await.unwrap();
     assert_eq!(
-        fs.disk_cache_stats().unwrap().index_entries,
+        fs.disk_cache_stats().unwrap().io_write_bytes,
         0,
         "an old-generation fill must never enter L1 or L2"
     );
@@ -867,7 +865,7 @@ async fn opaque_backend_bypasses_without_preallocation_and_shutdown_closes_after
     );
     assert!(fs.disk_cache_stats().is_none());
     assert_eq!(fs.effective_budgets().disk_cache_funding_bytes, 0);
-    assert!(!dir.path().join("payload-v1.cache").exists());
+    assert!(!dir.path().join("payload-upstream-v1.cache").exists());
     fs.shutdown().await.unwrap();
 
     let dir = tempfile::tempdir().unwrap();
@@ -954,7 +952,7 @@ async fn bursty_persistent_population_and_excluded_reads_preserve_fsync_progress
         } else {
             assert_eq!(fs.effective_budgets().flush_used_bytes, 0);
             assert_eq!(
-                fs.disk_cache_stats().unwrap().index_entries,
+                fs.disk_cache_stats().unwrap().io_write_bytes,
                 0,
                 "excluded reads must not populate the persistent tier"
             );

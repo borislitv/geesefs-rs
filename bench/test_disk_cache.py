@@ -497,8 +497,10 @@ class Contracts(unittest.TestCase):
     def test_mapping_does_not_relabel_counts_funding_or_active_owners(self):
         config = disk.example_manifest()
         mapping = config['disk_metrics']
-        self.assertEqual(mapping['index_entries'], 'geesefs_disk_cache_index_entries')
-        self.assertEqual(mapping['submission_bytes'], 'geesefs_disk_cache_submission_bytes{scope="queued_and_active"}')
+        self.assertEqual(mapping['nominal_entries'], 'geesefs_disk_cache_nominal_entries')
+        for unknown in ['index_entries', 'submission_bytes', 'submission_items']:
+            self.assertNotIn(unknown, mapping)
+            self.assertIn(unknown, config['unavailable_disk_observations'])
         self.assertEqual(mapping['active_jobs'], 'geesefs_disk_cache_active_jobs')
         self.assertNotIn('index_bytes', mapping)
         self.assertNotIn('queued_jobs', mapping)
@@ -510,10 +512,6 @@ class Contracts(unittest.TestCase):
         self.assertEqual(mapping['recovery_seconds'], 'geesefs_disk_cache_open_phase_duration_seconds_total{phase="recovery"}')
         self.assertNotIn('read_latency', config['unavailable_disk_observations'])
         self.assertIn('capacity_evictions', config['unavailable_disk_observations'])
-        scoped = {'submission_bytes': mapping['submission_bytes']}
-        self.assertEqual(disk.parse_metrics('geesefs_disk_cache_submission_bytes{scope="queued_and_active"} 42\n', scoped), {'submission_bytes': 42})
-        with self.assertRaisesRegex(RuntimeError, 'missing'):
-            disk.parse_metrics('geesefs_disk_cache_submission_bytes{scope="queued_only"} 42\n', scoped)
         changed = copy.deepcopy(config)
         changed['unavailable_disk_observations'] = []
         with self.assertRaisesRegex(ValueError, 'instrumentation gaps'):

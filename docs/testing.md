@@ -5,6 +5,32 @@ Build and test in isolated fixtures with disposable data. The operator also
 authorizes the OpenCode VM for the 2026-10-31 native experiments. Never use
 served mounts or production credentials. Use finite subprocess/operation deadlines.
 
+## Standard Foyer — 2026-11-17
+
+The adapter uses unmodified crates.io Foyer 0.22.6 with reinsertion enabled.
+`disk_cache` checks real recycling, byte-checked recovery and new population after
+restart, plus small records exceeding the nominal full-record count. Recovery
+misses are permitted; a returned value must match its full identity and bytes.
+`disk_cache_recovery` additionally constructs zero-clean-region media from a real
+completed region and verifies bounded population, bypass and worker/device release.
+Removing runtime shutdown makes the device-owner regression fail for the expected
+retained-owner assertion. Cancelled startup/read/close observers still retain
+their actual operation's directory, budget and output owners.
+
+The native-engine qualification retains hash-collision/ pending-Keeper identity
+checks. Fork-specific delete/tombstone, index-cap, physical-format and duplicate
+policy tests were removed; adapter integrity, generation, corruption/truncation,
+source fallback and writer tests remain. The Python benchmark suite runs directly
+in CI, rather than being redundantly launched inside a Rust test with a shorter
+deadline. Nominal sizing is neither an occupancy observation nor an RSS cap.
+
+Use Rust 1.96.0 and the Python environment from `requirements-fixture.txt` for the
+current candidate. Run default/all-feature Cargo suites, Clippy with denied
+warnings, formatting, public-source audit, both Python suites and disposable
+native/mounted checks. Source audit accepts registry packages only. The dependency
+audit reports the same ten advisories and five warnings as the previous lockfile;
+it is not a clean security audit. Detailed raw results remain private evidence.
+
 ## Active reads and persistent fill population — 2026-11-14
 
 The retained application's payload cache has been removed. Its component-index,
@@ -517,8 +543,9 @@ enabled run passes all 161 without skips. The project Python suite has 16 tests.
 Keep the native provider opt-in out of the Rust process environment: its embedded
 Python gate has a separate finite deadline. Run the verified native-enabled Python
 suite standalone. Use an owned disk-backed TMPDIR for real-engine tests rather
-than relying on space in shared tmpfs. The public-source audit checks 388 resolved
-packages, including only the exact approved Foyer fork/revision/package set.
+than relying on space in shared tmpfs. That historical public-source audit checked
+388 resolved packages under the former fork allowlist; the current selection above
+supersedes it.
 
 The opt-in disk recovery tests document their isolated ext4 block/inode ENOSPC
 and permission-error command. The mounted harness `bench/disk_cache.py` requires

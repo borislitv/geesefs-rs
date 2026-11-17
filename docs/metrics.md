@@ -97,17 +97,17 @@ omitted, not fabricated zero occupancy or a successful Ready observation.
 | --- | --- |
 | `geesefs_disk_cache_funding_bytes` | Fixed payload-budget deduction; not measured heap or RSS |
 | `geesefs_disk_cache_eligibility_decisions_total{reason}` | Sixteen fixed required-window decisions/observations; excludes optional population. Contention can be followed by successful eligibility |
-| `geesefs_disk_cache_read_fallbacks_total{reason}` | Fourteen fixed admission/I/O/validation outcomes; not mutually exclusive S3 misses |
+| `geesefs_disk_cache_read_fallbacks_total{reason}` | Thirteen fixed admission/I/O/validation outcomes; not mutually exclusive S3 misses |
 | `geesefs_disk_cache_active_read_jobs` / `geesefs_disk_cache_active_spill_jobs` | Actual independently funded owners, at most four reads and three spills; includes work outliving its observer |
 | `geesefs_disk_cache_queued_reads` | Key-free FIFO waiters charged to their read windows |
-| `geesefs_disk_cache_admitted_demotions_total` / `geesefs_disk_cache_engine_admitted_demotions_total` | Historical family names for admitted validated-fill copies and accepted guarded engine enqueues, respectively; neither means RAM eviction or durability |
+| `geesefs_disk_cache_admitted_demotions_total` / `geesefs_disk_cache_engine_offered_demotions_total` | Admitted validated-fill copies versus calls to native void enqueue; neither means RAM eviction, successful native admission or durability |
 | `geesefs_disk_cache_read_operation_hits_total` / `geesefs_disk_cache_hits_total` | Worker-completed copies versus caller-delivered adapter results; a later generation check may still reject delivery |
 | `geesefs_disk_cache_hit_bytes_total` | Validated bytes delivered into the read pipeline, including alignment/read-ahead; not requested client bytes |
-| `geesefs_disk_cache_index_entries` / `geesefs_disk_cache_index_entry_limit` | Guarded index slots and their bound, including pending updates/tombstones; not distinct files or S3 objects |
+| `geesefs_disk_cache_nominal_entries` | Full-128-KiB-record sizing estimate for funding; not actual native index entries or an enforced cap |
 | `geesefs_disk_cache_managed_capacity_bytes` | Configured file/engine capacity, including storage overhead; not current occupancy |
 | `geesefs_disk_cache_regions{state}` | Current data regions: `clean` (reusable), `writing` (reserved by a flusher), `evictable` (sealed/recovered), `reclaiming` (being recycled) |
 | `geesefs_disk_cache_region_size_bytes` | One data-region allocation unit; independent of the up-to-128-KiB cached payload records |
-| `geesefs_disk_cache_region_capacity_bytes` | Actual data-region pool, excluding the tombstone log and unusable file tail |
+| `geesefs_disk_cache_region_capacity_bytes` | Actual data-region pool, excluding unusable file tail; immutable records use no tombstone partition |
 | `geesefs_disk_cache_region_free_bytes` | Clean reusable region capacity; not free filesystem space |
 | `geesefs_disk_cache_region_used_bytes` | Non-clean reserved region capacity, including unused region tails and obsolete records; not useful live payload bytes |
 | `geesefs_disk_cache_region_reclaims_started_total` | Region-picker callbacks, not completed per-record evictions or reclaimed bytes |
@@ -117,11 +117,11 @@ omitted, not fabricated zero occupancy or a successful Ready observation.
 | `geesefs_disk_cache_spill_drops_total{reason}` | Closed population-refusal reasons; their sum equals `dropped_total` outside concurrent scrape skew |
 
 Spill reasons are `jobs`, `timeout`, `state`, `activity`, `invalid_block`, `copy`,
-`engine_no_space`, `engine_error`, and `unindexed_after_drain`. The last means the
+and `unindexed_after_drain`. The last means the
 key was absent from the advisory index after a successful drain; concurrent
 eviction can also cause it. Index presence is not validated payload delivery.
 At diagnostic level `warn`, `l2_spill_drop` records the actual reason, cumulative
-drop count and current spill/copy/submission/index ownership. It uses the existing
+drop count and current application spill/copy ownership. It uses the existing
 bounded nonblocking logger and warning rate limiter, including background errors
 outside a FUSE trace; no object keys or credentials are logged.
 Nonordinary `l2_read_fallback` warnings include integrity/identity, worker and
@@ -130,10 +130,9 @@ L2 deadlines stay debug-only: a timeout permits source fallback, not a failed
 filesystem reply. Actual reply errors retain their error/warning severity.
 Counters retain all fallback reasons regardless of the configured log level.
 
-Two different fullness limits must remain visible:
+Physical region fullness is observable:
 
 ```promql
-100 * geesefs_disk_cache_index_entries / geesefs_disk_cache_index_entry_limit
 100 * geesefs_disk_cache_region_used_bytes / geesefs_disk_cache_region_capacity_bytes
 ```
 
@@ -151,7 +150,9 @@ filled regions, not just garbage. Do not interpret region fullness as payload
 density, a count of complete cached objects, or evidence that every region has
 already been written. Exact useful payload bytes and distinct-object count remain
 unavailable (`payload_bytes` and `object_count` availability observations are zero).
-The bounded index limits live record slots independently of physical-region reuse.
+Native index occupancy and queued/active submission credits are not exposed by
+the released API. Their former gauges are removed, not reported as zero; nominal
+entries cannot substitute for actual occupancy or a fullness denominator.
 
 Request-correlated debug records include `l2_read_eligibility` and adapter
 decisions without object keys or dynamic metric labels. Use eligibility and
@@ -606,7 +607,7 @@ geesefs_payload_used_bytes / geesefs_payload_limit_bytes
 
 geesefs_read_work_capacity_bytes
 
-geesefs_disk_cache_index_entries / geesefs_disk_cache_index_entry_limit
+geesefs_disk_cache_region_used_bytes / geesefs_disk_cache_region_capacity_bytes
 
 rate(geesefs_read_remote_bytes_total[15m])
 ```
@@ -614,11 +615,11 @@ rate(geesefs_read_remote_bytes_total[15m])
 The clean-byte reuse ratio is undefined when no clean bytes were delivered;
 do not clamp a missing or zero denominator into a measured hit ratio. The payload
 lane ratio describes charged active/dirty/funding owners, not retained clean
-occupancy. Inspect persistent index/region and adapter admission observations
-alongside repeated misses; index presence alone does not establish useful bytes.
+occupancy. Inspect region and adapter admission observations alongside repeated
+misses; advisory hash presence alone does not establish useful bytes.
 Saturated admission or persistent capacity justifies an experiment, not an
 automatic increase: sequential one-pass reads can churn at any size. Distinguish
-active byte admission, persistent submission/index bounds and metadata pressure.
+active byte admission, persistent region capacity and metadata pressure.
 More payload bytes will not correct a metadata entry limit, TTL refresh, backend
 errors, allocator retention or unrelated metadata growth.
 

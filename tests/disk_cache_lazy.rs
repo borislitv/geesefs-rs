@@ -100,7 +100,7 @@ async fn fresh_attachment_reserves_funding_without_constructing_an_unused_engine
     assert_eq!(budgets.data_used_bytes, budgets.disk_cache_funding_bytes);
     assert!(budgets.disk_cache_funding_bytes > 0);
     assert!(
-        !dir.path().join("payload-v1.cache").exists(),
+        !dir.path().join("payload-upstream-v1.cache").exists(),
         "unused fresh L2 must not preallocate media or build engine/index/pools"
     );
     assert_eq!(status.state(), State::Prepared);
@@ -116,7 +116,7 @@ async fn fresh_attachment_reserves_funding_without_constructing_an_unused_engine
     );
     assert_eq!(status.startup().startup.count, 0);
     assert_eq!(status.opened_file_allocated_bytes(), None);
-    assert!(!dir.path().join("payload-v1.cache").exists());
+    assert!(!dir.path().join("payload-upstream-v1.cache").exists());
     assert!(PreparedDiskCache::prepare(dir.path(), 16 * MIB as u64).is_err());
     let node = fs.lookup(1, "selected.rpm").await.unwrap();
     for _ in 0..2 {
@@ -184,7 +184,13 @@ async fn dropping_an_unused_deferred_filesystem_releases_its_preparation_without
     drop(fs);
     assert_eq!(status.state(), State::Closed);
     assert_eq!(status.startup().startup.count, 0);
-    assert!(!fixture.dir.path().join("payload-v1.cache").exists());
+    assert!(
+        !fixture
+            .dir
+            .path()
+            .join("payload-upstream-v1.cache")
+            .exists()
+    );
     assert!(PreparedDiskCache::prepare(fixture.dir.path(), 16 * MIB as u64).is_ok());
 }
 
@@ -199,7 +205,6 @@ async fn existing_inventory_recovers_before_any_new_capacity_victim() {
     fs.drain_disk_cache(DEADLINE).await.unwrap();
     read(&fs, ino, 3).await;
     fs.drain_disk_cache(DEADLINE).await.unwrap();
-    assert!(fs.disk_cache_stats().unwrap().index_entries > 0);
     fs.shutdown().await.unwrap();
     drop(fs);
     let fs = fixture.attach().await;
@@ -263,7 +268,13 @@ async fn preattachment_reads_and_writer_flushes_do_not_start_or_populate_the_def
     assert_eq!(fs.effective_budgets().flush_used_bytes, 0);
     assert_eq!(fs.disk_cache_state(), Some(State::Prepared));
     assert!(fs.disk_cache_stats().is_none());
-    assert!(!fixture.dir.path().join("payload-v1.cache").exists());
+    assert!(
+        !fixture
+            .dir
+            .path()
+            .join("payload-upstream-v1.cache")
+            .exists()
+    );
     fs.shutdown().await.unwrap();
 }
 
@@ -299,7 +310,13 @@ fn startup_is_singleflight_owned_and_does_not_block_required_reads_or_early_clos
         .await
         .unwrap();
         assert_eq!(status.state(), State::Recovering);
-        assert!(!fixture.dir.path().join("payload-v1.cache").exists());
+        assert!(
+            !fixture
+                .dir
+                .path()
+                .join("payload-upstream-v1.cache")
+                .exists()
+        );
         assert_eq!(status.startup().allocation.count, 0);
         assert!(PreparedDiskCache::prepare(fixture.dir.path(), 16 * MIB as u64).is_err());
         let funding = fs.effective_budgets().disk_cache_funding_bytes;
@@ -347,7 +364,7 @@ async fn terminal_startup_bypass_fetches_only_required_bytes_on_a_fresh_interval
     assert!(fs.effective_budgets().disk_cache_funding_bytes > 0);
     // The same real startup failure exercised by the media-ownership test:
     // preparation was successful, but a foreign file now prevents creation.
-    let path = fixture.dir.path().join("payload-v1.cache");
+    let path = fixture.dir.path().join("payload-upstream-v1.cache");
     std::fs::write(&path, b"foreign sentinel").unwrap();
     let ino = fs.lookup(1, "selected.rpm").await.unwrap().ino;
     read(&fs, ino, 0).await;
@@ -384,7 +401,7 @@ async fn deferred_owner_refuses_an_introduced_file_and_existing_owner_never_recr
  {
     let fixture = Fixture::new(2);
     let fs = fixture.attach().await;
-    let path = fixture.dir.path().join("payload-v1.cache");
+    let path = fixture.dir.path().join("payload-upstream-v1.cache");
     std::fs::write(&path, b"foreign sentinel").unwrap();
     let ino = fs.lookup(1, "selected.rpm").await.unwrap().ino;
     for index in 0..3 {

@@ -125,6 +125,16 @@ before the guarded handoff. Separate application-managed cache directories and
 verify actual free space after nginx's reduction. This does not authorize other
 reader/writer changes or close broader compatibility/performance acceptance.
 
+### Read-path correction scope — 2026-11-15
+
+Correct required-only source ranges and terminal-tier fallback planning, retain
+eligible population through bounded metadata contention, and remove redundant
+payload initialization using supported APIs. Preserve budgets, freshness, writer
+durability, both existing checksums, dependency versions and media format. Verify
+integrated regressions and short disposable mounted controls before delivery;
+local decode controls alone do not establish end-to-end performance or close
+the known hardlink and broader compatibility gaps.
+
 ## Target and reference
 
 - Initial target: Linux, S3-compatible storage, and the extended metadata used by

@@ -340,6 +340,46 @@ fn startup_is_singleflight_owned_and_does_not_block_required_reads_or_early_clos
 }
 
 #[tokio::test]
+async fn terminal_startup_bypass_fetches_only_required_bytes_on_a_fresh_interval() {
+    let fixture = Fixture::new(32);
+    let fs = fixture.attach().await;
+    assert_eq!(fs.disk_cache_state(), Some(State::Prepared));
+    assert!(fs.effective_budgets().disk_cache_funding_bytes > 0);
+    // The same real startup failure exercised by the media-ownership test:
+    // preparation was successful, but a foreign file now prevents creation.
+    let path = fixture.dir.path().join("payload-v1.cache");
+    std::fs::write(&path, b"foreign sentinel").unwrap();
+    let ino = fs.lookup(1, "selected.rpm").await.unwrap().ino;
+    read(&fs, ino, 0).await;
+    assert!(fs.drain_disk_cache(DEADLINE).await.is_err());
+    assert_eq!(fs.disk_cache_state(), Some(State::Bypass));
+    assert!(fs.disk_cache_stats().is_none());
+    assert_eq!(std::fs::read(&path).unwrap(), b"foreign sentinel");
+    fixture.store.read_ranges.lock().unwrap().clear();
+
+    // Aligned and well outside the first window, isolating terminal-state
+    // read-ahead from the separate unaligned-prefix defect.
+    let offset = 2 * MIB as u64;
+    assert_eq!(
+        tokio::time::timeout(DEADLINE, fs.read(ino, offset, 37))
+            .await
+            .unwrap()
+            .unwrap()
+            .as_slice(),
+        &[0x53; 37]
+    );
+    assert_eq!(fs.disk_cache_state(), Some(State::Bypass));
+    assert!(fs.disk_cache_stats().is_none());
+    assert_eq!(std::fs::read(&path).unwrap(), b"foreign sentinel");
+    fs.shutdown().await.unwrap();
+    assert_eq!(
+        *fixture.store.read_ranges.lock().unwrap(),
+        [(offset, 37)],
+        "terminal Bypass cannot retain speculative bytes for an independent read"
+    );
+}
+
+#[tokio::test]
 async fn deferred_owner_refuses_an_introduced_file_and_existing_owner_never_recreates_unlinked_media()
  {
     let fixture = Fixture::new(2);

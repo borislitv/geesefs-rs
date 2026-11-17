@@ -5,6 +5,37 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## 2026-11-15: bound source amplification and preserve eligible L2 population
+
+Version 0.1.18 disables speculative source reads after terminal persistent-tier
+failure while retaining lazy initialization and recovery. Required-only unaligned
+reads no longer download an alignment prefix; canonical full-block L2 lookup and
+exact fragment identities remain intact. Pipeline delivery counters consequently
+exclude the removed prefix without changing physical-I/O accounting.
+
+Brief namespace or inode contention previously discarded eligible population after
+a successful source reply. Retry nonblocking qualification within the existing
+cumulative population deadline and existing fill ownership, revalidating namespace
+and generation after waits. Consume source tasks and deliver requested bytes
+before optional population can wait; reuse the fill's existing published owners
+one at a time without a second payload queue. Early replies still do not promise
+persistent publication: complete the fill before draining admitted records.
+Native fixtures exclude only the identified unrelated trash probes, retain
+target-namespace LIST assertions separately from object GET accounting, and check
+cold coverage, independent warm reuse and recovered reads.
+
+Payload decoding uses bounded standard-library reads into spare vector capacity
+instead of first zeroing the payload. Exact length, CRC and trailing-byte checks
+remain mandatory; the Foyer checksum, owned payload copy, dependency versions and
+media format are unchanged. Boundary tests include truncation, short reads,
+interruption, I/O failure and oversized trailing data. Focused regression failures
+and targeted safety-check mutations establish sensitivity separately from broad
+suite results.
+
+These corrections do not establish an end-to-end performance improvement or full
+filesystem acceptance. The hardlink-emulation compatibility gap remains open;
+release-executable verification and sustained performance remain separate gates.
+
 ## 2026-11-15: admit aggregate L2 funding beyond one semaphore request
 
 The 1.5-TB cold-start gate exposed a missing boundary in the index-scaling checks:

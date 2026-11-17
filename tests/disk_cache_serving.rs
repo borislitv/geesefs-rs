@@ -138,6 +138,66 @@ impl Objects {
             .count()
     }
 
+    fn object_requests(&self) -> Vec<Exchange> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, path, _)| {
+                matches!(
+                    path.split('?').next(),
+                    Some("/bucket/prefix/reused.rpm" | "/bucket/prefix/pressure.txt")
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn object_count(&self, method: &str) -> usize {
+        self.object_requests()
+            .iter()
+            .filter(|(actual, _, _)| actual == method)
+            .count()
+    }
+
+    fn relevant_requests(&self) -> Vec<Exchange> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(method, path, _)| {
+                let url = reqwest::Url::parse(&format!("http://fixture{path}")).unwrap();
+                if method == "HEAD"
+                    && matches!(
+                        url.path(),
+                        "/bucket/prefix/.Trash"
+                            | "/bucket/prefix/.Trash/"
+                            | "/bucket/prefix/.Trash-1001"
+                            | "/bucket/prefix/.Trash-1001/"
+                    )
+                {
+                    return false;
+                }
+                if method == "GET" && url.path() == "/bucket/" {
+                    let mut prefixes = url
+                        .query_pairs()
+                        .filter(|(key, _)| key == "prefix")
+                        .map(|(_, value)| value);
+                    let prefix = prefixes.next();
+                    if matches!(
+                        prefix.as_deref(),
+                        Some("prefix/.Trash/" | "prefix/.Trash-1001/")
+                    ) && prefixes.next().is_none()
+                    {
+                        return false;
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect()
+    }
+
     fn assert_cold_coverage(&self, payload_bytes: usize) {
         let requests = self.requests.lock().unwrap();
         for (object, size) in [
@@ -191,6 +251,87 @@ fn metric(fs: &Filesystem, name: &str) -> u64 {
         .unwrap_or_else(|| panic!("missing {name}"))
         .parse()
         .unwrap()
+}
+
+#[tokio::test]
+async fn warm_exchange_assertion_retains_target_lists_but_ignores_known_trash_probes() {
+    let objects = Objects::start(vec![0x42; 16]);
+    let client = reqwest::Client::builder()
+        .timeout(DEADLINE)
+        .build()
+        .unwrap();
+    for name in [".Trash", ".Trash-1001"] {
+        for suffix in ["", "/"] {
+            client
+                .head(format!("{}/bucket/prefix/{name}{suffix}", objects.endpoint))
+                .send()
+                .await
+                .unwrap();
+        }
+        client
+            .get(format!("{}/bucket/", objects.endpoint))
+            .query(&[("delimiter", "/"), ("prefix", &format!("prefix/{name}/"))])
+            .send()
+            .await
+            .unwrap();
+    }
+    let after_read = objects.relevant_requests();
+    assert!(
+        after_read.is_empty(),
+        "only demonstrated unrelated probes are excluded"
+    );
+    client
+        .get(format!("{}/bucket/", objects.endpoint))
+        .query(&[("delimiter", "/"), ("prefix", "prefix/")])
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(
+        objects.relevant_requests(),
+        after_read,
+        "a new target-namespace LIST must fail the warm no-extra-exchange assertion"
+    );
+    assert_eq!(objects.object_count("GET"), 0, "LIST is not an object GET");
+    for prefix in ["prefix/.Trash/child/", "prefix/.Trash-10010/"] {
+        let before = objects.relevant_requests();
+        client
+            .get(format!("{}/bucket/", objects.endpoint))
+            .query(&[("prefix", prefix)])
+            .send()
+            .await
+            .unwrap();
+        assert_ne!(
+            objects.relevant_requests(),
+            before,
+            "not a known probe: {prefix}"
+        );
+    }
+    let before = objects.relevant_requests();
+    client
+        .get(format!("{}/bucket/", objects.endpoint))
+        .query(&[("prefix", "prefix/"), ("prefix", "prefix/.Trash/")])
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(
+        objects.relevant_requests(),
+        before,
+        "ambiguous prefixes must not hide a target LIST"
+    );
+    let after_list = objects.relevant_requests();
+    let response = client
+        .get(format!("{}/bucket/prefix/reused.rpm", objects.endpoint))
+        .header("Range", "bytes=0-15")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.bytes().await.unwrap().as_ref(), &[0x42; 16]);
+    assert_eq!(objects.object_count("GET"), 1);
+    assert_ne!(
+        objects.relevant_requests(),
+        after_list,
+        "extra object GETs remain visible"
+    );
 }
 
 #[test]
@@ -263,11 +404,26 @@ fn native_rsync_reuses_complete_l2_fills_without_extra_s3_requests() {
             .unwrap();
             fs
         });
-        let gets = objects.count("GET");
-        let heads = objects.count("HEAD");
+        let gets = objects.object_count("GET");
+        let heads = objects.object_count("HEAD");
         support::native::mounted(fs.clone(), |mount| {
             assert_eq!(std::fs::read(mount.join("reused.rpm")).unwrap(), payload);
-            let after_read = objects.requests.lock().unwrap().len();
+            runtime.block_on(async {
+                // A FUSE reply publishes source bytes before its optional fill
+                // completes. In this read-only fixture, release of all transient
+                // data owners establishes fill quiescence before draining media.
+                tokio::time::timeout(DEADLINE, async {
+                    while fs.effective_budgets().data_used_bytes
+                        != fs.effective_budgets().disk_cache_funding_bytes
+                    {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                fs.drain_disk_cache(DEADLINE).await.unwrap();
+            });
+            let after_read = objects.relevant_requests();
             let copied = std::process::Command::new("timeout")
                 .args([
                     "--signal=TERM",
@@ -291,9 +447,9 @@ fn native_rsync_reuses_complete_l2_fills_without_extra_s3_requests() {
                 payload
             );
             assert_eq!(
-                objects.requests.lock().unwrap().len(),
+                objects.relevant_requests(),
                 after_read,
-                "warm reads/rsync must not issue GET, HEAD or LIST within TTL"
+                "warm reads/rsync must not issue GET, HEAD or LIST within TTL; only the known unrelated trash probes are excluded"
             );
             if phase == 0 {
                 let mut pressure = std::fs::File::open(mount.join("pressure.txt")).unwrap();
@@ -310,12 +466,12 @@ fn native_rsync_reuses_complete_l2_fills_without_extra_s3_requests() {
                 assert_eq!(total, 48 * MIB);
             } else {
                 assert_eq!(
-                    objects.count("GET"),
+                    objects.object_count("GET"),
                     gets,
                     "recovered mount must read every requested payload byte from L2"
                 );
                 assert_eq!(
-                    objects.count("HEAD") - heads,
+                    objects.object_count("HEAD") - heads,
                     1,
                     "one current-generation HEAD, not one per block"
                 );
@@ -343,7 +499,11 @@ fn native_rsync_reuses_complete_l2_fills_without_extra_s3_requests() {
                                 "geesefs_s3_requests_total{{operation=\"{method}\",transport=\"sdk\"}}"
                             )
                         ),
-                        objects.count(&method.to_uppercase()) as u64,
+                        if method == "get" {
+                            objects.object_count("GET")
+                        } else {
+                            objects.count("HEAD")
+                        } as u64,
                         "execution counters must match requests actually received by the S3 fixture"
                     );
                 }

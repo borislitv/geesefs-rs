@@ -5,6 +5,15 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## v0.1.22: select native region size from capacity
+
+Use the smallest qualified layout that covers the configured capacity with a
+target of 150,000 regions, up to 64 MiB per region. This avoids per-host size
+overrides and limits partition-open work while keeping reclamation fine-grained
+on smaller devices. Small-cache layout and matching existing media are preserved.
+If the previous policy chose a different layout, startup rejects that inventory;
+an operator must perform an [offline transition](disk-cache-operations.md#cache-geometry-and-cold-transition).
+
 ## v0.1.21: 32 MiB native regions for mid-sized payload caches
 
 From 3 decimal TB (`3000000000000` bytes) to below 8 TiB, use 32 MiB regions

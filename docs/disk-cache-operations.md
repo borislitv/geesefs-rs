@@ -72,14 +72,18 @@ and recovery memory separately from the planned allowance.
 
 ## Cache geometry and cold transition
 
-Version 0.1.21 selects the native region size from the configured capacity:
+Version 0.1.22 sizes regions from the configured capacity in bytes. Below
+256 MiB it preserves the 1 MiB layout. Otherwise compute `ceil(capacity / 150000)`
+and choose the smallest supported region at least that large, capped at 64 MiB.
+The cap keeps reclamation granularity bounded even if there are more than
+150,000 regions. Selection does not depend on current free space or occupancy.
 
 | Configured capacity | Native region size | Backing filename |
 | --- | --- | --- |
 | Below 256 MiB | 1 MiB | `payload-upstream-v1.cache` |
-| 256 MiB to below 3 decimal TB (including 2 TiB) | 16 MiB | `payload-upstream-v1.cache` |
-| 3 decimal TB (`3000000000000` bytes) to below 8 TiB | 32 MiB | `payload-upstream-r32-v1.cache` |
-| 8 TiB and above | 64 MiB | `payload-upstream-r64-v1.cache` |
+| 256 MiB through `150000 × 16 MiB` (inclusive) | 16 MiB | `payload-upstream-v1.cache` |
+| Above `150000 × 16 MiB` through `150000 × 32 MiB` (inclusive) | 32 MiB | `payload-upstream-r32-v1.cache` |
+| Above `150000 × 32 MiB` | 64 MiB | `payload-upstream-r64-v1.cache` |
 
 Both 2 TiB + 1 decimal TB (`3199023255552` bytes) and exactly 3 TiB use 32 MiB regions.
 The flags `--disk-cache-dir`, `--disk-cache-max-size` and `--disk-cache-regex`

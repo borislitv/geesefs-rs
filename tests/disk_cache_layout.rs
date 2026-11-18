@@ -31,12 +31,15 @@ fn region_boundaries() {
         (256 * MIB as u64 - 4096, 1),
         (256 * MIB as u64, 16),
         (TWO_TIB, 16),
-        (THREE_TB - 4096, 16),
+        (2_516_582_400_000, 16), // 150,000 16 MiB regions
+        (2_516_582_400_000 + 4096, 32),
         (THREE_TB, 32),
         (THREE_TB + 4096, 32),
         (TARGET, 32),
         (THREE_TIB, 32),
-        (EIGHT_TIB - 4096, 32),
+        (5_033_164_800_000, 32), // 150,000 32 MiB regions
+        (5_033_164_800_000 + 4096, 64),
+        (EIGHT_TIB - 4096, 64),
         (EIGHT_TIB, 64),
         (EIGHT_TIB + 4096, 64),
         (2 * EIGHT_TIB, 64),
@@ -111,7 +114,9 @@ fn only_the_selected_inventory_is_recognized_at_the_same_capacity() {
         (THREE_TB, R32),
         (TARGET, R32),
         (THREE_TIB, R32),
-        (EIGHT_TIB - 4096, R32),
+        (2_516_582_400_000 + 4096, R32),
+        (5_033_164_800_000 + 4096, R64),
+        (EIGHT_TIB - 4096, R64),
         (EIGHT_TIB, R64),
         (TEN_TB, R64),
     ] {

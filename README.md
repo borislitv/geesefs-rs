@@ -73,9 +73,9 @@ comparative performance acceptance.
   and anonymous access. Opaque/rotating/profile/IAM providers explicitly bypass
   persistence rather than sharing data under an inferred principal.
 
-Since v0.1.21, configured capacities from 3 decimal TB up to (but not including)
-8 TiB use 32 MiB native Foyer regions. A 2 TiB cache still uses 16 MiB regions;
-capacities of 8 TiB or more still use 64 MiB regions. Switching between layouts
+Since v0.1.22, native Foyer region size is selected automatically from cache
+capacity. A 2 TiB cache uses 16 MiB regions, 2 TiB + 1 decimal TB uses 32 MiB,
+and 10 decimal TB uses 64 MiB. Switching between layouts
 requires an explicit offline cold transition; see
 [cache geometry and operations](docs/disk-cache-operations.md#cache-geometry-and-cold-transition).
 

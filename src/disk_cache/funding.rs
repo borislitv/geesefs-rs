@@ -14,6 +14,13 @@ pub(super) struct Layout {
     data_file: &'static str,
 }
 impl Layout {
+    // Bound partition-open work without choosing coarser regions than necessary.
+    // This is a sizing target, not an index limit; the 64 MiB layout is the ceiling.
+    const TARGET_REGIONS: u64 = 150_000;
+    const R16: Self = Self {
+        region_bytes: 16 << 20,
+        data_file: "payload-upstream-v1.cache",
+    };
     const R32: Self = Self {
         region_bytes: 32 << 20,
         data_file: "payload-upstream-r32-v1.cache",
@@ -24,21 +31,17 @@ impl Layout {
     };
 
     pub(super) fn for_capacity(capacity: u64) -> Self {
-        if capacity >= 8 << 40 {
-            return Self::R64;
+        if capacity < 256 << 20 {
+            return Self {
+                region_bytes: 1 << 20,
+                data_file: Self::R16.data_file,
+            };
         }
-        // This threshold is decimal TB, not TiB.
-        if capacity >= 3_000_000_000_000 {
-            return Self::R32;
-        }
-        Self {
-            region_bytes: if capacity < 256 << 20 {
-                1 << 20
-            } else {
-                16 << 20
-            },
-            data_file: "payload-upstream-v1.cache",
-        }
+        let minimum = capacity.div_ceil(Self::TARGET_REGIONS);
+        [Self::R16, Self::R32]
+            .into_iter()
+            .find(|layout| layout.region_bytes as u64 >= minimum)
+            .unwrap_or(Self::R64)
     }
 }
 

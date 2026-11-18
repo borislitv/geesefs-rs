@@ -5,6 +5,44 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## v0.1.23: keep validated L2 reads available during slow population
+
+A background spill waits for Foyer's flush and reclaim work across the store.
+Previously a five-second timeout switched the entire adapter to bypass, even
+when existing records were readable. Allow 30 seconds for this observation and
+count a timeout without disabling reads. Retain the spill slot until the original
+wait finishes or close takes over; population resumes as slots become available.
+Required-read and native-close deadlines, validation and media layout are unchanged.
+
+## v0.1.22: select native region size from capacity
+
+Use the smallest qualified layout that covers the configured capacity with a
+target of 150,000 regions, up to 64 MiB per region. This avoids per-host size
+overrides and limits partition-open work while keeping reclamation fine-grained
+on smaller devices. Small-cache layout and matching existing media are preserved.
+If the previous policy chose a different layout, startup rejects that inventory;
+an operator must perform an [offline transition](disk-cache-operations.md#cache-geometry-and-cold-transition).
+
+## v0.1.21: 32 MiB native regions for mid-sized payload caches
+
+From 3 decimal TB (`3000000000000` bytes) to below 8 TiB, use 32 MiB regions
+instead of 16 MiB to roughly halve the region count at a fixed capacity, at the cost of
+coarser reclamation. This includes both 2 TiB + 1 TB and 3 TiB; 2 TiB still uses
+16 MiB. The other tiers, capacity limits, record limit, and reinsertion policy
+are unchanged. The new filename requires an explicit
+[offline cold transition](disk-cache-operations.md#cache-geometry-and-cold-transition)
+when moving to or from this layout; startup does not reset existing media.
+
+## v0.1.20: larger native regions for large payload caches
+
+At configured capacities of 8 TiB or more, use 64 MiB native regions to reduce
+the number of regions. Smaller caches retain legacy geometry, including 16 MiB
+regions at 1.5 TB. The three L2 flags, 128 KiB payload record limit, and exact
+crates.io Foyer 0.22.6 with hot-record reinsertion remain unchanged. The distinct
+large-region media requires an [offline cold transition](disk-cache-operations.md#cache-geometry-and-cold-transition)
+when switching layouts. Reclamation is coarser; allocated file length may
+include an unused internal tail.
+
 ## 2026-11-17: use the standard Foyer library and native index
 
 Version 0.1.19 replaces the downstream fork with exact crates.io Foyer 0.22.6.

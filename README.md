@@ -73,8 +73,11 @@ comparative performance acceptance.
   and anonymous access. Opaque/rotating/profile/IAM providers explicitly bypass
   persistence rather than sharing data under an inferred principal.
 
-The standard-Foyer transition uses a new media filename and requires an explicitly
-authorized cold cache; see [operation](docs/disk-cache-operations.md).
+Since v0.1.22, native Foyer region size is selected automatically from cache
+capacity. A 2 TiB cache uses 16 MiB regions, 2 TiB + 1 decimal TB uses 32 MiB,
+and 10 decimal TB uses 64 MiB. Switching between layouts
+requires an explicit offline cold transition; see
+[cache geometry and operations](docs/disk-cache-operations.md#cache-geometry-and-cold-transition).
 
 See [design](docs/disk-cache-design.md), [verification](docs/testing.md)
 and [ownership](docs/architecture.md). Local regression/native checks are distinct

@@ -8,6 +8,13 @@ every matching file or require completing a large object. Without an eligible
 funded L2, reads fetch only their requested bytes. Population remains best-effort
 within the existing byte/job budgets; inspect copy/enqueue drops, hits and writes.
 
+In v0.1.23 a background spill exceeding 30 seconds increments
+`geesefs_disk_cache_spill_errors_total` without switching a ready L2 to bypass.
+Check `geesefs_disk_cache_active_spill_jobs` and validated L2 delivery separately:
+population can be stalled while old records still serve reads. A slot becomes
+available when Foyer's existing drain completes. This change requires no media
+reset and does not bring an older running process out of bypass in place.
+
 ## Mirror payload selection
 
 `--disk-cache-regex` matches the UTF-8 mount-relative **path**, with a leading `/`
@@ -70,13 +77,38 @@ deducted from the data lane within `--memory-limit`; insufficient funding reject
 configuration rather than silently lowering an index cap. Measure native index
 and recovery memory separately from the planned allowance.
 
-Capacity must be a multiple of 4096 bytes. Existing media cannot be resized by
-changing the flag: Foyer's capacity-dependent layout must match the existing
-file. Use an explicitly authorized cold replacement or a separately qualified
-migration. Keep the cache directory outside another application's managed cache
-tree; a cache loader or cleaner may delete files it does not recognize.
+## Cache geometry and cold transition
 
-Version 0.1.19 uses `payload-upstream-v1.cache`. The previous fork's
-`payload-v1.cache` is incompatible and rejected without modification. A cold
-transition requires an explicit operator decision and a stopped previous owner.
-Do not reset media automatically on startup or after a cache error.
+Version 0.1.22 sizes regions from the configured capacity in bytes. Below
+256 MiB it preserves the 1 MiB layout. Otherwise compute `ceil(capacity / 150000)`
+and choose the smallest supported region at least that large, capped at 64 MiB.
+The cap keeps reclamation granularity bounded even if there are more than
+150,000 regions. Selection does not depend on current free space or occupancy.
+
+| Configured capacity | Native region size | Backing filename |
+| --- | --- | --- |
+| Below 256 MiB | 1 MiB | `payload-upstream-v1.cache` |
+| 256 MiB through `150000 × 16 MiB` (inclusive) | 16 MiB | `payload-upstream-v1.cache` |
+| Above `150000 × 16 MiB` through `150000 × 32 MiB` (inclusive) | 32 MiB | `payload-upstream-r32-v1.cache` |
+| Above `150000 × 32 MiB` | 64 MiB | `payload-upstream-r64-v1.cache` |
+
+Both 2 TiB + 1 decimal TB (`3199023255552` bytes) and exactly 3 TiB use 32 MiB regions.
+The flags `--disk-cache-dir`, `--disk-cache-max-size` and `--disk-cache-regex`
+are unchanged. Capacity is still page-aligned (a multiple of 4096 bytes) and
+limited to 8 MiB–16 TiB. Payload records are still at most 128 KiB. The engine
+remains exact crates.io Foyer 0.22.6 with hot-record reinsertion enabled. Only whole regions are usable:
+any partial region at the end is an unused internal tail in the allocated file.
+Larger regions make reclamation coarser: each victim covers more capacity and
+can affect more records at once.
+
+The legacy, 32 MiB and 64 MiB native layouts are mutually incompatible, and the
+former fork's `payload-v1.cache` is incompatible with all of them. Changing capacity
+does not resize existing media. Reuse requires the matching layout and capacity.
+For an explicitly authorized cold transition, stop the current cache owner,
+confirm no process still holds the cache, and verify the directory and media
+belong to the expected service account before moving any inventory. Start with
+an empty private cache directory on a local filesystem, outside the mount and
+other applications' managed cache trees. Preserve the old directory separately
+if rollback is needed. Do not rename one layout's file to the other's basename.
+Startup rejects incompatible inventory without modifying it; there is no
+automatic reset on startup or after a cache error.

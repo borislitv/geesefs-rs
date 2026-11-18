@@ -8,6 +8,43 @@ pub(crate) const fn rounded(n: usize) -> usize {
     n.div_ceil(PAGE) * PAGE
 }
 
+// Region boundaries are part of Foyer's on-disk layout, not just a tuning knob.
+pub(super) struct Layout {
+    region_bytes: usize,
+    data_file: &'static str,
+}
+impl Layout {
+    // Bound partition-open work without choosing coarser regions than necessary.
+    // This is a sizing target, not an index limit; the 64 MiB layout is the ceiling.
+    const TARGET_REGIONS: u64 = 150_000;
+    const R16: Self = Self {
+        region_bytes: 16 << 20,
+        data_file: "payload-upstream-v1.cache",
+    };
+    const R32: Self = Self {
+        region_bytes: 32 << 20,
+        data_file: "payload-upstream-r32-v1.cache",
+    };
+    const R64: Self = Self {
+        region_bytes: 64 << 20,
+        data_file: "payload-upstream-r64-v1.cache",
+    };
+
+    pub(super) fn for_capacity(capacity: u64) -> Self {
+        if capacity < 256 << 20 {
+            return Self {
+                region_bytes: 1 << 20,
+                data_file: Self::R16.data_file,
+            };
+        }
+        let minimum = capacity.div_ceil(Self::TARGET_REGIONS);
+        [Self::R16, Self::R32]
+            .into_iter()
+            .find(|layout| layout.region_bytes as u64 >= minimum)
+            .unwrap_or(Self::R64)
+    }
+}
+
 /// Required deduction from active data capacity, not an RSS/cgroup guarantee.
 /// Retains the conservative nominal allowance for the first upstream comparison.
 /// Native index/recovery allocations are not capped by this reservation.
@@ -15,6 +52,7 @@ pub(crate) const fn rounded(n: usize) -> usize {
 pub struct Funding {
     pub capacity: usize,
     pub region_bytes: usize,
+    pub(super) data_file: &'static str,
     pub nominal_entries: usize,
     pub recent_entries: usize,
     pub recovery_bytes: usize,
@@ -28,6 +66,12 @@ pub struct Funding {
 }
 impl Funding {
     pub fn derive(capacity: u64, available_payload_bytes: usize) -> Result<Self> {
+        let funding = Self::for_layout(capacity, Layout::for_capacity(capacity))?;
+        funding.check_limit(available_payload_bytes)?;
+        Ok(funding)
+    }
+
+    pub(super) fn for_layout(capacity: u64, layout: Layout) -> Result<Self> {
         let capacity = usize::try_from(capacity)
             .map_err(|_| Error::Config("disk capacity exceeds address space".into()))?;
         if capacity < 8 * 1024 * 1024
@@ -38,11 +82,10 @@ impl Funding {
                 "disk capacity must be page-aligned, between 8 MiB and 16 TiB".into(),
             ));
         }
-        let region_bytes = if capacity >= 256 * 1024 * 1024 {
-            16 * 1024 * 1024
-        } else {
-            1024 * 1024
-        };
+        let Layout {
+            region_bytes,
+            data_file,
+        } = layout;
         let regions = capacity / region_bytes;
         // This plans full-size records; small records can produce more native
         // index entries. There is no application-enforced index slot ceiling.
@@ -60,15 +103,10 @@ impl Funding {
         let submission_bytes = JOBS * RECORD_CAP;
         let required_bytes =
             fixed_bytes + metadata_bytes + copy_bytes + read_work_bytes + submission_bytes;
-        if required_bytes > available_payload_bytes {
-            return Err(Error::Budget {
-                requested: required_bytes,
-                limit: available_payload_bytes,
-            });
-        }
         Ok(Self {
             capacity,
             region_bytes,
+            data_file,
             nominal_entries,
             recent_entries,
             recovery_bytes,
@@ -80,5 +118,15 @@ impl Funding {
             submission_bytes,
             required_bytes,
         })
+    }
+
+    pub(super) fn check_limit(&self, available_payload_bytes: usize) -> Result<()> {
+        if self.required_bytes > available_payload_bytes {
+            return Err(Error::Budget {
+                requested: self.required_bytes,
+                limit: available_payload_bytes,
+            });
+        }
+        Ok(())
     }
 }

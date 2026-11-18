@@ -12,7 +12,10 @@ The adapter uses unmodified crates.io Foyer 0.22.6 with reinsertion enabled.
 restart, plus small records exceeding the nominal full-record count. Recovery
 misses are permitted; a returned value must match its full identity and bytes.
 `disk_cache_recovery` additionally constructs zero-clean-region media from a real
-completed region and verifies bounded population, bypass and worker/device release.
+completed region and verifies that recovered records stay readable after a spill
+timeout and that close still releases workers and device ownership. A gated
+flush test checks that late waits retain their bounded spill slots and that new
+population resumes on the same open store after progress.
 Removing runtime shutdown makes the device-owner regression fail for the expected
 retained-owner assertion. Cancelled startup/read/close observers still retain
 their actual operation's directory, budget and output owners.

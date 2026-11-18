@@ -115,6 +115,7 @@ omitted, not fabricated zero occupancy or a successful Ready observation.
 | `geesefs_disk_cache_io_read_bytes_total` / `geesefs_disk_cache_io_write_bytes_total` | Cumulative engine I/O, including record overhead; reset on restart, can exceed capacity after reuse |
 | `geesefs_disk_cache_dropped_total` / `geesefs_disk_cache_errors_total` | Best-effort population refusals versus adapter/storage/decode errors; drops are not capacity evictions |
 | `geesefs_disk_cache_spill_drops_total{reason}` | Closed population-refusal reasons; their sum equals `dropped_total` outside concurrent scrape skew |
+| `geesefs_disk_cache_spill_errors_total` | Optional population drain observations that timed out; also counted in `errors_total` and `spill_drops_total{reason="timeout"}`. The timeout does not disable reads or prove the record was lost. |
 
 Spill reasons are `jobs`, `timeout`, `state`, `activity`, `invalid_block`, `copy`,
 and `unindexed_after_drain`. The last means the

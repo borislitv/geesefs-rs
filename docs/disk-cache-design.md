@@ -102,12 +102,12 @@ resource settings. No general configuration file or payload TTL is added.
 
 Persistent keys contain a format version, backend namespace, exact object key,
 opaque ETag, object size and covered offset/length. Process-local inode numbers
-and hashed read generations are not persistent identities. Native media uses
-`payload-upstream-v1.cache`; old-format inventory is rejected without deletion.
-The transition needs an explicitly authorized cold cache. Validate identity,
-length and integrity before returning a
-record. Short EOF/partial coverage is explicit; a missing span is never a zero-filled
-hit. No source GET is extended solely to complete a cache record.
+and hashed read generations are not persistent identities. The backing filename
+separates the larger-region [native media layouts](disk-cache-operations.md#cache-geometry-and-cold-transition)
+from legacy media and from each other.
+Validate identity, length and integrity before returning a record. Short EOF/partial
+coverage is explicit; a missing span is never a zero-filled hit. No source GET is
+extended solely to complete a cache record.
 
 Payload has no inactivity expiry. Metadata TTL, permissions, rename/delete and
 local generation rules remain authoritative. ETag/size changes invalidate old
@@ -128,12 +128,17 @@ independently; removing retained payload does not prove a measured memory win.
 Bounded approximate-recency/second-chance region selection and hot-record
 reinsertion use public library hooks. Some hits can be lost during best-effort
 recovery after reinsertion; returned bytes must still validate. Region reclamation
-is not a per-record LRU or a count of complete cached files. If recovered media has
-no clean regions, optional population has a five-second deadline and the adapter
-enters bypass. Filesystem reads retain their ordinary source fallback.
+is not a per-record LRU or a count of complete cached files. An optional enqueue
+waits on the store's flush and reclaim work, not a per-record write receipt. If
+that wait lasts 30 seconds, the adapter reports a spill timeout and keeps serving
+validated hits. Each late wait keeps its original spill permit: more fills can
+be dropped under pressure, but do not queue unbounded native waits. Progress
+releases the permit without reopening the store. A persistent shortage of clean
+regions does not imply that existing records are unreadable.
 
-Foyer receives a Handle to a dedicated Tokio runtime. Close stops admission, joins
-application work and bounds the native drain wait, then shuts down that runtime.
+Foyer receives a Handle to a dedicated Tokio runtime. Close stops admission and
+cancels optional drain observers, joins application work, then gives native close
+its own five-second drain budget before shutting down that runtime.
 Device, directory lock and funding owners survive actual blocking I/O, including
 cancelled observers. A caller timeout does not release a live operation's owners.
 

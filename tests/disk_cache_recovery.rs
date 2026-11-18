@@ -71,7 +71,7 @@ async fn recovered_zero_clean_regions_bound_population_and_shutdown() {
     let gate = support::EngineGate::new();
     let cache = support::gated(dir.path(), &resources, gate.clone()).await;
     assert_eq!(cache.stats().regions.clean, 0);
-    let output = Budget::new(3).unwrap();
+    let output = Budget::new(9).unwrap();
     assert_eq!(
         cache
             .read_block(&key(0, 3), &output)
@@ -92,23 +92,28 @@ async fn recovered_zero_clean_regions_bound_population_and_shutdown() {
     .await
     .unwrap();
     tokio::time::pause();
-    tokio::time::advance(std::time::Duration::from_secs(6)).await;
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
     tokio::time::resume();
     tokio::time::timeout(DEADLINE, async {
-        while cache.status().state() != State::Bypass {
+        while cache.stats().spill_errors == 0 {
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
-    assert!(cache.stats().spill_errors > 0);
-    assert!(cache.read_block(&key(3, 3), &output).await.is_none());
-    assert_eq!(
-        cache.try_demote(key(6, 3), block(b"src")),
-        Demotion::Dropped
-    );
+    let after_timeout = cache.stats();
+    let recovered = cache.read_block(&key(0, 3), &output).await;
+    let pending = cache.read_block(&key(3, 3), &output).await;
+    let absent = cache.read_block(&key(6, 3), &output).await;
     cache.close(DEADLINE).await.unwrap();
     drop(cache);
+    assert_eq!(after_timeout.state, State::Ready);
+    assert_eq!(after_timeout.active_spill_jobs, 1);
+    assert_eq!(recovered.unwrap().as_slice(), b"old");
+    if let Some(pending) = pending {
+        assert_eq!(pending.as_slice(), b"new");
+    }
+    assert!(absent.is_none());
     assert!(
         gate.device_released(),
         "stalled native workers retained the device"

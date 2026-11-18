@@ -14,14 +14,22 @@ pub(super) struct Layout {
     data_file: &'static str,
 }
 impl Layout {
-    pub(super) const R64: Self = Self {
+    const R32: Self = Self {
+        region_bytes: 32 << 20,
+        data_file: "payload-upstream-r32-v1.cache",
+    };
+    const R64: Self = Self {
         region_bytes: 64 << 20,
         data_file: "payload-upstream-r64-v1.cache",
     };
 
-    fn for_capacity(capacity: u64) -> Self {
+    pub(super) fn for_capacity(capacity: u64) -> Self {
         if capacity >= 8 << 40 {
             return Self::R64;
+        }
+        // This threshold is decimal TB, not TiB.
+        if capacity >= 3_000_000_000_000 {
+            return Self::R32;
         }
         Self {
             region_bytes: if capacity < 256 << 20 {

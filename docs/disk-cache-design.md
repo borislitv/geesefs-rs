@@ -103,7 +103,8 @@ resource settings. No general configuration file or payload TTL is added.
 Persistent keys contain a format version, backend namespace, exact object key,
 opaque ETag, object size and covered offset/length. Process-local inode numbers
 and hashed read generations are not persistent identities. The backing filename
-distinguishes the two [native media layouts](disk-cache-operations.md#cache-geometry-and-cold-transition).
+separates the larger-region [native media layouts](disk-cache-operations.md#cache-geometry-and-cold-transition)
+from legacy media and from each other.
 Validate identity, length and integrity before returning a record. Short EOF/partial
 coverage is explicit; a missing span is never a zero-filled hit. No source GET is
 extended solely to complete a cache record.

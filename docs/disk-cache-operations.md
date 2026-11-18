@@ -72,24 +72,26 @@ and recovery memory separately from the planned allowance.
 
 ## Cache geometry and cold transition
 
-Version 0.1.20 selects the native region size from the configured capacity:
+Version 0.1.21 selects the native region size from the configured capacity:
 
 | Configured capacity | Native region size | Backing filename |
 | --- | --- | --- |
 | Below 256 MiB | 1 MiB | `payload-upstream-v1.cache` |
-| 256 MiB to below 8 TiB (including 1.5 TB) | 16 MiB | `payload-upstream-v1.cache` |
+| 256 MiB to below 3 decimal TB (including 2 TiB) | 16 MiB | `payload-upstream-v1.cache` |
+| 3 decimal TB (`3000000000000` bytes) to below 8 TiB | 32 MiB | `payload-upstream-r32-v1.cache` |
 | 8 TiB and above | 64 MiB | `payload-upstream-r64-v1.cache` |
 
+Both 2 TiB + 1 decimal TB (`3199023255552` bytes) and exactly 3 TiB use 32 MiB regions.
 The flags `--disk-cache-dir`, `--disk-cache-max-size` and `--disk-cache-regex`
-are unchanged. Capacity is still page-aligned (a multiple of 4096 bytes), and
-payload records are still at most 128 KiB. The engine remains exact crates.io
-Foyer 0.22.6 with hot-record reinsertion enabled. Only whole regions are usable:
+are unchanged. Capacity is still page-aligned (a multiple of 4096 bytes) and
+limited to 8 MiB–16 TiB. Payload records are still at most 128 KiB. The engine
+remains exact crates.io Foyer 0.22.6 with hot-record reinsertion enabled. Only whole regions are usable:
 any partial region at the end is an unused internal tail in the allocated file.
 Larger regions make reclamation coarser: each victim covers more capacity and
 can affect more records at once.
 
-The v1 and 64 MiB native layouts are incompatible in both directions, and the
-former fork's `payload-v1.cache` is incompatible with either. Changing capacity
+The legacy, 32 MiB and 64 MiB native layouts are mutually incompatible, and the
+former fork's `payload-v1.cache` is incompatible with all of them. Changing capacity
 does not resize existing media. Reuse requires the matching layout and capacity.
 For an explicitly authorized cold transition, stop the current cache owner,
 confirm no process still holds the cache, and verify the directory and media

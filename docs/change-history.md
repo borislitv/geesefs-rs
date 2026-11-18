@@ -5,6 +5,16 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## v0.1.21: 32 MiB native regions for mid-sized payload caches
+
+From 3 decimal TB (`3000000000000` bytes) to below 8 TiB, use 32 MiB regions
+instead of 16 MiB to roughly halve the region count at a fixed capacity, at the cost of
+coarser reclamation. This includes both 2 TiB + 1 TB and 3 TiB; 2 TiB still uses
+16 MiB. The other tiers, capacity limits, record limit, and reinsertion policy
+are unchanged. The new filename requires an explicit
+[offline cold transition](disk-cache-operations.md#cache-geometry-and-cold-transition)
+when moving to or from this layout; startup does not reset existing media.
+
 ## v0.1.20: larger native regions for large payload caches
 
 At configured capacities of 8 TiB or more, use 64 MiB native regions to reduce

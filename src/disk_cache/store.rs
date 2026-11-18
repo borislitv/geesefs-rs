@@ -210,10 +210,11 @@ impl PreparedDiskCache {
         Self::prepare_with_funding(directory, Funding::derive(capacity, usize::MAX / 4)?)
     }
 
-    /// Exercise the real 64 MiB layout without a multi-TiB device.
+    /// Exercise the configured layout without allocating a multi-TiB device.
     #[cfg(test)]
-    pub fn prepare_r64_fixture(directory: &Path) -> Result<Self> {
-        let funding = Funding::for_layout(256 << 20, super::funding::Layout::R64)?;
+    pub fn prepare_layout_fixture(directory: &Path, configured_capacity: u64) -> Result<Self> {
+        let layout = super::funding::Layout::for_capacity(configured_capacity);
+        let funding = Funding::for_layout(256 << 20, layout)?;
         Self::prepare_with_funding(directory, funding)
     }
 

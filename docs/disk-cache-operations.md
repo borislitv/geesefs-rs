@@ -8,6 +8,13 @@ every matching file or require completing a large object. Without an eligible
 funded L2, reads fetch only their requested bytes. Population remains best-effort
 within the existing byte/job budgets; inspect copy/enqueue drops, hits and writes.
 
+In v0.1.23 a background spill exceeding 30 seconds increments
+`geesefs_disk_cache_spill_errors_total` without switching a ready L2 to bypass.
+Check `geesefs_disk_cache_active_spill_jobs` and validated L2 delivery separately:
+population can be stalled while old records still serve reads. A slot becomes
+available when Foyer's existing drain completes. This change requires no media
+reset and does not bring an older running process out of bypass in place.
+
 ## Mirror payload selection
 
 `--disk-cache-regex` matches the UTF-8 mount-relative **path**, with a leading `/`

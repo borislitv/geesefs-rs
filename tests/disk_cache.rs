@@ -812,58 +812,79 @@ async fn cancelled_read_and_close_keep_admission_and_lock_until_real_io_finishes
 }
 
 #[tokio::test]
-async fn stalled_population_enters_bypass_without_returning_an_unpublished_record() {
+async fn slow_population_preserves_hits_and_resumes_without_reopening() {
     let dir = support::directory();
     let resources = Budget::new(32 * MIB).unwrap();
     let gate = support::EngineGate::new();
     let cache = support::gated(dir.path(), &resources, gate.clone()).await;
-    gate.hold_writes();
     assert_eq!(
-        cache.try_demote(key(0, 3), block(b"abc")),
+        cache.try_demote(key(0, 3), block(b"old")),
         Demotion::Admitted
     );
-    tokio::time::timeout(DEADLINE, gate.entered.acquire())
+    cache.drain(DEADLINE).await.unwrap();
+    gate.hold_writes();
+    let slots = cache.funding().spill_jobs;
+    for index in 1..=slots {
+        assert_eq!(
+            cache.try_demote(key(3 * index as u64, 3), block(b"mid")),
+            Demotion::Admitted
+        );
+    }
+    tokio::time::timeout(DEADLINE, gate.entered.acquire_many(slots as u32))
         .await
         .unwrap()
         .unwrap()
         .forget();
     tokio::time::pause();
-    tokio::time::advance(std::time::Duration::from_secs(6)).await;
+    tokio::time::advance(std::time::Duration::from_secs(29)).await;
+    tokio::task::yield_now().await;
+    let before_deadline = cache.stats();
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
     tokio::time::resume();
     tokio::time::timeout(DEADLINE, async {
-        while cache.status().state() != State::Bypass {
+        while cache.stats().spill_errors < slots as u64 {
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
-    assert_eq!(cache.status().state(), State::Bypass);
-    assert_eq!(
-        (
-            cache.stats().admitted_demotions,
-            cache.stats().engine_offered_demotions
-        ),
-        (1, 1)
-    );
-    assert_eq!(
-        (
-            cache.stats().spill_operations.count,
-            cache.stats().spill_errors
-        ),
-        (1, 1)
-    );
-    assert!(
-        cache
-            .read_block(&key(0, 3), &Budget::new(3).unwrap())
-            .await
-            .is_none()
-    );
-    assert_eq!(
-        cache.try_demote(key(3, 3), block(b"def")),
-        Demotion::Dropped
-    );
+    let output = Budget::new(6).unwrap();
+    let old_hit = cache.read_block(&key(0, 3), &output).await;
+    let next_key = key(3 * (slots as u64 + 1), 3);
+    let extra = cache.try_demote(next_key.clone(), block(b"new"));
+    let stalled = cache.stats();
     gate.release_writes();
+    cache.drain(DEADLINE).await.unwrap();
+    let next = cache.try_demote(next_key.clone(), block(b"new"));
+    cache.drain(DEADLINE).await.unwrap();
+    let new_hit = cache.read_block(&next_key, &output).await;
     cache.close(DEADLINE).await.unwrap();
+
+    assert_eq!(
+        stalled.state,
+        State::Ready,
+        "a slow spill disabled L2 reads"
+    );
+    assert_eq!(
+        before_deadline.spill_errors, 0,
+        "still within the spill grace period"
+    );
+    assert_eq!(stalled.spill_errors, slots as u64);
+    assert_eq!(stalled.errors, slots as u64);
+    assert_eq!(stalled.spill_operations.count, 1 + slots as u64);
+    assert_eq!(
+        stalled.active_spill_jobs, slots,
+        "native waits still own their slots"
+    );
+    assert_eq!(extra, Demotion::Dropped);
+    assert_eq!(stalled.spill_drops[disk_cache::SpillDrop::Jobs as usize], 1);
+    assert_eq!(
+        stalled.spill_drops[disk_cache::SpillDrop::Timeout as usize],
+        slots as u64
+    );
+    assert_eq!(old_hit.unwrap().as_slice(), b"old");
+    assert_eq!(next, Demotion::Admitted);
+    assert_eq!(new_hit.unwrap().as_slice(), b"new");
 }
 
 #[tokio::test]

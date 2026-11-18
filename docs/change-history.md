@@ -5,6 +5,15 @@ and comparative performance remain **UNACCEPTED**. Detailed journals, failures,
 source/binary manifests and pre-cleanup documents stay in ignored evidence;
 measurement pages retain their original tables and source scopes.
 
+## v0.1.23: keep validated L2 reads available during slow population
+
+A background spill waits for Foyer's flush and reclaim work across the store.
+Previously a five-second timeout switched the entire adapter to bypass, even
+when existing records were readable. Allow 30 seconds for this observation and
+count a timeout without disabling reads. Retain the spill slot until the original
+wait finishes or close takes over; population resumes as slots become available.
+Required-read and native-close deadlines, validation and media layout are unchanged.
+
 ## v0.1.22: select native region size from capacity
 
 Use the smallest qualified layout that covers the configured capacity with a

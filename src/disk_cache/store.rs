@@ -33,10 +33,12 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock, Semaphore};
+use tokio_util::sync::CancellationToken;
 
 const LOCK_FILE: &str = ".lock";
 const OPEN_DEADLINE: Duration = Duration::from_secs(120);
-const POPULATION_DEADLINE: Duration = Duration::from_secs(5);
+const SPILL_PROGRESS_DEADLINE: Duration = Duration::from_secs(30);
+const CLOSE_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 /// Conservative ownership for an existing fill task's admission wait. Charged
 /// from its window, before any DiskKey exists; retained through actual I/O.
 pub const READ_WAIT_BYTES: usize = super::funding::PAGE;
@@ -575,6 +577,7 @@ struct Inner {
     read_jobs: Arc<Semaphore>,
     queued_reads: AtomicU64,
     activity: Arc<RwLock<()>>,
+    stop_spill_observers: CancellationToken,
     close: Mutex<Option<Close>>,
     status: DiskCacheStatus,
     engine_runtime: Mutex<Option<EngineRuntime>>,
@@ -740,16 +743,40 @@ impl Inner {
         self.errors.fetch_add(1, Ordering::Relaxed);
         self.status.set(State::Bypass);
     }
+    async fn observe_spill(&self, key: &DiskKey, started: Instant) {
+        // Foyer waits for the engine's flushers and reclaimer, not just this key.
+        let wait = self.backend.wait();
+        tokio::pin!(wait);
+        if tokio::time::timeout(SPILL_PROGRESS_DEADLINE, wait.as_mut())
+            .await
+            .is_err()
+        {
+            self.drop_spill(SpillDrop::Timeout);
+            self.errors.fetch_add(1, Ordering::Relaxed);
+            self.spill_errors.fetch_add(1, Ordering::Relaxed);
+            self.spill_operations.record(started);
+            // Keep the job permit and the original fence. Releasing the permit
+            // on timeout would queue new native waiters behind a stalled flusher.
+            wait.await;
+        } else {
+            if !self.backend.may_contains(key) {
+                self.drop_spill(SpillDrop::UnindexedAfterDrain);
+            }
+            self.spill_operations.record(started);
+        }
+    }
     fn begin_close(this: &Arc<Self>) -> Close {
         let mut close = this.close.lock().unwrap();
         if let Some(close) = &*close {
             return close.clone();
         }
         this.status.set(State::Closing);
+        // Native close takes over the drain after every admitted enqueue has run.
+        this.stop_spill_observers.cancel();
         let inner = this.clone();
         let task = this.runtime.spawn(async move {
             let _exclusive = inner.activity.clone().write_owned().await;
-            let drained = tokio::time::timeout(POPULATION_DEADLINE, inner.factory.close()).await;
+            let drained = tokio::time::timeout(CLOSE_DRAIN_DEADLINE, inner.factory.close()).await;
             if !matches!(drained, Ok(Ok(()))) {
                 inner.errors.fetch_add(1, Ordering::Relaxed);
             }
@@ -907,6 +934,7 @@ impl DiskCache {
             read_jobs: Arc::new(Semaphore::new(JOBS)),
             queued_reads: AtomicU64::new(0),
             activity: Arc::new(RwLock::new(())),
+            stop_spill_observers: CancellationToken::new(),
             close: Mutex::new(None),
             status,
             engine_runtime: Mutex::new(Some(engine_runtime)),
@@ -1043,17 +1071,10 @@ impl DiskCache {
                     .fetch_add(1, Ordering::Relaxed);
                 inner.backend.enqueue(entry.piece(), true);
                 drop(entry);
-                if tokio::time::timeout(POPULATION_DEADLINE, inner.backend.wait())
-                    .await
-                    .is_err()
-                {
-                    inner.drop_spill(SpillDrop::Timeout);
-                    inner.spill_errors.fetch_add(1, Ordering::Relaxed);
-                    inner.fail();
-                } else if !inner.backend.may_contains(&key) {
-                    inner.drop_spill(SpillDrop::UnindexedAfterDrain);
-                }
-                inner.spill_operations.record(started);
+                let _ = inner
+                    .stop_spill_observers
+                    .run_until_cancelled(inner.observe_spill(&key, started))
+                    .await;
             });
             Ok(Demotion::Admitted)
         })();
